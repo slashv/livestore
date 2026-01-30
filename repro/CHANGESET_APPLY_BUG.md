@@ -11,6 +11,12 @@ Summary:
   - packages/@livestore/common/src/sync/ClientSessionSyncProcessor.ts
 - The current binding lives in packages/@livestore/wa-sqlite/src/sqlite-api.js and uses cwrap with `nnnnnn:n`.
 
+## Scope note (important)
+
+- The failing `changeset_apply` path is not unique to `clientDocument`. It is the same session changeset apply used for any SQLite-backed state (including `State.SQLite.table`) when a rebase rollback applies inverted changesets.
+- `Schema.Record`/hash-map payloads are not the root cause. They make conflicts more likely by repeatedly updating the same JSON row, which increases the chance that rebase will invoke `changeset_apply` with a conflict callback.
+- The trigger is a conflict during rebase rollback, not the table type or schema shape.
+
 ## Option A: C/JS adapter wrapper (robust)
 Use the same adapter pattern as libhook/libfunction:
 1. Add a C wrapper (libsession.c) with static xFilter/xConflict callbacks that match SQLite's signature.
