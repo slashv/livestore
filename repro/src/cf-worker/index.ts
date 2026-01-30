@@ -1,0 +1,22 @@
+import type { CfTypes } from '@livestore/sync-cf/cf-worker'
+import * as SyncBackend from '@livestore/sync-cf/cf-worker'
+import { SyncPayload } from '../livestore/schema.ts'
+
+export class SyncBackendDO extends SyncBackend.makeDurableObject({}) {}
+
+export default {
+  async fetch(request: CfTypes.Request, _env: SyncBackend.Env, ctx: CfTypes.ExecutionContext) {
+    const searchParams = SyncBackend.matchSyncRequest(request)
+    if (searchParams !== undefined) {
+      return SyncBackend.handleSyncRequest({
+        request,
+        searchParams,
+        ctx,
+        syncBackendBinding: 'SYNC_BACKEND_DO',
+        syncPayloadSchema: SyncPayload,
+      })
+    }
+
+    return new Response('Not Found', { status: 404 })
+  },
+}

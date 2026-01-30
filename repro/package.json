@@ -1,0 +1,32 @@
+{
+  "name": "repro-changeset-bug",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@livestore/adapter-web": "workspace:*",
+    "@livestore/livestore": "workspace:*",
+    "@livestore/peer-deps": "workspace:*",
+    "@livestore/react": "workspace:*",
+    "@livestore/sync-cf": "workspace:*",
+    "@livestore/wa-sqlite": "workspace:*",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.13.12",
+    "@cloudflare/workers-types": "catalog:",
+    "@playwright/test": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "wrangler": "catalog:"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite --force",
+    "test": "playwright test"
+  }
+}
