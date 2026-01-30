@@ -1,9 +1,12 @@
 import { makeWorker } from '@livestore/adapter-web/worker'
+import { makeWsSync } from '@livestore/sync-cf/client'
 
 import { schema } from './livestore/schema.ts'
 
-// Disable sync for local testing of changeset_apply fix
 makeWorker({
   schema,
-  // No sync backend - testing changeset operations locally
+  sync: {
+    backend: makeWsSync({ url: `${globalThis.location.origin}/sync` }),
+    initialSyncOptions: { _tag: 'Blocking', timeout: 5000 },
+  },
 })

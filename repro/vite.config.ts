@@ -1,3 +1,4 @@
+import { cloudflare } from '@cloudflare/vite-plugin'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
@@ -7,5 +8,5 @@ export default defineConfig({
     fs: { strict: false },
   },
   worker: { format: 'es' },
-  plugins: [react()],
+  plugins: [cloudflare(), react()],
 })

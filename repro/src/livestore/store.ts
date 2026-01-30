@@ -3,7 +3,7 @@ import LiveStoreSharedWorker from '@livestore/adapter-web/shared-worker?sharedwo
 import { useStore } from '@livestore/react'
 import { unstable_batchedUpdates as batchUpdates } from 'react-dom'
 import LiveStoreWorker from '../livestore.worker.ts?worker'
-import { schema } from './schema.ts'
+import { schema, SyncPayload } from './schema.ts'
 
 const urlParams = new URLSearchParams(window.location.search)
 const storeId = urlParams.get('storeId') || 'repro-store'
@@ -20,4 +20,6 @@ export const useAppStore = () =>
     schema,
     adapter,
     batchUpdates,
+    syncPayloadSchema: SyncPayload,
+    syncPayload: { authToken: 'insecure-token-change-me' },
   })

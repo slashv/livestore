@@ -1,5 +1,6 @@
 import { queryDb } from '@livestore/livestore'
 import { StoreRegistry, StoreRegistryProvider } from '@livestore/react'
+import React, { Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 
 import { events, tables } from './livestore/schema.ts'
@@ -9,6 +10,31 @@ const storeRegistry = new StoreRegistry()
 
 // Query the clientDocument
 const itemsState$ = queryDb(tables.itemsState.get(), { label: 'itemsState' })
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('ErrorBoundary caught:', error, info)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ color: 'red', padding: 20 }}>
+          <h2>Error</h2>
+          <pre>{String(this.state.error)}</pre>
+          <pre>{this.state.error.stack}</pre>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 const AppBody = () => {
   const store = useAppStore()
@@ -52,7 +78,11 @@ const AppBody = () => {
 const App = () => {
   return (
     <StoreRegistryProvider storeRegistry={storeRegistry}>
-      <AppBody />
+      <ErrorBoundary>
+        <Suspense fallback={<div>Loading LiveStore...</div>}>
+          <AppBody />
+        </Suspense>
+      </ErrorBoundary>
     </StoreRegistryProvider>
   )
 }

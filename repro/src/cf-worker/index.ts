@@ -4,6 +4,12 @@ import { SyncPayload } from '../livestore/schema.ts'
 
 export class SyncBackendDO extends SyncBackend.makeDurableObject({}) {}
 
+const validatePayload = (payload: typeof SyncPayload.Type | undefined) => {
+  if (payload?.authToken !== 'insecure-token-change-me') {
+    throw new Error('Invalid auth token')
+  }
+}
+
 export default {
   async fetch(request: CfTypes.Request, _env: SyncBackend.Env, ctx: CfTypes.ExecutionContext) {
     const searchParams = SyncBackend.matchSyncRequest(request)
@@ -14,6 +20,7 @@ export default {
         ctx,
         syncBackendBinding: 'SYNC_BACKEND_DO',
         syncPayloadSchema: SyncPayload,
+        validatePayload,
       })
     }
 
