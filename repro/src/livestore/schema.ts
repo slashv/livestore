@@ -1,4 +1,4 @@
-import { makeSchema, Schema, SessionIdSymbol, State } from '@livestore/livestore'
+import { makeSchema, Schema, State } from '@livestore/livestore'
 
 // Mimic LocalFilesStateSchema - a Record (hashmap) structure
 const ItemStateSchema = Schema.Struct({
@@ -19,7 +19,7 @@ export const tables = {
       items: ItemsMapSchema, // HashMap-like structure
     }),
     default: {
-      id: SessionIdSymbol,
+      id: 'shared',
       value: { items: {} },
     },
   }),
