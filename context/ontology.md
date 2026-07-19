@@ -98,6 +98,48 @@
   telemetry. _Avoid:_ introspection channel (not a webmesh channel).
 - **Control operation** — A devtools message that mutates engine state
   (reset, import, event injection) rather than inspecting it.
+- **Application definition** — A scenario dependency wrapping a real
+  `LiveStoreSchema` together with optional named actions and normalized State
+  inspectors; it never redeclares the application's materializers.
+- **Scenario specification** — A versioned, serializable description of a
+  scenario's topology, execution requirements, plans, workloads, faults,
+  completion, and scenario oracles.
+- **Scenario participant** — A Client or Client session instantiated and
+  managed by a Scenario runner. A Leader is a role within a Client, and a Sync
+  backend is a separate topology component.
+- **Participant host** — A transport-neutral execution-profile realization
+  that creates and controls scenario participants behind serializable control
+  and Scenario trace boundaries.
+- **Participant execution profile** — The environment and isolation model in
+  which scenario participants run, such as in-process, worker/process, or
+  browser.
+- **Sync-backend realization** — The scenario-side realization of the backend
+  boundary: mock/in-memory, local concrete, or deployed.
+- **Execution configuration** — The composition of a participant execution
+  profile, Sync-backend realization, and optional State capabilities for one
+  Scenario run.
+- **Workload pattern** — A named, parameterized, seeded generator of
+  application actions assigned to scenario participants.
+- **Fault model** — The declared connectivity, availability, latency,
+  lifecycle, or capacity failures an execution configuration can apply and
+  heal without violating its advertised transport guarantees.
+- **Convergence group** — The scenario participants that a settle phase
+  requires to reach the same authoritative Eventlog and, when requested,
+  equivalent normalized State.
+- **Settlement barrier** — A profile-appropriate, bounded confirmation that
+  the selected convergence predicates form a stable fixed point even while
+  background streams or future polling remain active.
+- **Scenario runner** — The headless orchestrator that validates a Scenario
+  specification, controls participants and faults, and emits a Scenario trace.
+  _Avoid:_ scenario runtime (conflicts with LiveStore's Runtime).
+- **Scenario trace** — A versioned semantic stream of Scenario instructions,
+  acknowledgements, observations, and verdicts. OTel spans and other
+  implementation details are namespaced diagnostic extensions.
+- **Scenario oracle** — An executable rule producing a bounded verification
+  verdict and evidence references from Scenario observations and State.
+- **Scenario run artifact** — The reproduction bundle containing the
+  normalized Scenario specification, source and Application identity,
+  Execution configuration, seed, Scenario trace, snapshots, and verdicts.
 - **Changeset (SQLite session)** — A SQLite session-extension changeset
   recorded per materialization, used to roll back state during rebase.
 - **Changeset (release)** — A pnpm changeset file describing a package-level
@@ -118,6 +160,7 @@ them, derives from them, or observes the result.
 | Order | Eventlog, Event sequence number, Sync backend, Rebase, Facts _(experimental)_ |
 | Derive | Materializer, State, Client document |
 | Observe | Live query, Reactivity graph, Devtools |
+| Verify | Scenario specification, Scenario runner, Scenario trace, Scenario oracle |
 
 ### Term families and leitwörter
 
@@ -145,6 +188,12 @@ in their name:
 - **Devtools family** (leitwort "devtools") — anchor **Devtools**; follower
   Devtools protocol version. SessionInfo, Introspection surface, and
   Control operation are its discovery/inspection vocabulary.
+- **Scenario family** (leitwort "scenario") — anchor **Scenario
+  specification**; followers Scenario participant, Scenario runner, Scenario
+  trace, Scenario oracle, and Scenario run artifact. Application definition,
+  Participant host, Participant execution profile, Execution configuration,
+  Workload pattern, Fault model, Convergence group, and Settlement barrier are
+  its execution and evidence vocabulary.
 
 ### Naming rubric
 
@@ -160,6 +209,9 @@ in their name:
   State → Live query → App.
 - **Containment:** A Client contains one or more Client sessions plus the
   Leader role; sessions reach the leader through a proxy.
+- **Scenario topology:** A Scenario runner controls Client and Client-session
+  participants through a Participant host; a Sync backend remains a separate
+  topology component selected through a Sync-backend realization.
 - **Pluggable dimensions:** Adapter, Sync provider, Framework integration,
   State realization, Devtools surface — each is a contract with multiple
   realizations.

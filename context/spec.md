@@ -56,7 +56,7 @@ context/                     root: LiveStore the product (this node)
       01-react/  02-effect/  realizations (hooks; Store.Tag layer API)
     09-verification/         verification contract
       01-lanes/  02-conformance/  03-performance/  04-protocol-compat/
-      05-determinism/
+      05-determinism/  06-scenarios/
   03-delivery/               delivery identity boundary
     01-composition/          repo/package composition, locks, tooling, docs
     02-release/              versioning, publish flow, dependency policy
@@ -123,7 +123,7 @@ questions `DQ`, deltas `DELTA`, decisions by number):
 | `LS.SYS.OBS-*` | `02-system/06-observability/` |
 | `LS.SYS.DT-*` | `02-system/07-devtools/` |
 | `LS.SYS.INT-*` / `LS.SYS.INT.REACT-*`, `LS.SYS.INT.EFFECT-*` | `02-system/08-integrations/` and realizations |
-| `LS.SYS.VER-*` / `LS.SYS.VER.LANE-*`, `LS.SYS.VER.CONF-*`, `LS.SYS.VER.PERF-*`, `LS.SYS.VER.PROTO-*`, `LS.SYS.VER.DET-*` | `02-system/09-verification/` and children |
+| `LS.SYS.VER-*` / `LS.SYS.VER.LANE-*`, `LS.SYS.VER.CONF-*`, `LS.SYS.VER.PERF-*`, `LS.SYS.VER.PROTO-*`, `LS.SYS.VER.DET-*`, `LS.SYS.VER.SCEN-*` | `02-system/09-verification/` and children |
 | `LS.DEL-*` / `LS.DEL.COMP-*`, `LS.DEL.REL-*`, `LS.DEL.ART-*` | `03-delivery/` and children |
 | `LS.DOCS-*` / `LS.DOCS.EX-*`, `LS.DOCS.SEARCH-*`, `LS.DOCS.OPS-*` | `04-docs/` and children |
 | `LS.CONTRIB-*` / `LS.CONTRIB.COLLAB-*`, `LS.CONTRIB.COMM-*` | `05-contributing/` and children |
