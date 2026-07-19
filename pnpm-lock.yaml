@@ -2338,6 +2338,61 @@ importers:
         specifier: ^4.20.0
         version: 4.22.3
 
+  tests/scenarios:
+    dependencies:
+      '@livestore/adapter-web':
+        specifier: workspace:^
+        version: link:../../packages/@livestore/adapter-web
+      '@livestore/common':
+        specifier: workspace:^
+        version: link:../../packages/@livestore/common
+      '@livestore/livestore':
+        specifier: workspace:^
+        version: link:../../packages/@livestore/livestore
+      '@livestore/utils':
+        specifier: workspace:^
+        version: link:../../packages/@livestore/utils
+    devDependencies:
+      '@effect/opentelemetry':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(@opentelemetry/api-logs@0.217.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.208.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-web@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.41.1)(effect@4.0.0-beta.99)
+      '@effect/platform-browser':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(effect@4.0.0-beta.99)
+      '@effect/platform-bun':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(effect@4.0.0-beta.99)
+      '@effect/platform-node':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(effect@4.0.0-beta.99)(ioredis@5.11.1)
+      '@effect/platform-node-shared':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(effect@4.0.0-beta.99)
+      '@effect/vitest':
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99(effect@4.0.0-beta.99)(vitest@4.1.9(@opentelemetry/api@1.9.0)(@types/node@25.3.3)(jsdom@26.1.0)(vite@7.3.6(@types/node@25.3.3)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.9.0)))
+      '@livestore/utils-dev':
+        specifier: workspace:^
+        version: link:../../packages/@livestore/utils-dev
+      '@opentelemetry/api':
+        specifier: 1.9.0
+        version: 1.9.0
+      '@opentelemetry/resources':
+        specifier: 2.2.0
+        version: 2.2.0(@opentelemetry/api@1.9.0)
+      '@standard-schema/spec':
+        specifier: 1.1.0
+        version: 1.1.0
+      '@types/node':
+        specifier: 25.3.3
+        version: 25.3.3
+      effect:
+        specifier: 4.0.0-beta.99
+        version: 4.0.0-beta.99
+      vitest:
+        specifier: 4.1.9
+        version: 4.1.9(@opentelemetry/api@1.9.0)(@types/node@25.3.3)(jsdom@26.1.0)(vite@7.3.6(@types/node@25.3.3)(jiti@2.7.0)(lightningcss@1.32.0)(terser@5.48.0)(tsx@4.22.3)(yaml@2.9.0))
+
   tests/sync-provider:
     dependencies:
       '@cloudflare/workers-types':

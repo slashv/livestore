@@ -4,8 +4,8 @@ import { memberPathsForProjection, type LivestorePackageProjection } from './gen
 import { catalog, packageJson } from './genie/repo.ts'
 import adapterCloudflarePkg from './packages/@livestore/adapter-cloudflare/package.json.genie.ts'
 import adapterWebPkg from './packages/@livestore/adapter-web/package.json.genie.ts'
-import commonPkg from './packages/@livestore/common/package.json.genie.ts'
 import commonCfPkg from './packages/@livestore/common-cf/package.json.genie.ts'
+import commonPkg from './packages/@livestore/common/package.json.genie.ts'
 import effectPlaywrightPkg from './packages/@livestore/effect-playwright/package.json.genie.ts'
 import frameworkToolkitPkg from './packages/@livestore/framework-toolkit/package.json.genie.ts'
 import livestorePkg from './packages/@livestore/livestore/package.json.genie.ts'
@@ -13,8 +13,8 @@ import peerDepsPkg from './packages/@livestore/peer-deps/package.json.genie.ts'
 import reactPkg from './packages/@livestore/react/package.json.genie.ts'
 import sqliteWasmPkg from './packages/@livestore/sqlite-wasm/package.json.genie.ts'
 import syncCfPkg from './packages/@livestore/sync-cf/package.json.genie.ts'
-import utilsPkg from './packages/@livestore/utils/package.json.genie.ts'
 import utilsDevPkg from './packages/@livestore/utils-dev/package.json.genie.ts'
+import utilsPkg from './packages/@livestore/utils/package.json.genie.ts'
 import waSqlitePkg from './packages/@livestore/wa-sqlite/package.json.genie.ts'
 import webmeshPkg from './packages/@livestore/webmesh/package.json.genie.ts'
 import astroTldrawPkg from './packages/@local/astro-tldraw/package.json.genie.ts'
@@ -24,8 +24,9 @@ import localSharedPkg from './packages/@local/shared/package.json.genie.ts'
 import scriptsPkg from './scripts/package.json.genie.ts'
 import testsIntegrationPkg from './tests/integration/package.json.genie.ts'
 import testsPackageCommonPkg from './tests/package-common/package.json.genie.ts'
-import testsPerfPkg from './tests/perf/package.json.genie.ts'
 import testsPerfEventlogPkg from './tests/perf-eventlog/package.json.genie.ts'
+import testsPerfPkg from './tests/perf/package.json.genie.ts'
+import testsScenariosPkg from './tests/scenarios/package.json.genie.ts'
 import testsSyncProviderPkg from './tests/sync-provider/package.json.genie.ts'
 import testsWaSqlitePkg from './tests/wa-sqlite/package.json.genie.ts'
 
@@ -56,6 +57,7 @@ export const rootWorkspacePackages = [
   testsPackageCommonPkg,
   testsPerfEventlogPkg,
   testsPerfPkg,
+  testsScenariosPkg,
   testsSyncProviderPkg,
   testsWaSqlitePkg,
 ] as const
@@ -100,6 +102,7 @@ export const toolingWorkspacePackages = [
   scriptsPkg,
   testsIntegrationPkg,
   testsPackageCommonPkg,
+  testsScenariosPkg,
   testsSyncProviderPkg,
 ] as const
 

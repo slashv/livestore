@@ -1,17 +1,25 @@
-# DELTA-001 — Scenario verification subsystem not built
+# DELTA-001 — Scenario verification baseline incomplete
 
 Status: open
 
 ## Divergence
 
-The contracts in `LS.SYS.VER.SCEN-R01…R18` are accepted intent, but no private
-`tests/scenarios/` workspace, declarative scenario model, participant host,
-production-shaped in-process profile, scenario trace, scenario oracle set,
-settlement mechanism, reproducible artifact, or visualizer exists.
+The first vertical slice now exists in the private `tests/scenarios/`
+workspace. It provides a versioned serializable AST, schema-backed named
+actions and inspectors, a transport-neutral host, a production-shaped
+in-process profile with one real Store session per Client, controlled
+disconnect/reconnect, bounded stable-poll settlement, semantic trace records,
+four core oracles, and a schema-validated run artifact. The initial corpus
+scenario proves offline and online writers converge through real processors,
+materializers, SQLite State, and the shared mock backend.
 
-Existing focused sync and integration tests encode setup, timing, faults, and
-assertions directly in their harnesses. They do not provide the shared
-serializable scenario semantics or evidence boundary required by this node.
+The coherent baseline is still incomplete. The current slice does not provide
+direct schema-event steps, dynamic Client/session/Leader lifecycle, reusable
+workloads, generated scheduling, runner-controlled delivery gates and replay,
+backend-availability or latency faults, rematerialization, the broader oracle
+catalog, artifact persistence, a shared capability-driven conformance suite,
+or a live/replay visualizer. One session per Client is an advertised v1 host
+limit rather than hidden profile parity.
 
 ## VRS
 

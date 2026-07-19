@@ -11,7 +11,8 @@ owned by sync, runtime, state, Store, and observability nodes; this node owns
 the evidence architecture that composes those behaviors. The accepted
 architecture originates in [RFC 0003](../../../../contributor-docs/rfcs/0003-scenario-based-sync-verification.md).
 
-No scenario subsystem exists yet; the initial divergence is recorded in
+The first in-process scenario-runner slice exists; the remaining baseline
+divergence is recorded in
 [DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md).
 
 ## Requirements
@@ -76,7 +77,7 @@ No scenario subsystem exists yet; the initial divergence is recorded in
   are independently verifiable from materialized-state convergence and
   rematerialization. SQLite is required by the initial full-stack profile but
   is not part of scenario-level sync semantics. `refines: LS-R05, LS-R06,
-  LS-R10`
+LS-R10`
 - **LS.SYS.VER.SCEN-R13 Scenario trace protocol:** Every run emits a versioned
   scenario trace with a stable run descriptor, ordered semantic records,
   participant and boundary identities, correlation and causation, and typed

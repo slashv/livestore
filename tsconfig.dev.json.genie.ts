@@ -36,6 +36,7 @@ export default tsconfigJson({
     { path: './tests/integration' },
     { path: './tests/package-common' },
     { path: './tests/perf' },
+    { path: './tests/scenarios' },
     { path: './tests/sync-provider' },
     { path: './tests/wa-sqlite' },
     { path: './packages/@local/shared' },

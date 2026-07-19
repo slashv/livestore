@@ -70,6 +70,7 @@ let
     "tests/package-common"
     "tests/perf"
     "tests/perf-eventlog"
+    "tests/scenarios"
     "tests/sync-provider"
     "tests/wa-sqlite"
     # other

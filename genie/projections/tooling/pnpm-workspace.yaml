@@ -94,4 +94,5 @@ packages:
   - ../../../scripts
   - ../../../tests/integration
   - ../../../tests/package-common
+  - ../../../tests/scenarios
   - ../../../tests/sync-provider

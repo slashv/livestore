@@ -22,7 +22,9 @@ the seam is not product API.
 
 The architecture was selected in
 [decision 0001](./.decisions/0001-declarative-scenario-verification.md). Its
-implementation is absent ([DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md)).
+first in-process vertical slice is implemented, while the coherent baseline
+remains incomplete
+([DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md)).
 
 This node does not redesign the sync protocol, require an eventlog-only product
 profile before sync/State separation exists, emulate packet-level networks,
@@ -62,19 +64,19 @@ scenario authoring formats.
 
 The AST carries:
 
-| Area | Contract |
-| --- | --- |
-| Identity | Stable scenario ID, description, version, and tags |
-| Reproduction | Seed, scheduling mode, execution configuration |
-| Application | Stable application-definition reference |
-| Topology | Backend, Clients, Client sessions, boundaries, connectivity |
-| Lifecycle | Initial and dynamically added, restarted, or removed identities |
-| Workloads | Explicit actions and named parameterized patterns |
-| Schedule | Logical time, dependencies, observed conditions, phases |
-| Faults | Requested failures and healing operations |
-| Completion | Explicit terminal action or bounded settle phase |
-| Assertions | Selected scenario oracles and their assumptions |
-| Capture | Trace detail, snapshots, measurements, artifact policy |
+| Area         | Contract                                                        |
+| ------------ | --------------------------------------------------------------- |
+| Identity     | Stable scenario ID, description, version, and tags              |
+| Reproduction | Seed, scheduling mode, execution configuration                  |
+| Application  | Stable application-definition reference                         |
+| Topology     | Backend, Clients, Client sessions, boundaries, connectivity     |
+| Lifecycle    | Initial and dynamically added, restarted, or removed identities |
+| Workloads    | Explicit actions and named parameterized patterns               |
+| Schedule     | Logical time, dependencies, observed conditions, phases         |
+| Faults       | Requested failures and healing operations                       |
+| Completion   | Explicit terminal action or bounded settle phase                |
+| Assertions   | Selected scenario oracles and their assumptions                 |
+| Capture      | Trace detail, snapshots, measurements, artifact policy          |
 
 All run-specific control remains represented by the normalized AST. Executable
 application definitions and named workload libraries are dependencies resolved
@@ -123,14 +125,14 @@ participant. The sync backend is a separate topology component.
 
 Plans use these stable step families:
 
-| Family | Meaning |
-| --- | --- |
-| Application | Commit a schema event or invoke a named action |
-| Lifecycle | Add, stop, restart, or remove a supported participant or role |
-| Connectivity/fault | Request or heal a supported failure |
-| Workload | Run a named seeded pattern, repetition, or burst |
-| Scheduling | Sequence, parallelism, logical timing, repetition, condition wait |
-| Settlement | Stop work, heal named faults, establish a convergence group, evaluate a barrier |
+| Family             | Meaning                                                                         |
+| ------------------ | ------------------------------------------------------------------------------- |
+| Application        | Commit a schema event or invoke a named action                                  |
+| Lifecycle          | Add, stop, restart, or remove a supported participant or role                   |
+| Connectivity/fault | Request or heal a supported failure                                             |
+| Workload           | Run a named seeded pattern, repetition, or burst                                |
+| Scheduling         | Sequence, parallelism, logical timing, repetition, condition wait               |
+| Settlement         | Stop work, heal named faults, establish a convergence group, evaluate a barrier |
 
 Instructions and observations are distinct. A requested lifecycle or fault
 transition succeeds only after the appropriate acknowledgement or observation;
@@ -175,11 +177,11 @@ Locks, OPFS, or process termination explicitly.
 
 ### Participant execution profiles
 
-| Profile | Evidence scope |
-| --- | --- |
-| In-process | Primary dense correctness and stress execution using controlled boundaries |
-| Worker/process | Optional evidence about isolation, lifecycle, and transport boundaries |
-| Browser | Optional evidence about the web adapter, worker topology, Web Locks, OPFS, and browser lifecycle |
+| Profile        | Evidence scope                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------ |
+| In-process     | Primary dense correctness and stress execution using controlled boundaries                       |
+| Worker/process | Optional evidence about isolation, lifecycle, and transport boundaries                           |
+| Browser        | Optional evidence about the web adapter, worker topology, Web Locks, OPFS, and browser lifecycle |
 
 The required in-process profile is production-shaped: every Client has one
 actual leader and one or more real Client sessions; sessions use real Stores,
@@ -190,11 +192,11 @@ not this profile.
 
 ### Sync-backend realizations
 
-| Realization | Evidence scope |
-| --- | --- |
-| Mock/in-memory | Required controlled correctness, fault injection, and high participant counts |
-| Local concrete | Optional real provider/backend serialization, persistence, and reconnection evidence |
-| Deployed | Optional authentication, network, persistence, platform-limit, and deployment evidence |
+| Realization    | Evidence scope                                                                         |
+| -------------- | -------------------------------------------------------------------------------------- |
+| Mock/in-memory | Required controlled correctness, fault injection, and high participant counts          |
+| Local concrete | Optional real provider/backend serialization, persistence, and reconnection evidence   |
+| Deployed       | Optional authentication, network, persistence, platform-limit, and deployment evidence |
 
 ### Conformance and cross-profile evidence
 

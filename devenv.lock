@@ -236,7 +236,10 @@
           "effect-utils",
           "nixpkgs"
         ],
-        "playwright": "playwright"
+        "playwright": "playwright",
+        "pre-commit-hooks": [
+          "git-hooks"
+        ]
       }
     },
     "systems": {

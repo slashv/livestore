@@ -10,12 +10,12 @@ NOTE we're mapping to absolute paths here to avoid issues where tests seem to be
 const rootDir = import.meta.dirname
 const resolveProjectPath = (packageDir: string): string | undefined => {
   const rootConfig = path.join(packageDir, 'vitest.config.ts')
-  if (fs.existsSync(rootConfig)) {
+  if (fs.existsSync(rootConfig) === true) {
     return rootConfig
   }
 
   const testsConfig = path.join(packageDir, 'tests/vitest.config.ts')
-  if (fs.existsSync(testsConfig)) {
+  if (fs.existsSync(testsConfig) === true) {
     return testsConfig
   }
 
@@ -39,6 +39,7 @@ export default defineConfig({
       path.join(rootDir, 'tests/integration/src/tests/adapter-web/vitest.config.ts'),
       path.join(rootDir, 'tests/integration/src/tests/devtools/vitest.config.ts'),
       path.join(rootDir, 'tests/package-common/vitest.config.ts'),
+      path.join(rootDir, 'tests/scenarios/vitest.config.ts'),
       path.join(rootDir, 'tests/sync-provider/vitest.config.ts'),
       path.join(rootDir, 'tests/wa-sqlite/vitest.config.ts'),
       path.join(rootDir, 'docs/vitest.config.ts'),
