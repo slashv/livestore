@@ -523,6 +523,18 @@ Later participant profiles and backend realizations must preserve scenario
 semantics and trace vocabulary. A scenario using capabilities shared by
 several configurations should run unchanged across them.
 
+The initial local fidelity realizations map these boundaries concretely. A
+worker/process Client occupies one Node child process and communicates with the
+runner through serialized IPC. A browser Client occupies one persistent browser
+context, while each of its Client sessions occupies one page sharing the same
+origin, SharedWorker, Web Locks, and OPFS. Separate contexts isolate separate
+Clients; reopening a page models a session restart, while reopening the context
+with its profile directory preserved models a persistent Client restart. The
+local concrete backend runs the repository's sync-cf Worker and SQLite Durable
+Object under local workerd through Wrangler and uses the production WebSocket
+sync client. These bindings add profile-scoped evidence without making them
+part of the portable scenario language.
+
 #### Profile Conformance and Cross-Profile Evidence
 
 Every participant execution profile must pass one shared host-conformance suite

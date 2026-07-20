@@ -21,9 +21,11 @@ control seam from those owners, using an explicit internal testing export when
 the seam is not product API.
 
 The architecture was selected in
-[decision 0001](./.decisions/0001-declarative-scenario-verification.md). Its
-first in-process vertical slice is implemented, while the coherent baseline
-remains incomplete
+[decision 0001](./.decisions/0001-declarative-scenario-verification.md), with
+the local fidelity mappings recorded in
+[decision 0003](./.decisions/0003-local-process-and-browser-realizations.md).
+In-process, isolated-process, and persistent-browser vertical slices now run,
+while the coherent baseline remains incomplete
 ([DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md)).
 
 This node does not redesign the sync protocol, require an eventlog-only product
@@ -190,6 +192,14 @@ the real leader processor, eventlog database, and leader State database behind
 an in-memory proxy. A direct processor-only harness is subordinate evidence,
 not this profile.
 
+The first process realization assigns one Node child process to each Client and
+carries serialized commands and observations over IPC. The first browser
+realization assigns one persistent browser context to each Client and one page
+to each Client session. Pages within a Client therefore share the production
+SharedWorker leader, Web Locks, origin, and OPFS, while browser contexts isolate
+Clients. Reopening one page preserves the Client; reopening the context with the
+same profile directory models a persistent Client restart.
+
 ### Sync-backend realizations
 
 | Realization    | Evidence scope                                                                         |
@@ -197,6 +207,11 @@ not this profile.
 | Mock/in-memory | Required controlled correctness, fault injection, and high participant counts          |
 | Local concrete | Optional real provider/backend serialization, persistence, and reconnection evidence   |
 | Deployed       | Optional authentication, network, persistence, platform-limit, and deployment evidence |
+
+The first local-concrete realization runs the repository's actual sync-cf
+Worker and SQLite Durable Object under local workerd through Wrangler and uses
+the production WebSocket sync client. It is isolated per scenario run and does
+not claim deployed-service evidence.
 
 ### Conformance and cross-profile evidence
 

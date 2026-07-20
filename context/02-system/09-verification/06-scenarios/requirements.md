@@ -11,8 +11,8 @@ owned by sync, runtime, state, Store, and observability nodes; this node owns
 the evidence architecture that composes those behaviors. The accepted
 architecture originates in [RFC 0003](../../../../contributor-docs/rfcs/0003-scenario-based-sync-verification.md).
 
-The first in-process scenario-runner slice exists; the remaining baseline
-divergence is recorded in
+In-process, isolated-process, local sync-cf, and persistent-browser
+scenario-runner slices exist; the remaining baseline divergence is recorded in
 [DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md).
 
 ## Requirements

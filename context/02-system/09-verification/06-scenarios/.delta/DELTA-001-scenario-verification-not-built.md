@@ -4,30 +4,40 @@ Status: open
 
 ## Divergence
 
-The first vertical slice now exists in the private `tests/scenarios/`
-workspace. It provides a versioned serializable AST, schema-backed named
-actions and inspectors, a transport-neutral host, a production-shaped
-in-process profile with one real Store session per Client, controlled
-disconnect/reconnect, bounded stable-poll settlement, semantic trace records,
-four core oracles, and a schema-validated run artifact. Completed artifacts can
-now be persisted through the scenario CLI and loaded into an initial replay
-visualizer. Its observation-index cursor projects actual backend, Client,
-Leader-role, and session sync/eventlog observations, and its event paths expose
-pending, confirmed, and rebased positions. The initial corpus scenario proves
-offline and online writers converge through real processors, materializers,
-SQLite State, and the shared mock backend.
+Several vertical slices now exist in the private `tests/scenarios/` workspace.
+They provide a versioned serializable AST, schema-backed named actions and
+inspectors, a transport-neutral host, controlled disconnect/reconnect, bounded
+stable-poll settlement, semantic trace records, four core oracles, and a
+schema-validated run artifact. The portable offline-writer scenario runs
+unchanged through a production-shaped in-process host, one isolated Node
+process per Client, or one persistent Chromium context per Client. The local
+profiles connect to the real sync-cf Worker and SQLite Durable Object through
+the production WebSocket client under local workerd.
+
+The browser profile uses one page per Client session with the production web
+adapter, SharedWorker, Web Locks, and OPFS. A browser-specific scenario proves
+that two sessions share a Client, one session can stop and restart, and the
+entire persistent Client can restart without losing materialized State before
+settling. Completed artifacts can be selected by CLI profile, persisted, and
+loaded into the replay visualizer. Its observation-index cursor projects actual
+backend, Client, Leader-role, and session sync/eventlog observations, and its
+event paths expose pending, confirmed, and rebased positions.
 
 The coherent baseline is still incomplete. The current slice does not provide
-direct schema-event steps, dynamic Client/session/Leader lifecycle, reusable
-workloads, generated scheduling, runner-controlled delivery gates and replay,
-backend-availability or latency faults, rematerialization, the broader oracle
-catalog, a shared capability-driven conformance suite, or live trace streaming
-and runner control from the visualizer. Event references in this first slice
-are correlated from ordered occurrences of actual eventlog observations. An
+direct schema-event steps, dynamic participant addition/removal or Leader-role
+lifecycle, reusable workloads, generated scheduling, runner-controlled
+delivery gates and replay, backend-availability or latency faults,
+rematerialization, the broader oracle catalog, a fully shared
+capability-driven host-conformance suite, or live trace streaming and runner
+control from the visualizer. Event references in this first slice are
+correlated from ordered occurrences of actual eventlog observations. An
 explicit sync-transition observation seam is still required to preserve
 lineage unambiguously when equivalent events are rejected, disappear, or
-reorder. One session per Client is an advertised v1 host limit rather than
-hidden profile parity.
+reorder. The browser's public Store observation exposes session↔Leader status;
+its portable Leader/backend view is therefore reconciled with the actual
+authoritative backend eventlog until a stable browser-safe Leader observation
+seam exists. One session per Client remains an advertised v1 limit of the
+in-process and process hosts rather than hidden profile parity.
 
 ## VRS
 
