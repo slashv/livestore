@@ -281,6 +281,31 @@ connectivity and boundary batches, event disposition, eventlog positions,
 advance/rebase transitions, fault activation/healing, settlement progress,
 oracle verdicts, and structured failures.
 
+Trace consumers reconstruct an **observed system state at cursor** from the
+prefix ending at a selected observation index. That projection is the runner's
+accumulated knowledge after one record, not an atomic distributed snapshot at a
+wall-clock instant. A visual timeline may lay records out uniformly by
+observation order or proportionally by relative wall time without changing
+cursor semantics. Logical time remains available for scheduling and
+reproduction but need not be the visual timeline axis.
+
+Portable event observations embed the actual encoded LiveStore event facts
+available at the observed component, including origin and current sequence and
+parent positions. Because a sequence number is a mutable eventlog position
+rather than an immutable identity, the trace assigns an opaque, run-local event
+reference when an event is first observed. Actual sync transitions carry that
+reference across session, Leader, and backend observations and explicitly map
+rebase and confirmation position changes. Consumers do not infer identity from
+event arguments, timestamps, or matching positions.
+
+Participant hosts and backend realizations derive these records from actual
+LiveStore sync state, eventlogs, boundary operations, and transition observers;
+the runner does not simulate product state from its instructions. Existing
+DevTools or internal observation surfaces may supply those facts, with the
+smallest explicit internal testing seam added when they cannot expose pending
+event or rebase lineage. Scenario-level references and envelopes make the
+result portable without replacing LiveStore event structure.
+
 Private queues, raw depths, scheduler state, SQLite details, provider payloads,
 Web Lock/OPFS internals, OTel spans, stack traces, and performance entries are
 namespaced diagnostics. Portable oracles ignore unknown diagnostics unless the
@@ -331,6 +356,18 @@ view shows topology, connectivity, traffic, pressure, and convergence; its
 timeline view shows application actions and causal transitions by participant.
 Any runner control goes through an explicit API. The UI does not directly
 inspect or mutate participants and is never required for headless execution.
+
+Scrubbing selects an observation-index boundary and projects the trace prefix
+into backend, Client, Leader-role, session, boundary, and event state. Timeline
+arrows use explicit event references and correlation/causation records rather
+than temporal proximity. Playback of a completed artifact advances this cursor;
+it is distinct from rerunning the scenario. Optional checkpoints may accelerate
+seeking but are derived cache data and never replace the authoritative trace.
+
+The first replay visualizer projects sync and eventlog evidence only: topology,
+connectivity, heads, confirmed and pending events, rebases, propagation, and
+settlement/verdict state. Materialized application State remains available
+through explicit inspector snapshots and is not captured at every cursor.
 
 ## Repository Placement (LS.SYS.VER.SCEN-R18)
 

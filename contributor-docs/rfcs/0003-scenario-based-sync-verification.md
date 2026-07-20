@@ -133,22 +133,22 @@ message transport without changing scenario semantics.
 
 ### Terminology
 
-| Term | Meaning |
-| --- | --- |
-| **Application definition** | Executable module exporting the LiveStore event schema and, when enabled, materializers and state inspection helpers. |
-| **Scenario specification** | Serializable description of participants, workloads, faults, schedule, execution options, and assertions. |
-| **Scenario participant** | A client or client session instantiated and managed by the runner. |
-| **Participant host** | Execution-profile implementation that creates and controls clients and sessions behind the serializable runner-control and trace boundary. |
-| **Participant execution profile** | How client-side roles run: in-process, worker/process, or browser. |
-| **Sync-backend realization** | What the leader synchronizes with: a mock/in-memory backend, a locally running concrete backend, or a deployed backend. |
-| **Execution configuration** | Combination of one participant execution profile, one sync-backend realization, and an optional state profile. |
-| **Workload pattern** | Reusable generator of application actions assigned to one or more clients. |
-| **Fault model** | Controlled changes to connectivity, availability, latency, process lifetime, or capacity. |
-| **Convergence group** | Scenario participants that a settle phase requires to reach the same authoritative eventlog and, when requested, equivalent state. |
-| **Settlement barrier** | Profile-appropriate confirmation that convergence predicates form a stable fixed point even if background streams or future polling remain active. |
-| **Scenario trace** | Ordered, versioned semantic stream of scenario instructions, acknowledgements, observations, and verdicts. |
-| **Scenario oracle** | Executable rule that turns observed state and scenario-trace data into a verdict. |
-| **Scenario run artifact** | Scenario, seed, execution configuration, trace, measurements, snapshots, and oracle results needed to inspect or reproduce one run. |
+| Term                              | Meaning                                                                                                                                            |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Application definition**        | Executable module exporting the LiveStore event schema and, when enabled, materializers and state inspection helpers.                              |
+| **Scenario specification**        | Serializable description of participants, workloads, faults, schedule, execution options, and assertions.                                          |
+| **Scenario participant**          | A client or client session instantiated and managed by the runner.                                                                                 |
+| **Participant host**              | Execution-profile implementation that creates and controls clients and sessions behind the serializable runner-control and trace boundary.         |
+| **Participant execution profile** | How client-side roles run: in-process, worker/process, or browser.                                                                                 |
+| **Sync-backend realization**      | What the leader synchronizes with: a mock/in-memory backend, a locally running concrete backend, or a deployed backend.                            |
+| **Execution configuration**       | Combination of one participant execution profile, one sync-backend realization, and an optional state profile.                                     |
+| **Workload pattern**              | Reusable generator of application actions assigned to one or more clients.                                                                         |
+| **Fault model**                   | Controlled changes to connectivity, availability, latency, process lifetime, or capacity.                                                          |
+| **Convergence group**             | Scenario participants that a settle phase requires to reach the same authoritative eventlog and, when requested, equivalent state.                 |
+| **Settlement barrier**            | Profile-appropriate confirmation that convergence predicates form a stable fixed point even if background streams or future polling remain active. |
+| **Scenario trace**                | Ordered, versioned semantic stream of scenario instructions, acknowledgements, observations, and verdicts.                                         |
+| **Scenario oracle**               | Executable rule that turns observed state and scenario-trace data into a verdict.                                                                  |
+| **Scenario run artifact**         | Scenario, seed, execution configuration, trace, measurements, snapshots, and oracle results needed to inspect or reproduce one run.                |
 
 “Scenario runner” is used instead of “scenario runtime” to avoid confusing the
 orchestrator with LiveStore's own runtime architecture.
@@ -200,19 +200,19 @@ configuration remains visible in that module.
 
 The scenario specification must be able to express:
 
-| Area | Required information |
-| --- | --- |
-| Identity | Stable scenario name, description, format version, and tags. |
-| Reproduction | Random seed, scheduling mode, and execution configuration. |
-| Application | Reference to an application definition wrapping the actual LiveStore schema plus optional higher-level actions and state inspectors. |
-| Topology | Sync backend, clients, client sessions, links, and initial connectivity. |
-| Lifecycle | Participants and roles present at start and those added, restarted, or removed later. |
-| Workloads | Explicit actions and reusable parameterized activity patterns assigned to clients. |
-| Schedule | Actions triggered by logical time, prior actions, observed conditions, or phase boundaries. |
-| Faults | Backend outages, partitions, latency, constrained throughput, process death, and recovery. |
-| Completion | Duration, convergence group, settlement barrier and timeout, phase completion, or explicit terminal action. |
-| Assertions | Safety, convergence, liveness, state, and optional performance oracles. |
-| Capture | Trace detail, state snapshots, and measurement options. |
+| Area         | Required information                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Identity     | Stable scenario name, description, format version, and tags.                                                                         |
+| Reproduction | Random seed, scheduling mode, and execution configuration.                                                                           |
+| Application  | Reference to an application definition wrapping the actual LiveStore schema plus optional higher-level actions and state inspectors. |
+| Topology     | Sync backend, clients, client sessions, links, and initial connectivity.                                                             |
+| Lifecycle    | Participants and roles present at start and those added, restarted, or removed later.                                                |
+| Workloads    | Explicit actions and reusable parameterized activity patterns assigned to clients.                                                   |
+| Schedule     | Actions triggered by logical time, prior actions, observed conditions, or phase boundaries.                                          |
+| Faults       | Backend outages, partitions, latency, constrained throughput, process death, and recovery.                                           |
+| Completion   | Duration, convergence group, settlement barrier and timeout, phase completion, or explicit terminal action.                          |
+| Assertions   | Safety, convergence, liveness, state, and optional performance oracles.                                                              |
+| Capture      | Trace detail, state snapshots, and measurement options.                                                                              |
 
 The exact constructor names below are provisional. They illustrate the typed
 structure rather than fixing a final API:
@@ -250,21 +250,14 @@ export default scenario.define({
           text: Generator.string,
         }),
       }),
-      Step.after(
-        Duration.seconds(30),
-        Step.reconnect(Client.ref('client-a')),
-      ),
+      Step.after(Duration.seconds(30), Step.reconnect(Client.ref('client-a'))),
     ]),
     Phase.settle({
       participants: [Client.ref('client-a')],
       timeout: Duration.seconds(20),
     }),
   ),
-  oracles: [
-    Oracle.noEventLoss(),
-    Oracle.eventlogConvergence(),
-    Oracle.stateConvergence(application.state.todos),
-  ],
+  oracles: [Oracle.noEventLoss(), Oracle.eventlogConvergence(), Oracle.stateConvergence(application.state.todos)],
 })
 ```
 
@@ -297,8 +290,7 @@ export const events = {
 }
 
 const materializers = State.SQLite.materializers(events, {
-  'v1.TodoCreated': ({ id, text }) =>
-    tables.todos.insert({ id, text, completed: false }),
+  'v1.TodoCreated': ({ id, text }) => tables.todos.insert({ id, text, completed: false }),
 })
 
 const state = State.SQLite.makeState({ tables, materializers })
@@ -311,11 +303,7 @@ export const application = Scenario.Application.define({
     createGeneratedTodo: action({
       input: Schema.Struct({ text: Schema.String }),
       run: ({ store, input, random }) =>
-        Effect.sync(() =>
-          store.commit(
-            events.todoCreated({ id: random.uuid(), text: input.text }),
-          ),
-        ),
+        Effect.sync(() => store.commit(events.todoCreated({ id: random.uuid(), text: input.text }))),
     }),
   }),
   state: ({ inspector }) => ({
@@ -380,14 +368,14 @@ state database before applying the inspector.
 The scenario plan is a declarative tree of typed steps. Its initial stable step
 families are:
 
-| Step family | Examples |
-| --- | --- |
-| Application | Commit a schema event or invoke a named application action. |
-| Participant/role lifecycle | Add a client or session; stop or restart a session, client, or leader role. |
-| Connectivity and faults | Disconnect a link, partition a client, make a backend unavailable, or heal a fault. |
-| Workload | Run a named seeded pattern, repeat an action, or generate a burst. |
-| Scheduling | Sequence, run in parallel, run at/after a logical time, repeat, or wait for a declared condition. |
-| Settlement | Stop workloads, heal declared faults, establish a convergence group, and evaluate a settlement barrier. |
+| Step family                | Examples                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Application                | Commit a schema event or invoke a named application action.                                             |
+| Participant/role lifecycle | Add a client or session; stop or restart a session, client, or leader role.                             |
+| Connectivity and faults    | Disconnect a link, partition a client, make a backend unavailable, or heal a fault.                     |
+| Workload                   | Run a named seeded pattern, repeat an action, or generate a burst.                                      |
+| Scheduling                 | Sequence, run in parallel, run at/after a logical time, repeat, or wait for a declared condition.       |
+| Settlement                 | Stop workloads, heal declared faults, establish a convergence group, and evaluate a settlement barrier. |
 
 The corresponding normalized representation is an Effect Schema tagged union,
 not a collection of callbacks. Initial scheduling combinators are `sequence`,
@@ -480,11 +468,11 @@ different execution profiles.
 
 #### Participant Execution Profiles
 
-| Profile | Intended use | Fidelity and cost |
-| --- | --- | --- |
-| **In-process** | Default correctness, generative, and stress exploration. | Real Stores, client-session and leader processors, materializers, and SQLite databases behind in-memory boundaries; highest determinism and density. |
-| **Worker/process** | Process-boundary, lifecycle, and crash behavior. | Real isolation with moderate startup and coordination cost. |
-| **Browser** | Web adapter, OPFS, Web Locks, worker topology, and browser lifecycle. | High fidelity and cost; fewer participants. |
+| Profile            | Intended use                                                          | Fidelity and cost                                                                                                                                    |
+| ------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **In-process**     | Default correctness, generative, and stress exploration.              | Real Stores, client-session and leader processors, materializers, and SQLite databases behind in-memory boundaries; highest determinism and density. |
+| **Worker/process** | Process-boundary, lifecycle, and crash behavior.                      | Real isolation with moderate startup and coordination cost.                                                                                          |
+| **Browser**        | Web adapter, OPFS, Web Locks, worker topology, and browser lifecycle. | High fidelity and cost; fewer participants.                                                                                                          |
 
 The profiles answer different verification questions:
 
@@ -506,11 +494,11 @@ not required to match in-process runs one-to-one.
 
 #### Sync-Backend Realizations
 
-| Realization | Intended use | Fidelity and cost |
-| --- | --- | --- |
-| **Mock/in-memory** | Deterministic correctness, controlled failures, and high participant counts. | No real transport, deployment platform, authentication, or backend persistence. |
-| **Local concrete backend** | Exercise a real provider client and backend implementation in a local development environment. | Covers serialization, chunking, pagination, streaming/polling, persistence, and reconnection without remote deployment dependence. |
-| **Deployed sync backend** | End-to-end verification against an actual deployed backend. | Adds real authentication, networking, backend persistence, platform limits, and deployment behavior; highest environmental dependence. |
+| Realization                | Intended use                                                                                   | Fidelity and cost                                                                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mock/in-memory**         | Deterministic correctness, controlled failures, and high participant counts.                   | No real transport, deployment platform, authentication, or backend persistence.                                                        |
+| **Local concrete backend** | Exercise a real provider client and backend implementation in a local development environment. | Covers serialization, chunking, pagination, streaming/polling, persistence, and reconnection without remote deployment dependence.     |
+| **Deployed sync backend**  | End-to-end verification against an actual deployed backend.                                    | Adds real authentication, networking, backend persistence, platform limits, and deployment behavior; highest environmental dependence. |
 
 The deployed-backend realization is what this RFC previously called “provider
 integration.” It concerns the leader-to-backend boundary, not where the client
@@ -719,6 +707,29 @@ it does not claim that distributed operations happened atomically in that
 order. Correlation joins records belonging to one action, batch, request, or
 fault, while causation records why a transition occurred.
 
+A replay cursor selects one observation-index boundary. The visualizer reduces
+the trace prefix through that record into the runner's accumulated observed
+system state; it does not present the result as an atomic global snapshot at a
+wall-clock instant. The same records may be spaced uniformly by observation
+order or proportionally by relative wall time. Logical time remains part of
+scenario scheduling and reproduction but is not required as the visual
+timeline axis.
+
+Event observations preserve the actual encoded LiveStore event facts and the
+sequence and parent positions visible at each component. Sequence numbers are
+eventlog positions and may change through rebasing, so they are not sufficient
+as immutable cross-component identity. The trace assigns an opaque, run-local
+event reference at first observation and actual sync transitions carry it
+through explicit rebase, confirmation, and propagation mappings. Consumers do
+not correlate events from matching arguments, timestamps, or positions alone.
+
+These observations come from actual Store, sync-state, eventlog, boundary, and
+backend behavior. Existing DevTools and internal observation surfaces should be
+reused where they expose the required semantic facts; the implementation adds
+the smallest explicit internal testing seam for pending-event or rebase lineage
+that those surfaces cannot provide. The runner never infers a product state
+transition merely because it issued an instruction.
+
 The stable semantic record families cover:
 
 - run and phase lifecycle;
@@ -761,17 +772,17 @@ lets the runner detect when a requested fault did not take effect.
 Oracles are first-class scenario configuration, not assertions hidden inside
 runner code.
 
-| Oracle family | Example property |
-| --- | --- |
-| Safety | No accepted event disappears or appears more than once in the authoritative history. |
-| Ordering | Every confirmed client eventlog is a prefix of, and eventually equal to, the backend order. |
-| Convergence | After faults heal and workloads stop, all connected clients reach the same eventlog head within a bounded condition. |
-| Pending resolution | Pending events become confirmed or produce an explicit terminal failure; they are not silently abandoned. |
-| Rebase preservation | Rebase changes ancestry/order as specified without losing the relevant local events. |
-| State convergence | Enabled clients produce equivalent normalized state from the converged eventlog. |
-| Rematerialization | Rebuilding from the authoritative eventlog yields the same normalized state. |
-| Liveness | The system reaches quiescence or a declared steady state after recovery. |
-| Resource bound | Queues, retries, convergence delay, or memory stay within a scenario-specific bound. |
+| Oracle family       | Example property                                                                                                     |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Safety              | No accepted event disappears or appears more than once in the authoritative history.                                 |
+| Ordering            | Every confirmed client eventlog is a prefix of, and eventually equal to, the backend order.                          |
+| Convergence         | After faults heal and workloads stop, all connected clients reach the same eventlog head within a bounded condition. |
+| Pending resolution  | Pending events become confirmed or produce an explicit terminal failure; they are not silently abandoned.            |
+| Rebase preservation | Rebase changes ancestry/order as specified without losing the relevant local events.                                 |
+| State convergence   | Enabled clients produce equivalent normalized state from the converged eventlog.                                     |
+| Rematerialization   | Rebuilding from the authoritative eventlog yields the same normalized state.                                         |
+| Liveness            | The system reaches quiescence or a declared steady state after recovery.                                             |
+| Resource bound      | Queues, retries, convergence delay, or memory stay within a scenario-specific bound.                                 |
 
 Safety failures should terminate or freeze the run promptly while preserving
 artifacts. Liveness and convergence oracles require explicit assumptions about
@@ -840,6 +851,18 @@ Selecting a participant should reveal its eventlog heads, pending suffix,
 rebase generation, batches, queue depths, network state, and materialization
 activity. The UI is an observer and replay surface; runner control should go
 through an explicit control API rather than mutate participants directly.
+
+Scrubbing a completed artifact advances through observation-index boundaries
+and projects backend, Client, Leader-role, session, boundary, and event state
+from the trace prefix. Timeline arrows use explicit event references and
+correlation/causation records rather than temporal proximity. Optional complete
+projection checkpoints may accelerate seeking, but they are derived cache data
+and do not replace the trace as authoritative evidence.
+
+The first replay projection covers sync and eventlog state: topology,
+connectivity, heads, confirmed and pending events, rebases, propagation, and
+settlement/verdict state. Materialized application State remains available in
+explicit inspector snapshots rather than being captured at every cursor.
 
 ### Run Artifacts and Reproduction
 
@@ -1066,4 +1089,4 @@ contributors author scenarios through the typed TypeScript constructors.
 6. How should failing generated scenarios be minimized while preserving the
    causal interleaving that triggered the failure?
 7. Which correctness scenarios can also produce trustworthy performance
-    evidence, and which require a separate wall-clock configuration?
+   evidence, and which require a separate wall-clock configuration?
