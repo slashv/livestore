@@ -18,6 +18,10 @@ import { validatePushPayload } from './validate-push-payload.ts'
 
 export interface MockSyncBackend {
   pushedEvents: Stream.Stream<LiveStoreEvent.Global.Encoded>
+  /** Snapshot of the authoritative eventlog, intended for verification and diagnostics. */
+  events: Effect.Effect<ReadonlyArray<LiveStoreEvent.Global.Encoded>>
+  /** Current backend availability shared by all mock connections. */
+  isConnected: SubscriptionRef.SubscriptionRef<boolean>
   connect: Effect.Effect<void>
   disconnect: Effect.Effect<void>
   makeSyncBackend: Effect.Effect<SyncBackend.SyncBackend, UnknownError, Scope.Scope>
@@ -233,6 +237,8 @@ export const makeMockSyncBackend = (
 
     return {
       pushedEvents: Stream.fromQueue(pushedEventsQueue),
+      events: Ref.get(allEventsRef),
+      isConnected: syncIsConnectedRef,
       connect: SubscriptionRef.set(syncIsConnectedRef, true),
       disconnect: SubscriptionRef.set(syncIsConnectedRef, false),
       makeSyncBackend,

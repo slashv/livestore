@@ -9,17 +9,25 @@ workspace. It provides a versioned serializable AST, schema-backed named
 actions and inspectors, a transport-neutral host, a production-shaped
 in-process profile with one real Store session per Client, controlled
 disconnect/reconnect, bounded stable-poll settlement, semantic trace records,
-four core oracles, and a schema-validated run artifact. The initial corpus
-scenario proves offline and online writers converge through real processors,
-materializers, SQLite State, and the shared mock backend.
+four core oracles, and a schema-validated run artifact. Completed artifacts can
+now be persisted through the scenario CLI and loaded into an initial replay
+visualizer. Its observation-index cursor projects actual backend, Client,
+Leader-role, and session sync/eventlog observations, and its event paths expose
+pending, confirmed, and rebased positions. The initial corpus scenario proves
+offline and online writers converge through real processors, materializers,
+SQLite State, and the shared mock backend.
 
 The coherent baseline is still incomplete. The current slice does not provide
 direct schema-event steps, dynamic Client/session/Leader lifecycle, reusable
 workloads, generated scheduling, runner-controlled delivery gates and replay,
 backend-availability or latency faults, rematerialization, the broader oracle
-catalog, artifact persistence, a shared capability-driven conformance suite,
-or a live/replay visualizer. One session per Client is an advertised v1 host
-limit rather than hidden profile parity.
+catalog, a shared capability-driven conformance suite, or live trace streaming
+and runner control from the visualizer. Event references in this first slice
+are correlated from ordered occurrences of actual eventlog observations. An
+explicit sync-transition observation seam is still required to preserve
+lineage unambiguously when equivalent events are rejected, disappear, or
+reorder. One session per Client is an advertised v1 host limit rather than
+hidden profile parity.
 
 ## VRS
 
@@ -46,6 +54,6 @@ Establish the first coherent headless subsystem in `tests/scenarios/`:
 Close this umbrella delta when that coherent baseline runs headlessly. In the
 same change, create narrower deltas for every accepted requirement that remains
 unimplemented, such as richer workloads/faults, optional trace capabilities,
-or live/replay visualization. Optional participant profiles, backend
+or live visualization and control. Optional participant profiles, backend
 realizations, and cross-profile comparisons do not create deltas merely because
 they have not been implemented.
