@@ -24,6 +24,8 @@ The architecture was selected in
 [decision 0001](./.decisions/0001-declarative-scenario-verification.md), with
 the local fidelity mappings recorded in
 [decision 0003](./.decisions/0003-local-process-and-browser-realizations.md).
+Failed execution capture is specified by
+[decision 0006](./.decisions/0006-preserve-failed-runs.md).
 In-process, isolated-process, and persistent-browser vertical slices now run,
 while the coherent baseline remains incomplete
 ([DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md)).
@@ -403,6 +405,23 @@ Other profiles may use repeated observation or a bounded wall-clock stability
 window and must advertise and record that weaker mechanism. Open streams and
 future polling alone do not prevent settlement.
 
+If a settlement deadline expires, the runner records a structured
+`settlement.failed` boundary containing the declared timeout and the latest
+successfully sampled participant heads, pending counts, and synced flags. It
+then records the active phase and step in a terminal `run.failed` boundary.
+Increasing the timeout is not a substitute for preserving and exposing a
+stable non-convergent state.
+
+Participant hosts expose runtime failures observable at their execution
+boundary as participant-scoped `runtime.failure.observed` records. A browser
+profile may retain a worker or page error reported through its browser console;
+other profiles may provide equivalent process or runtime diagnostics. The
+runner drains these observations during system capture and terminates promptly
+after recording them. This diagnostic channel does not alter LiveStore sync
+behavior or manufacture product causality.
+Any such runtime failure makes the run fail even if the last sampled head and
+pending-count predicates would otherwise satisfy settlement.
+
 ## Artifacts, Headless Runs, and Visualization (LS.SYS.VER.SCEN-R16, R17, R20)
 
 A scenario run artifact contains the normalized AST, application/source
@@ -410,6 +429,13 @@ identity, component versions, execution configuration, environment metadata,
 seed, controlled schedule when available, scenario trace, oracle verdicts and
 failure explanation, relevant eventlog/State snapshots, and wall-clock
 measurements when enabled.
+
+Once `run.started` has been emitted, an operation failure still produces a
+valid artifact with `status: failed` and the complete trace prefix. Final
+snapshots or oracle verdicts may be absent when their capture was unreachable.
+Headless command-line execution persists and catalogs this artifact before
+returning a non-zero status. Preflight configuration errors may fail without an
+artifact because participant execution has not begun.
 
 The minimum replay needs only the artifact and matching source revision. Every
 profile supports seeded replay; profiles with controlled boundaries may also
@@ -420,6 +446,8 @@ view shows topology, connectivity, traffic, pressure, and convergence; its
 timeline view shows application actions and causal transitions by participant.
 Any runner control goes through an explicit API. The UI does not directly
 inspect or mutate participants and is never required for headless execution.
+Settlement and terminal run failures are system-focused playback moments and
+appear as explicit failure boundaries in the timeline and its range overview.
 
 The timeline offers two projections over the same records:
 
@@ -467,6 +495,15 @@ system transitions while suppressing unchanged sampling and runner plumbing.
 An all-records mode retains every raw trace record. Classification is semantic:
 an acknowledgement such as `client.created` remains system-relevant even
 though routine control acknowledgements may be suppressed.
+
+Persistent system conditions are projected as intervals rather than isolated
+markers. In particular, a disconnected Client is highlighted across its
+Leader-role and session lanes from the acknowledged disconnect transition to
+the acknowledged reconnect transition. When either explicit boundary is
+absent, the first sampled connectivity observation may bound the interval only
+when the UI marks that boundary as observational and therefore uncertain. The
+viewer does not extend a condition backward beyond the evidence retained by
+the trace.
 
 Record playback visits every observation-index boundary. Moment playback
 visits a derived list of material navigation points: semantic system

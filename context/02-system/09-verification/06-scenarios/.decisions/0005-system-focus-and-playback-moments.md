@@ -57,5 +57,9 @@ visibility mode or skipped by the current playback mode.
   boundary for navigation does not change that evidence claim.
 - The classifier and material-state comparison are centralized and testable
   viewer projections, not LiveStore core instrumentation.
+- Persistent material state such as Client disconnection can be projected as
+  an interval across that Client's Leader-role and session lanes. Explicit
+  transition boundaries are preferred; sampled boundaries remain visibly
+  uncertain.
 - New trace payload families require an explicit classification decision when
   they should become system-focused navigation points.

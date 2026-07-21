@@ -98,7 +98,7 @@ backend ──pull stream──▶ onNewPullChunk (precedence via semaphore)
   (`meta.sessionChangeset`, then mark `unset`) → re-offer rebased pending
   → restart the push fiber. Sequencing is what the built-in simulation
   harness perturbs (`simSleep` hooks at 5 labeled points, `:83-86,
-  414-422`; `SIMULATION_ENABLED` is hardcoded `true` with a build-macro
+414-422`; `SIMULATION_ENABLED` is hardcoded `true` with a build-macro
   TODO, `:410-411`).
 - **Observability** (`:98-99, 358-361`): sync-state updates surface via a
   separate queue explicitly not relied on for correctness; a devtools
@@ -106,6 +106,11 @@ backend ──pull stream──▶ onNewPullChunk (precedence via semaphore)
 
 ## Backpressure and Known Gaps
 
+- A persistent browser session can fail during a divergent rebase while
+  rematerializing a locally pending create (`UNIQUE constraint failed:
+todos.id`); the cross-profile reproduction and required regression are
+  tracked in
+  [DELTA-001](./.delta/DELTA-001-browser-session-rebase-materialization-failure.md).
 - All processor queues are unbounded; there is no producer backpressure.
   Anti-thrash relies on interrupt/clear on rebase and queue-clear on
   rejection.

@@ -890,6 +890,25 @@ must advertise that weaker capability, and the run artifact records which
 confirmation mechanism was used. Every settle phase has an explicit logical-
 or wall-clock timeout; there is no hidden global meaning of “eventually.”
 
+When that timeout expires, the trace records a structured settlement failure
+with the declared budget and the latest successfully sampled heads, pending
+counts, and synced flags for the expected participants. The run then terminates
+as failed; it does not keep polling merely to make a stuck state less visible.
+Interactive diagnostic scenarios should use short explicit budgets. The
+representative browser workload uses 15 seconds rather than a two-minute
+recovery wait.
+
+Participant hosts also surface runtime failures available at their execution
+boundary. The browser realization, for example, can retain LiveStore worker or
+page errors observed through the browser console as participant-scoped
+`runtime.failure.observed` records. The runner drains and records these facts
+during system observation, then terminates promptly. This is a diagnostic host
+channel; it neither changes sync behavior nor converts a console timestamp into
+product causality.
+A participant runtime failure takes precedence over sampled convergence
+predicates; stale or coarse head equality cannot turn a shut-down participant
+into a passing run.
+
 ### Headless Runs and Visualization
 
 Headless execution is the authoritative mode. It must be usable in focused
@@ -948,6 +967,14 @@ semantics and projected state change rather than origin alone, because an
 acknowledgement such as `client.created` is itself a meaningful topology
 transition.
 
+Persistent conditions appear as intervals rather than disconnected endpoint
+markers. A Client's offline interval spans its Leader-role and session lanes
+and is bounded by acknowledged disconnect and reconnect transitions. If an
+explicit boundary was not retained, a first-observed connectivity sample may
+act as a fallback only when the visual treatment identifies that endpoint as
+observational and uncertain; the viewer never backdates the condition beyond
+the available evidence.
+
 Record playback visits every observation-index boundary. Moment playback
 visits a derived list of semantic system transitions and changed observation
 captures. A capture moment selects its final raw record boundary, thereby
@@ -986,6 +1013,15 @@ A failed or noteworthy run should produce a self-contained artifact containing:
 - oracle results and failure explanation;
 - relevant eventlog and state snapshots; and
 - performance measurements when wall-clock mode is enabled.
+
+Once execution has emitted `run.started`, a control, host, or settlement
+failure is itself a completed evidence-capture outcome. The runner emits a
+terminal structured failure, preserves the complete trace prefix in an
+artifact with `status: failed`, and allows snapshots or verdicts to remain
+empty when their capture could not be reached. The CLI writes and catalogs the
+artifact before exiting non-zero. The replay visualizer exposes the failure as
+a system-focused navigation point and an explicit boundary in both the main
+timeline and range overview.
 
 The minimum reproduction command should need only the artifact and the matching
 source revision. It supports seeded replay for every profile and recorded
