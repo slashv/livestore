@@ -79,10 +79,11 @@ scenario-runner slices exist; the remaining baseline divergence is recorded in
   is not part of scenario-level sync semantics. `refines: LS-R05, LS-R06,
 LS-R10`
 - **LS.SYS.VER.SCEN-R13 Scenario trace protocol:** Every run emits a versioned
-  scenario trace with a stable run descriptor, ordered semantic records,
-  participant and boundary identities, correlation and causation, and typed
-  payloads. Namespaced implementation diagnostics may extend the trace, but
-  portable consumers ignore unknown diagnostics and do not depend on them.
+  scenario trace with a stable run descriptor, runner-receipt-ordered semantic
+  records, distinct causal partial-order evidence, participant and boundary
+  identities, correlation and causation, and typed payloads. Namespaced
+  implementation diagnostics may extend the trace, but portable consumers
+  ignore unknown diagnostics and do not depend on them.
 - **LS.SYS.VER.SCEN-R14 Scenario oracles:** Safety, ordering, convergence,
   pending resolution, rebase preservation, state, rematerialization, liveness,
   and optional resource/performance checks are explicit scenario oracles that
@@ -106,3 +107,18 @@ LS-R10`
   backend realizations, traces, oracles, artifacts, corpus, and visualization
   live in one private `tests/scenarios/` workspace. It may depend on product
   packages; product packages never depend on it.
+- **LS.SYS.VER.SCEN-R19 Causal and temporal evidence:** A scenario trace
+  preserves participant-local sequence, explicit control and boundary
+  causation, runner receipt order, observation-capture membership, and
+  calibrated monotonic elapsed-time evidence as distinct facts. Cross-process
+  time carries calibration uncertainty and never creates a causal edge or
+  affects LiveStore sync behavior. Records distinguish an actual instrumented
+  transition from a fact first observed by later sampling.
+- **LS.SYS.VER.SCEN-R20 Truth-preserving trace projections:** Visualization
+  offers causal-flow and elapsed-time projections over the same immutable
+  trace. Flow layout exposes partial-order structure without claiming that
+  sibling transitions were simultaneous; elapsed-time layout exposes stalls
+  and uncertainty without claiming timestamp order is causality. Aggregation,
+  stage alignment, and idle-time compression never remove access to the raw
+  records or change observation-index cursor semantics. `refines:
+  LS.SYS.VER.SCEN-R13, LS.SYS.VER.SCEN-R17`

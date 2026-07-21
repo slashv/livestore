@@ -134,7 +134,21 @@
   _Avoid:_ scenario runtime (conflicts with LiveStore's Runtime).
 - **Scenario trace** — A versioned semantic stream of Scenario instructions,
   acknowledgements, observations, and verdicts. OTel spans and other
-  implementation details are namespaced diagnostic extensions.
+  implementation details are namespaced diagnostic extensions. Its canonical
+  ordering evidence is a causal partial order; runner receipt order and
+  timestamps remain separately inspectable observations.
+- **Scenario observation capture** — One runner-initiated collection of
+  component observations. It groups facts sampled during the same collection
+  pass but is neither an atomic distributed snapshot nor proof that the
+  observed transitions happened simultaneously.
+- **Scenario causal order** — The partial order supported by participant-local
+  sequence and explicit control, boundary-transition, correlation, and
+  causation evidence. Events without such a relationship remain unordered even
+  when their timestamps differ.
+- **Calibrated scenario time** — An estimated shared monotonic elapsed-time
+  interval derived from a participant's local monotonic clock and a recorded
+  clock calibration. Its uncertainty is part of the estimate; it measures
+  latency but never establishes LiveStore sync causality.
 - **Scenario oracle** — An executable rule producing a bounded verification
   verdict and evidence references from Scenario observations and State.
 - **Scenario run artifact** — The reproduction bundle containing the
@@ -190,10 +204,11 @@ in their name:
   Control operation are its discovery/inspection vocabulary.
 - **Scenario family** (leitwort "scenario") — anchor **Scenario
   specification**; followers Scenario participant, Scenario runner, Scenario
-  trace, Scenario oracle, and Scenario run artifact. Application definition,
-  Participant host, Participant execution profile, Execution configuration,
-  Workload pattern, Fault model, Convergence group, and Settlement barrier are
-  its execution and evidence vocabulary.
+  trace, Scenario observation capture, Scenario causal order, Scenario oracle,
+  and Scenario run artifact. Application definition, Participant host,
+  Participant execution profile, Execution configuration, Workload pattern,
+  Fault model, Convergence group, Settlement barrier, and Calibrated scenario
+  time are its execution and evidence vocabulary.
 
 ### Naming rubric
 

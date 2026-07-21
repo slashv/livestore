@@ -29,7 +29,14 @@ lifecycle, reusable workloads, generated scheduling, runner-controlled
 delivery gates and replay, backend-availability or latency faults,
 rematerialization, the broader oracle catalog, a fully shared
 capability-driven host-conformance suite, or live trace streaming and runner
-control from the visualizer. Event references in this first slice are
+control from the visualizer. Trace records currently carry the runner's
+`Date.now()` value and serialization index; they do not yet carry
+participant-local sequence and monotonic time, clock calibration and
+uncertainty, observation-capture identity, or boundary-transition versus
+`firstObserved` evidence semantics. The viewer consequently has neither the
+accepted causal-flow projection nor calibrated elapsed-time projection.
+
+Event references in this first slice are
 correlated from ordered occurrences of actual eventlog observations. An
 explicit sync-transition observation seam is still required to preserve
 lineage unambiguously when equivalent events are rejected, disappear, or

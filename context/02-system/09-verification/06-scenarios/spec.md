@@ -226,11 +226,31 @@ when selected, it names the semantic properties being compared. A failure in a
 platform-realized profile is evidence about that configuration, not automatic
 proof of host non-conformance or a requirement for one-to-one run equivalence.
 
-## Time, Scheduling, and Reproduction (LS.SYS.VER.SCEN-R09, R10)
+## Time, Scheduling, and Reproduction (LS.SYS.VER.SCEN-R09, R10, R19)
 
 Logical time controls correctness-run timers, scheduled faults, workload rates,
-and runner-owned delivery delays. Wall-clock time supplies throughput, latency,
-CPU, and memory evidence. The two are never conflated.
+and runner-owned delivery delays. Participant-local monotonic time and
+calibrated scenario time describe observed elapsed time. Wall-clock time
+supplies externally comparable throughput, latency, CPU, and memory evidence.
+These notions are never conflated, and none participates in LiveStore's sync
+semantics.
+
+Every instrumented participant assigns a monotonically increasing local
+sequence and local monotonic timestamp to its records. A profile that compares
+elapsed time across processes calibrates each participant clock against the
+scenario controller, records the calibration identity, and represents the
+result as an estimated scenario-time interval whose uncertainty includes clock
+offset and transport uncertainty. The controller receipt timestamp remains a
+fallback observation, not a substitute for participant occurrence time.
+
+Participant-local sequence establishes observed order within that participant.
+Explicit instruction/acknowledgement, request/response, boundary-transition,
+correlation, and causation records establish supported cross-participant
+relationships. Timestamp order alone never creates a causal edge. Overlapping
+calibrated intervals remain temporally unordered, and a timestamp that
+contradicts an explicit causal edge beyond its uncertainty is reported as a
+clock-calibration or instrumentation problem rather than used to rewrite the
+causal evidence.
 
 Every generated choice derives from the recorded seed. This reproduces inputs,
 requested timing, workloads, and fault choices, but does not promise identical
@@ -273,12 +293,15 @@ capabilities. The initial profile nevertheless runs SQLite materialization for
 every participant because current rebase, changeset, transaction, and
 materializer-failure behavior depends on it.
 
-## Scenario Trace Protocol (LS.SYS.VER.SCEN-R13)
+## Scenario Trace Protocol (LS.SYS.VER.SCEN-R13, R19)
 
 One versioned scenario trace serves live observation and replay. Its stable run
 descriptor records scenario/run IDs, scenario and trace versions, source and
 application identity, execution configuration, component versions,
 capabilities, seed, and reproduction mode.
+
+The ordering and timing evidence model is selected in
+[decision 0004](./.decisions/0004-causal-order-and-calibrated-time.md).
 
 Stable records share an envelope containing:
 
@@ -286,11 +309,31 @@ Stable records share an envelope containing:
 - origin: instruction, acknowledgement, observation, or verdict;
 - participant, role, and boundary identities where applicable;
 - logical and wall-clock time where provided;
+- participant-local sequence and monotonic time where emitted;
+- optional calibrated scenario-time interval, calibration identity, and
+  uncertainty;
+- observation-capture identity for facts sampled in one collection pass;
+- evidence semantics distinguishing boundary sent/received/applied transitions
+  from state that was only first observed by sampling;
 - correlation and causation identifiers where applicable; and
 - stable record kind plus typed, versioned payload.
 
 The observation index orders runner receipt; it does not assert an atomic
-distributed order. Stable semantic families cover run/phase lifecycle,
+distributed order. A scenario observation capture groups component facts
+collected by one runner sampling pass, but the collection itself may read the
+backend and participants at different instants. Capture membership therefore
+means "indistinguishable at this sampling resolution," not simultaneous. A
+capture that first observes an event everywhere cannot recover intermediate
+propagation transitions that occurred between samples.
+
+The trace's canonical ordering evidence is a partial order. It combines
+participant-local sequence with explicit control and boundary-transition
+causation. Independent branches remain unordered even when calibrated time
+shows that one completed much later. Calibrated time annotates this graph with
+latency and scheduling evidence; it does not turn it into a fabricated global
+total order.
+
+Stable semantic families cover run/phase lifecycle,
 participant lifecycle, control acknowledgements, application actions,
 connectivity and boundary batches, event disposition, eventlog positions,
 advance/rebase transitions, fault activation/healing, settlement progress,
@@ -299,10 +342,9 @@ oracle verdicts, and structured failures.
 Trace consumers reconstruct an **observed system state at cursor** from the
 prefix ending at a selected observation index. That projection is the runner's
 accumulated knowledge after one record, not an atomic distributed snapshot at a
-wall-clock instant. A visual timeline may lay records out uniformly by
-observation order or proportionally by relative wall time without changing
+wall-clock instant. Timeline layout, grouping, and playback never change these
 cursor semantics. Logical time remains available for scheduling and
-reproduction but need not be the visual timeline axis.
+reproduction but is not a visual claim about when product transitions occurred.
 
 Portable event observations embed the actual encoded LiveStore event facts
 available at the observed component, including origin and current sequence and
@@ -318,8 +360,13 @@ LiveStore sync state, eventlogs, boundary operations, and transition observers;
 the runner does not simulate product state from its instructions. Existing
 DevTools or internal observation surfaces may supply those facts, with the
 smallest explicit internal testing seam added when they cannot expose pending
-event or rebase lineage. Scenario-level references and envelopes make the
-result portable without replacing LiveStore event structure.
+event or rebase lineage. Scenario-side wrappers should first instrument the
+existing session↔Leader and Leader↔backend boundaries. If distinguishing
+transport receipt from eventlog application requires a product seam, it is an
+optional dev/internal observation hook owned by the relevant LiveStore
+subsystem rather than a new synchronization dependency. Scenario-level
+references and envelopes make the result portable without replacing LiveStore
+event structure.
 
 Private queues, raw depths, scheduler state, SQLite details, provider payloads,
 Web Lock/OPFS internals, OTel spans, stack traces, and performance entries are
@@ -354,7 +401,7 @@ Other profiles may use repeated observation or a bounded wall-clock stability
 window and must advertise and record that weaker mechanism. Open streams and
 future polling alone do not prevent settlement.
 
-## Artifacts, Headless Runs, and Visualization (LS.SYS.VER.SCEN-R16, R17)
+## Artifacts, Headless Runs, and Visualization (LS.SYS.VER.SCEN-R16, R17, R20)
 
 A scenario run artifact contains the normalized AST, application/source
 identity, component versions, execution configuration, environment metadata,
@@ -372,12 +419,34 @@ timeline view shows application actions and causal transitions by participant.
 Any runner control goes through an explicit API. The UI does not directly
 inspect or mutate participants and is never required for headless execution.
 
+The timeline offers two projections over the same records:
+
+- **Causal-flow projection.** Horizontal stages expose event propagation and
+  other supported partial-order relationships. Sibling branches may align as
+  the same structural stage, but alignment does not claim simultaneity. Actual
+  elapsed delay remains visible through wait segments, latency annotations,
+  uncertainty, or diagnostic emphasis.
+- **Elapsed-time projection.** Horizontal position uses calibrated scenario
+  time. Delayed participants move later on the axis; overlapping uncertainty
+  intervals are not forced into a false before/after order. Known causal links
+  remain visible and take precedence over timestamp-based presentation.
+
+A compact trace carpet may group all records by observation capture and expose
+less prominent instructions, acknowledgements, observations, and verdicts.
+Multiple records at one projected position stack rather than overwrite one
+another. Selecting any aggregate or marker reveals its raw records, local
+sequence, runner receipt index, capture, timing estimate and uncertainty, and
+evidence semantics. Idle-time compression is permitted only when visibly
+marked.
+
 Scrubbing selects an observation-index boundary and projects the trace prefix
 into backend, Client, Leader-role, session, boundary, and event state. Timeline
 arrows use explicit event references and correlation/causation records rather
-than temporal proximity. Playback of a completed artifact advances this cursor;
-it is distinct from rerunning the scenario. Optional checkpoints may accelerate
-seeking but are derived cache data and never replace the authoritative trace.
+than capture membership or temporal proximity. No arrow is drawn when the
+trace lacks that evidence. Playback of a completed artifact advances this
+cursor; it is distinct from rerunning the scenario. Optional checkpoints may
+accelerate seeking but are derived cache data and never replace the
+authoritative trace.
 
 The first replay visualizer projects sync and eventlog evidence only: topology,
 connectivity, heads, confirmed and pending events, rebases, propagation, and

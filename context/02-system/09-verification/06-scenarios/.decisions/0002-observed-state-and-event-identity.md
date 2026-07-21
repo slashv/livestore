@@ -2,6 +2,9 @@
 
 Status: accepted (maintainer confirmation, 2026-07-20)
 
+Trace ordering and timeline projection are refined by
+[decision 0004](./0004-causal-order-and-calibrated-time.md).
+
 ## Context
 
 A replay visualizer must let a contributor scrub a scenario trace and inspect
