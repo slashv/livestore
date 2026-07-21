@@ -939,6 +939,23 @@ aggregate supports drill-down to raw local sequence, runner receipt index,
 capture, timing and uncertainty, and evidence semantics. In fitted elapsed-time
 mode the carpet retains the raw linear-time distribution as context.
 
+Trace visibility and playback stepping are separate projections. A
+system-focused visibility mode retains application actions, eventlog changes,
+topology, connectivity, lifecycle, settlement, failure, and other material
+system transitions while suppressing unchanged sampling and runner plumbing;
+an all-records mode exposes the complete trace. Classification follows payload
+semantics and projected state change rather than origin alone, because an
+acknowledgement such as `client.created` is itself a meaningful topology
+transition.
+
+Record playback visits every observation-index boundary. Moment playback
+visits a derived list of semantic system transitions and changed observation
+captures. A capture moment selects its final raw record boundary, thereby
+applying every record in the capture without claiming the capture was atomic.
+Skipped records remain part of prefix reduction, the UI retains the raw record
+index beside the moment ordinal, and switching playback or visibility never
+rewrites the artifact or creates another cursor.
+
 Selecting a participant should reveal its eventlog heads, pending suffix,
 rebase generation, batches, queue depths, network state, and materialization
 activity. The UI is an observer and replay surface; runner control should go

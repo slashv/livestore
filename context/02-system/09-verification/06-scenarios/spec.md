@@ -302,6 +302,8 @@ capabilities, seed, and reproduction mode.
 
 The ordering and timing evidence model is selected in
 [decision 0004](./.decisions/0004-causal-order-and-calibrated-time.md).
+Truth-preserving visibility and playback navigation are selected in
+[decision 0005](./.decisions/0005-system-focus-and-playback-moments.md).
 
 Stable records share an envelope containing:
 
@@ -458,14 +460,31 @@ sequence, runner receipt index, capture, timing estimate and uncertainty, and
 evidence semantics. In fitted elapsed-time mode the carpet retains the raw
 linear-time distribution as context.
 
+Trace visibility and playback stepping are independent viewer projections. A
+system-focused visibility mode retains application actions, eventlog changes,
+topology, connectivity, lifecycle, settlement, failure, and other material
+system transitions while suppressing unchanged sampling and runner plumbing.
+An all-records mode retains every raw trace record. Classification is semantic:
+an acknowledgement such as `client.created` remains system-relevant even
+though routine control acknowledgements may be suppressed.
+
+Record playback visits every observation-index boundary. Moment playback
+visits a derived list of material navigation points: semantic system
+transitions and the final boundary of an observation capture whose accumulated
+system projection changed. Records skipped by navigation are still reduced
+into the state at every selected point. One moment may therefore represent
+several raw records, and the UI retains both its moment ordinal and raw record
+index. Filtering and moment derivation never rewrite the artifact or define a
+second cursor.
+
 Scrubbing selects an observation-index boundary and projects the trace prefix
 into backend, Client, Leader-role, session, boundary, and event state. Timeline
 arrows use explicit event references and correlation/causation records rather
 than capture membership or temporal proximity. No arrow is drawn when the
 trace lacks that evidence. Playback of a completed artifact advances this
-cursor; it is distinct from rerunning the scenario. Optional checkpoints may
-accelerate seeking but are derived cache data and never replace the
-authoritative trace.
+cursor, either through every record or through derived moment boundaries; it is
+distinct from rerunning the scenario. Optional checkpoints may accelerate
+seeking but are derived cache data and never replace the authoritative trace.
 
 The first replay visualizer projects sync and eventlog evidence only: topology,
 connectivity, heads, confirmed and pending events, rebases, propagation, and

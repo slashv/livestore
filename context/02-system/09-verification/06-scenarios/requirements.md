@@ -119,6 +119,7 @@ LS-R10`
   trace. Flow layout exposes partial-order structure without claiming that
   sibling transitions were simultaneous; elapsed-time layout exposes stalls
   and uncertainty without claiming timestamp order is causality. Aggregation,
-  stage alignment, and idle-time compression never remove access to the raw
-  records or change observation-index cursor semantics. `refines:
-  LS.SYS.VER.SCEN-R13, LS.SYS.VER.SCEN-R17`
+  stage alignment, idle-time compression, visibility filters, and derived
+  playback navigation never remove access to the raw records or change
+  observation-index cursor semantics. `refines:
+LS.SYS.VER.SCEN-R13, LS.SYS.VER.SCEN-R17`
