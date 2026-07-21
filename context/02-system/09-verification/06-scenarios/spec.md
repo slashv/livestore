@@ -432,8 +432,23 @@ The timeline offers two projections over the same records:
   remain visible and take precedence over timestamp-based presentation. Its
   default fitted scale may compress long gaps only when each distortion is
   visibly marked with the real duration; an uncompressed linear-time scale
-  remains available. Markers with colliding timestamps stack vertically rather
-  than receive invented horizontal separation.
+  remains available.
+
+The timeline uses semantic zoom without changing either projection's evidence:
+spacious observations receive labelled markers, denser observations become
+points, and observations below the available pixel resolution become bounded
+aggregates. Aggregation is local to a participant lane and projected visual
+bin; neighbouring markers must not transitively collapse into a lane-wide
+stack. Observations at one projected position may group in place, but the
+visualizer does not invent horizontal or unbounded vertical separation. Hover
+or selection exposes the observations represented by a point or aggregate.
+
+A range navigator retains a whole-run density overview while its two handles
+select the main timeline's visible window. Narrowing or panning that window
+recomputes semantic detail from the visible density; it does not mutate the
+artifact, projection evidence, or independently selected trace cursor. The
+overview continues to locate that cursor when it falls outside the main
+window.
 
 A compact trace carpet may group all records by observation capture and expose
 less prominent instructions, acknowledgements, observations, and verdicts.
