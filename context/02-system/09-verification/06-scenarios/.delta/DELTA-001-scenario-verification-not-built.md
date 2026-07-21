@@ -21,7 +21,14 @@ entire persistent Client can restart without losing materialized State before
 settling. Completed artifacts can be selected by CLI profile, persisted, and
 loaded into the replay visualizer. Its observation-index cursor projects actual
 backend, Client, Leader-role, and session sync/eventlog observations, and its
-event paths expose pending, confirmed, and rebased positions.
+event markers expose pending, confirmed, and rebased positions. The trace now
+distinguishes controller events, instructions, acknowledgements,
+`firstObserved` samples, and verdicts; preserves non-atomic observation-capture
+identity; records explicit instruction→acknowledgement edges; and carries the
+controller's local monotonic sequence and calibrated scenario-time point. The
+viewer offers capture-aligned flow and calibrated-time layouts over those same
+records, a raw trace carpet, and matching-event highlighting without inferring
+propagation arrows.
 
 The coherent baseline is still incomplete. The current slice does not provide
 direct schema-event steps, dynamic participant addition/removal or Leader-role
@@ -29,12 +36,13 @@ lifecycle, reusable workloads, generated scheduling, runner-controlled
 delivery gates and replay, backend-availability or latency faults,
 rematerialization, the broader oracle catalog, a fully shared
 capability-driven host-conformance suite, or live trace streaming and runner
-control from the visualizer. Trace records currently carry the runner's
-`Date.now()` value and serialization index; they do not yet carry
-participant-local sequence and monotonic time, clock calibration and
-uncertainty, observation-capture identity, or boundary-transition versus
-`firstObserved` evidence semantics. The viewer consequently has neither the
-accepted causal-flow projection nor calibrated elapsed-time projection.
+control from the visualizer. Process and browser participants do not yet emit
+their own local sequence and monotonic time, clock-calibration samples, or
+exact sync boundary receive/apply transitions. Their current component facts
+are therefore explicitly controller-receipt-timed `firstObserved` samples. The
+flow view can align captures and display explicit control causation, but exact
+propagation stages, cross-process uncertainty intervals, and sync arrows remain
+absent until that participant/boundary evidence exists.
 
 Event references in this first slice are
 correlated from ordered occurrences of actual eventlog observations. An
