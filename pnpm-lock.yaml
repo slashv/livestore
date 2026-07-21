@@ -2340,15 +2340,15 @@ importers:
 
   tests/scenarios:
     dependencies:
+      '@cloudflare/workers-types':
+        specifier: 4.20251118.0
+        version: 4.20251118.0
       '@livestore/adapter-web':
         specifier: workspace:^
         version: link:../../packages/@livestore/adapter-web
       '@livestore/common':
         specifier: workspace:^
         version: link:../../packages/@livestore/common
-      '@livestore/effect-playwright':
-        specifier: workspace:^
-        version: link:../../packages/@livestore/effect-playwright
       '@livestore/livestore':
         specifier: workspace:^
         version: link:../../packages/@livestore/livestore
@@ -2358,10 +2358,10 @@ importers:
       '@livestore/utils':
         specifier: workspace:^
         version: link:../../packages/@livestore/utils
+      '@playwright/test':
+        specifier: 1.61.0
+        version: 1.61.0
     devDependencies:
-      '@cloudflare/workers-types':
-        specifier: 4.20251118.0
-        version: 4.20251118.0
       '@effect/opentelemetry':
         specifier: 4.0.0-beta.99
         version: 4.0.0-beta.99(@opentelemetry/api-logs@0.217.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.208.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.7.1(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-web@2.2.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.41.1)(effect@4.0.0-beta.99)
@@ -2389,9 +2389,6 @@ importers:
       '@opentelemetry/resources':
         specifier: 2.2.0
         version: 2.2.0(@opentelemetry/api@1.9.0)
-      '@playwright/test':
-        specifier: 1.61.0
-        version: 1.61.0
       '@standard-schema/spec':
         specifier: 1.1.0
         version: 1.1.0
