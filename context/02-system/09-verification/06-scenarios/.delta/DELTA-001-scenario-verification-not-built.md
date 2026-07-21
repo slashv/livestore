@@ -27,7 +27,8 @@ distinguishes controller events, instructions, acknowledgements,
 identity; records explicit instruction→acknowledgement edges; and carries the
 controller's local monotonic sequence and calibrated scenario-time point. The
 viewer offers capture-aligned flow and calibrated-time layouts over those same
-records, a raw trace carpet, and matching-event highlighting without inferring
+records, fitted and raw elapsed-time scales with explicit gap compression, a
+raw-time trace carpet, and matching-event highlighting without inferring
 propagation arrows.
 
 The coherent baseline is still incomplete. The current slice does not provide

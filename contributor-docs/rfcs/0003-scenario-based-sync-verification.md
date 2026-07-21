@@ -146,10 +146,10 @@ message transport without changing scenario semantics.
 | **Fault model**                   | Controlled changes to connectivity, availability, latency, process lifetime, or capacity.                                                          |
 | **Convergence group**             | Scenario participants that a settle phase requires to reach the same authoritative eventlog and, when requested, equivalent state.                 |
 | **Settlement barrier**            | Profile-appropriate confirmation that convergence predicates form a stable fixed point even if background streams or future polling remain active. |
-| **Scenario trace**                | Versioned semantic stream of runner-receipt-ordered records plus distinct causal partial-order evidence.                                            |
+| **Scenario trace**                | Versioned semantic stream of runner-receipt-ordered records plus distinct causal partial-order evidence.                                           |
 | **Scenario observation capture**  | One non-atomic runner collection pass grouping component facts sampled at potentially different instants.                                          |
 | **Scenario causal order**         | Partial order supported by participant-local sequence and explicit control, boundary-transition, correlation, and causation evidence.              |
-| **Calibrated scenario time**      | Estimated shared monotonic elapsed-time interval with recorded clock-calibration uncertainty; never a sync ordering mechanism.                      |
+| **Calibrated scenario time**      | Estimated shared monotonic elapsed-time interval with recorded clock-calibration uncertainty; never a sync ordering mechanism.                     |
 | **Scenario oracle**               | Executable rule that turns observed state and scenario-trace data into a verdict.                                                                  |
 | **Scenario run artifact**         | Scenario, seed, execution configuration, trace, measurements, snapshots, and oracle results needed to inspect or reproduce one run.                |
 
@@ -912,14 +912,18 @@ The timeline itself provides two projections over the same immutable records:
 - **Elapsed-time projection:** horizontal position uses calibrated scenario
   time so a delayed participant moves later on the axis. Overlapping
   uncertainty intervals are not forced into a false order, and known causal
-  links take precedence over timestamp-based presentation.
+  links take precedence over timestamp-based presentation. Its default fitted
+  scale may compress long gaps only when each distortion is visibly labelled
+  with the real duration; an uncompressed linear-time scale remains available.
+  Markers with colliding timestamps stack vertically rather than receive
+  invented horizontal separation.
 
 A compact trace carpet groups records by observation capture and retains less
 prominent instructions, acknowledgements, observations, and verdicts. Records
 at one projected position stack rather than overwrite one another. Every
 aggregate supports drill-down to raw local sequence, runner receipt index,
-capture, timing and uncertainty, and evidence semantics. Visually compressed
-idle time is always marked.
+capture, timing and uncertainty, and evidence semantics. In fitted elapsed-time
+mode the carpet retains the raw linear-time distribution as context.
 
 Selecting a participant should reveal its eventlog heads, pending suffix,
 rebase generation, batches, queue depths, network state, and materialization

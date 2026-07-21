@@ -429,15 +429,19 @@ The timeline offers two projections over the same records:
 - **Elapsed-time projection.** Horizontal position uses calibrated scenario
   time. Delayed participants move later on the axis; overlapping uncertainty
   intervals are not forced into a false before/after order. Known causal links
-  remain visible and take precedence over timestamp-based presentation.
+  remain visible and take precedence over timestamp-based presentation. Its
+  default fitted scale may compress long gaps only when each distortion is
+  visibly marked with the real duration; an uncompressed linear-time scale
+  remains available. Markers with colliding timestamps stack vertically rather
+  than receive invented horizontal separation.
 
 A compact trace carpet may group all records by observation capture and expose
 less prominent instructions, acknowledgements, observations, and verdicts.
 Multiple records at one projected position stack rather than overwrite one
 another. Selecting any aggregate or marker reveals its raw records, local
 sequence, runner receipt index, capture, timing estimate and uncertainty, and
-evidence semantics. Idle-time compression is permitted only when visibly
-marked.
+evidence semantics. In fitted elapsed-time mode the carpet retains the raw
+linear-time distribution as context.
 
 Scrubbing selects an observation-index boundary and projects the trace prefix
 into backend, Client, Leader-role, session, boundary, and event state. Timeline
