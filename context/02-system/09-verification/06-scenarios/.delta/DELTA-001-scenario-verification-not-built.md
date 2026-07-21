@@ -36,13 +36,14 @@ lifecycle, reusable workloads, generated scheduling, runner-controlled
 delivery gates and replay, backend-availability or latency faults,
 rematerialization, the broader oracle catalog, a fully shared
 capability-driven host-conformance suite, or live trace streaming and runner
-control from the visualizer. Process and browser participants do not yet emit
-their own local sequence and monotonic time, clock-calibration samples, or
-exact sync boundary receive/apply transitions. Their current component facts
-are therefore explicitly controller-receipt-timed `firstObserved` samples. The
-flow view can align captures and display explicit control causation, but exact
-propagation stages, cross-process uncertainty intervals, and sync arrows remain
-absent until that participant/boundary evidence exists.
+control from the visualizer. Process and browser observation responses now emit
+participant-local sequence and monotonic time; controller round-trip samples
+calibrate those occurrences into explicit uncertainty intervals. They do not
+yet expose exact sync boundary receive/apply transitions, however. Component
+facts therefore remain `firstObserved` samples rather than application-time
+claims. The flow view can align captures and display explicit control
+causation, but exact propagation stages and sync arrows remain absent until
+that boundary evidence exists.
 
 Event references in this first slice are
 correlated from ordered occurrences of actual eventlog observations. An
