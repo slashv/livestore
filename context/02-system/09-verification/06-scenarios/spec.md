@@ -499,6 +499,16 @@ anonymous observation marker explains which participant, connectivity, head,
 pending suffix, or event state changed. In fitted elapsed-time mode the carpet
 retains the raw linear-time distribution as context.
 
+Moment inspection first presents its member records in retained order, grouped
+by backend, Client, and session scope without implying capture atomicity or
+causality. Each record exposes a concise semantic presentation derived from its
+tagged payload, with the complete envelope and payload available through a
+foldable JSON tree. Selecting a record for detail is independent from the trace
+cursor: it does not project a partial capture or change the system state being
+replayed. Inspector section visibility follows the operator while they compare
+records, and each record's expanded JSON branches are restored when revisited
+for the lifetime of the current viewer session only.
+
 Trace visibility and playback stepping are independent viewer projections. A
 system-focused visibility mode retains application actions, eventlog changes,
 topology, connectivity, lifecycle, settlement, failure, and other material
