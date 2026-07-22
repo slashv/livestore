@@ -58,6 +58,9 @@ Evidence: maintainer-approved vocabulary and first implementation slice on
 - Existing serialized acknowledgement payload names may remain for artifact
   compatibility, but UI and documentation call their boundary a Control
   acknowledgement.
+- Participant-host failure categories describe infrastructure, request
+  rejection, invalid response, response timeout, or transport failure
+  independently from definite/indefinite Operation outcome certainty.
 - Failure-only outcome records may be added compatibly while successful
   outcomes are projected from retained acknowledgements.
 - Sampled observations may share a correlation ID with an operation without

@@ -137,7 +137,8 @@ LS.SYS.VER.SCEN-R13, LS.SYS.VER.SCEN-R17`
   Scenario operations preserve stable identity and classify their outcome as
   success, definite failure, or indefinite whenever the execution boundary
   supplies that knowledge. Timeouts and lost responses never imply that an
-  operation did not occur. A Scenario operation history is a derived
+  operation did not occur. Participant-host failure category is independent
+  from that outcome certainty. A Scenario operation history is a derived
   invocation/outcome projection and advertises which operation families and
   concurrency boundaries it covers; the full Scenario trace remains the
   authoritative evidence envelope.

@@ -148,6 +148,23 @@ boundary. It is not proof of Sync backend confirmation, propagation, Recovery,
 or the requested observed state. Scenario operations retain successful,
 definite-failure, or indefinite outcomes; a timeout never proves non-execution.
 
+Participant-host failures use a portable category independently from outcome
+certainty:
+
+| Category                    | Meaning                                                              |
+| --------------------------- | -------------------------------------------------------------------- |
+| Host infrastructure failure | The execution profile could not create, run, or clean up its host    |
+| Request rejected            | The participant host returned a negative response for the request    |
+| Invalid response            | A returned response did not satisfy the portable response contract   |
+| Response timeout            | No response crossed the advertised boundary before its bounded limit |
+| Transport failure           | The controller/participant channel failed while carrying the request |
+
+`capability-unavailable` is reserved for a configuration or operation the
+profile does not advertise, rather than a request that failed at runtime. A
+category alone never establishes certainty: a transport failure before send
+can be definite, while loss after dispatch is indefinite; a response timeout
+is indefinite. Profile-native details remain in the diagnostic message.
+
 Workload patterns declare compatible application actions, parameters, targets,
 rate/count, and stopping condition. Their deterministic expansion is compact in
 the AST, while each emitted application action is recorded in the trace.
@@ -226,7 +243,8 @@ not claim deployed-service evidence.
 Every implemented participant host passes a shared suite for the capabilities
 it claims: creation, action dispatch, lifecycle control, capability rejection,
 stable identities, core trace families, control/fault failure reporting, and
-valid artifacts.
+valid artifacts. Shared failure conformance verifies the portable category and
+the separate definite/indefinite outcome for each exposed failure boundary.
 
 A scenario using only shared capabilities remains unchanged across compatible
 profiles. Results are profile-scoped. Cross-profile comparison is optional;

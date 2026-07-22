@@ -132,6 +132,14 @@ a participant's `Store`, processors, adapter, or databases. A later browser or
 process host can therefore carry the same control protocol over an RPC or
 message transport without changing scenario semantics.
 
+Participant-host failures use the same portable categories across execution
+profiles: host infrastructure failure, request rejection, invalid response,
+response timeout, and transport failure. Category and Operation outcome
+certainty are orthogonal. For example, a transport failure observed before
+send can be definite, while a timeout or transport loss after dispatch is
+indefinite. `capability-unavailable` denotes an unsupported advertised surface,
+not a generic runtime failure.
+
 ### Terminology
 
 | Term                              | Meaning                                                                                                                                            |
@@ -146,6 +154,7 @@ message transport without changing scenario semantics.
 | **Workload pattern**              | Reusable generator of application actions assigned to one or more clients.                                                                         |
 | **Scenario operation**            | Runner-invoked interaction identified across instruction, host response, observations, and outcome.                                                |
 | **Control acknowledgement**       | Evidence that the participant host completed request handling at its advertised boundary; not backend confirmation or propagation.                 |
+| **Participant-host failure**      | Portable infrastructure, rejection, invalid-response, timeout, or transport category, independent from Operation outcome certainty.                |
 | **Operation outcome**             | Success, definite failure, or indefinite completion when the response boundary is lost.                                                            |
 | **Scenario operation history**    | Derived invocation/outcome projection for history checks; complete only for retained operation and concurrency boundaries.                         |
 | **Scenario fault model**          | Supported adverse connectivity, availability, latency, process-lifetime, or capacity conditions and assumptions.                                   |

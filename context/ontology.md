@@ -126,6 +126,10 @@
 - **Control acknowledgement** — Evidence that a Participant host completed
   handling a controller request at its advertised boundary. It is neither Sync
   backend confirmation nor proof of propagation.
+- **Participant-host failure** — A portable failure category at the
+  Participant-host boundary: host infrastructure failure, request rejection,
+  invalid response, response timeout, or transport failure. Category is
+  independent from definite or indefinite Operation outcome certainty.
 - **Operation outcome** — The controller's classification of a Scenario
   operation as successful, definitely failed, or indefinite. An indefinite
   outcome means the completion boundary was lost; it does not prove that the
@@ -245,8 +249,8 @@ in their name:
   Participant execution profile, Execution configuration, Workload pattern,
   Scenario fault model, Fault injection, Fault removal, Recovery, Quiescence,
   Convergence, Convergence group, Settlement barrier, Control acknowledgement,
-  Operation outcome, and Calibrated scenario time are its execution and
-  evidence vocabulary.
+  Participant-host failure, Operation outcome, and Calibrated scenario time are
+  its execution and evidence vocabulary.
 
 ### Naming rubric
 
