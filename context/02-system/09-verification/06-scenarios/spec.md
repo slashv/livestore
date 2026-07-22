@@ -427,11 +427,22 @@ controlled delivery that can change the convergence result. This barrier does
 not include State or other property verdicts.
 
 The controlled profile releases due work, advances logical time until no
-immediately due controlled work can affect the verdict, observes every expected
+immediately due controlled work can affect convergence, observes every expected
 participant at `H`, confirms backend stability, and re-evaluates predicates.
 Other profiles may use repeated observation or a bounded wall-clock stability
 window and must advertise and record that weaker mechanism. Open streams and
 future polling alone do not prevent settlement.
+
+The current serial runner projects outstanding instruction/outcome boundaries
+before each settlement and emits `quiescence.reached` only when no modifying
+operation other than the settlement itself remains in flight. For the supported
+disconnect fault, `fault.injected` and `fault.removed` are first-observed facts:
+they follow both the Control acknowledgement and a system observation
+confirming the requested connectivity state. Each later settlement poll emits
+`recovery.observed` while that removed fault is recovering;
+`recovery.completed` precedes `settlement.completed` only after the convergence
+predicate holds twice with one stable signature. A removal acknowledgement or
+a single converged sample therefore proves neither Recovery nor settlement.
 
 If a settlement deadline expires, the runner records a structured
 `settlement.failed` boundary containing the declared timeout and the latest

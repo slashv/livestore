@@ -64,5 +64,6 @@ Evidence: maintainer-approved vocabulary and first implementation slice on
   claiming a causal edge.
 - The current stable-poll settlement implementation is correctly scoped to
   convergence; oracle evaluation remains a later stage.
-- Missing concurrent history, explicit Quiescence, and Recovery evidence are
-  tracked as implementation deltas rather than hidden by stronger wording.
+- Explicit disconnect-fault, Quiescence, and Recovery evidence landed in the
+  first follow-up slice; complete concurrent histories and broader fault models
+  remain tracked deltas rather than being hidden by stronger wording.

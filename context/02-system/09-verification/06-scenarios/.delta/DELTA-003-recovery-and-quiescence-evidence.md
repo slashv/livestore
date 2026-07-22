@@ -1,30 +1,29 @@
 # DELTA-003 — Recovery and quiescence evidence is implicit
 
-Status: open
+Status: closed (2026-07-22) — resolved by explicit disconnect-fault,
+Quiescence, and Recovery trace evidence.
 
-## Divergence
+## Resolution
 
-Settlement currently removes named disconnect faults, repeatedly samples the
-selected participants, and requires the heads/pending/isSynced convergence
-predicate to hold twice with the same signature. This is a valid bounded
-convergence barrier, and reconnect acknowledgements are no longer described as
-proof of Recovery.
+The runner now retains `fault.injected` and `fault.removed` only after both the
+corresponding Control acknowledgement and a system observation confirm the
+requested connectivity state. A reconnect acknowledgement alone therefore
+does not claim Fault removal or Recovery.
 
-The trace does not yet emit first-class Fault injection/removal, Recovery, or
-Quiescence evidence records. Quiescence is presently guaranteed structurally
-by the serial runner rather than checked against an explicit in-flight-work
-projection, and Recovery is inferred from later convergence observations
-rather than represented as its own progression.
+Before settlement polling, the runner projects instruction/outcome boundaries
+and emits `quiescence.reached` only when no other modifying Scenario operation
+is in flight. After observed Fault removal, stable-poll samples emit
+`recovery.observed`; `recovery.completed` is emitted only when the convergence
+predicate holds twice with the same signature, immediately before the distinct
+`settlement.completed` boundary. Failed recovery retains observations without
+manufacturing a completion record.
+
+This closes the delta for the currently supported disconnect/reconnect fault
+model. Broader fault families remain in DELTA-001, and overlapping execution
+with complete histories remains in DELTA-002.
 
 ## VRS
 
 [requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R11,
 LS.SYS.VER.SCEN-R15` and
 [decision 0007](../.decisions/0007-operation-evidence-and-property-vocabulary.md).
-
-## Implementation Contract
-
-Represent supported Scenario fault models and their injection/removal
-boundaries explicitly; project relevant runner-controlled in-flight work for a
-Quiescence check; and retain Recovery progression independently from both
-Fault removal and final Convergence.
