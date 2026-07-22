@@ -359,6 +359,13 @@ reference across session, Leader, and backend observations and explicitly map
 rebase and confirmation position changes. Consumers do not infer identity from
 event arguments, timestamps, or matching positions.
 
+Every observed event carries its pending or confirmed disposition separately
+from its base sequence-position string. Replay surfaces render pending events
+with the canonical trailing-prime notation (`e3'`, `e3r1'`) and never infer
+confirmation from a client component or rebase generation. A profile claiming
+event-lineage capability captures the individual pending tail rather than only
+an aggregate pending count.
+
 Participant hosts and backend realizations derive these records from actual
 LiveStore sync state, eventlogs, boundary operations, and transition observers;
 the runner does not simulate product state from its instructions. Existing

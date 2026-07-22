@@ -775,6 +775,13 @@ event reference at first observation and actual sync transitions carry it
 through explicit rebase, confirmation, and propagation mappings. Consumers do
 not correlate events from matching arguments, timestamps, or positions alone.
 
+Every observed event carries its pending or confirmed disposition separately
+from its base sequence-position string. Replay surfaces render pending events
+with the canonical trailing-prime notation (`e3'`, `e3r1'`) and never infer
+confirmation from a client component or rebase generation. A profile claiming
+event-lineage capability captures the individual pending tail rather than only
+an aggregate pending count.
+
 These observations come from actual Store, sync-state, eventlog, boundary, and
 backend behavior. Existing DevTools and internal observation surfaces should be
 reused where they expose the required semantic facts; the implementation adds
