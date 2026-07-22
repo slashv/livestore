@@ -422,6 +422,14 @@ behavior or manufacture product causality.
 Any such runtime failure makes the run fail even if the last sampled head and
 pending-count predicates would otherwise satisfy settlement.
 
+Runtime health and sync/eventlog convergence are independent projections. A
+scoped runtime failure marks only the affected Leader role or session as
+unhealthy from its first retained observation until an explicit restart or
+recovery boundary. It does not invalidate confirmed eventlog observations on
+that participant, mark a healthy sibling role as failed, or imply that a nearby
+event caused the failure without explicit causal evidence. The later
+settlement or run failure remains a separate global boundary.
+
 ## Artifacts, Headless Runs, and Visualization (LS.SYS.VER.SCEN-R16, R17, R20)
 
 A scenario run artifact contains the normalized AST, application/source
@@ -485,8 +493,11 @@ less prominent instructions, acknowledgements, observations, and verdicts.
 Multiple records at one projected position stack rather than overwrite one
 another. Selecting any aggregate or marker reveals its raw records, local
 sequence, runner receipt index, capture, timing estimate and uncertainty, and
-evidence semantics. In fitted elapsed-time mode the carpet retains the raw
-linear-time distribution as context.
+evidence semantics. A material capture moment also exposes a concise difference
+between the projected system state before and after the capture, so an otherwise
+anonymous observation marker explains which participant, connectivity, head,
+pending suffix, or event state changed. In fitted elapsed-time mode the carpet
+retains the raw linear-time distribution as context.
 
 Trace visibility and playback stepping are independent viewer projections. A
 system-focused visibility mode retains application actions, eventlog changes,
@@ -504,6 +515,16 @@ absent, the first sampled connectivity observation may bound the interval only
 when the UI marks that boundary as observational and therefore uncertain. The
 viewer does not extend a condition backward beyond the evidence retained by
 the trace.
+
+Declared topology remains visible as a faint lane guide, but a backend,
+Leader-role, or session lane becomes solid only from its first retained
+creation or observation boundary. A stopped session returns to the declared
+treatment until its acknowledged restart. Participant-scoped creation,
+action, lifecycle, connectivity, and runtime-failure moments appear as compact
+markers on the affected lane or Client group; global phase, settlement, and
+run boundaries remain in the system layer. A runtime failure additionally
+starts a participant-local unhealthy interval so its origin remains apparent
+even when a later global failure boundary terminates the run.
 
 Record playback visits every observation-index boundary. Moment playback
 visits a derived list of material navigation points: semantic system
