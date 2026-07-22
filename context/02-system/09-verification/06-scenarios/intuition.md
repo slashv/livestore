@@ -1,8 +1,8 @@
 # Scenario-Based Sync Verification — Intuition
 
-*For: contributors investigating sync correctness · Assumes:
+_For: contributors investigating sync correctness · Assumes:
 [../intuition.md](../intuition.md) · Covers: why reproducible scenarios are a
-separate verification evidence shape*
+separate verification evidence shape_
 
 ## Focused tests prove parts; scenarios prove compositions
 
@@ -27,9 +27,16 @@ scenario oracle ← scenario trace ← real LiveStore components
 
 “Disconnect Client A” is an instruction. “Client A reported offline” is an
 observation. Treating the request as proof would hide failures in the control
-surface itself. Scenario traces keep instructions, acknowledgements,
-observations, and verdicts distinct and connect them through correlation and
-causation.
+surface itself. Scenario traces keep instructions, Control acknowledgements,
+Operation outcomes, observations, and Scenario verdicts distinct. Correlation
+groups evidence about the same operation; only explicit dependency/causation
+edges and participant-local sequence order it. A Control acknowledgement says
+the host finished handling a request, not that a Sync backend accepted it or
+that other participants observed it.
+
+Timeouts deserve particular care. A child process or browser may apply a
+request and then lose its response. That is an indefinite Operation outcome,
+not evidence that the operation did not happen.
 
 ## Fast evidence and faithful evidence answer different questions
 
@@ -44,8 +51,14 @@ one-to-one equivalence guarantee.
 
 Open streams, future polling, and telemetry mean “nothing is running” is not a
 useful definition of completion. A settle phase instead names the participants
-expected to converge, the faults that must heal, the work that must stop, the
-barrier that confirms stability, and the timeout that bounds the claim.
+expected to converge, the faults whose injection must stop, the work that must
+become quiescent, the barrier that confirms stable Convergence, and the timeout
+that bounds the claim. Fault removal is followed by separately observed
+Recovery; it does not prove it.
+
+Settlement answers whether the declared convergence barrier completed. After
+that, Scenario oracles evaluate Scenario properties and emit verdicts. A
+property can fail a settled run without rewriting the convergence evidence.
 
 Eventlog convergence and State convergence are different evidence. The first
 profile exercises SQLite because current production processors depend on its

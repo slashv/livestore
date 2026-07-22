@@ -42,9 +42,12 @@ scenario-runner slices exist; the remaining baseline divergence is recorded in
   action appears in the scenario trace.
 - **LS.SYS.VER.SCEN-R05 Participant-host boundary:** The runner controls
   Clients and Client sessions only through a transport-neutral host contract.
-  Control operations, acknowledgements, capability descriptions, application
-  actions, and trace records crossing that boundary are serializable; the
-  runner never holds participant Stores, processors, adapters, or databases.
+  Scenario operations, Control acknowledgements, capability descriptions,
+  application actions, Operation outcomes, and trace records crossing that
+  boundary are serializable. An acknowledgement proves only completion of host
+  handling at its advertised boundary, never Sync backend acceptance or
+  propagation; the runner never holds participant Stores, processors,
+  adapters, or databases.
 - **LS.SYS.VER.SCEN-R06 Capability-based execution:** An execution
   configuration composes a participant execution profile, a sync-backend
   realization, and optional state capabilities. Profiles advertise supported
@@ -73,6 +76,8 @@ scenario-runner slices exist; the remaining baseline divergence is recorded in
   highest boundary that still exercises the behavior under test and respects
   the selected realization's guarantees. Impossible corruption, duplication,
   or reordering requires an explicitly adversarial realization or capability.
+  Fault removal ends the injected condition but does not itself prove Recovery;
+  Recovery and Convergence require separate observation.
 - **LS.SYS.VER.SCEN-R12 Sync/state separation:** Eventlog safety and convergence
   are independently verifiable from materialized-state convergence and
   rematerialization. SQLite is required by the initial full-stack profile but
@@ -81,18 +86,23 @@ LS-R10`
 - **LS.SYS.VER.SCEN-R13 Scenario trace protocol:** Every run emits a versioned
   scenario trace with a stable run descriptor, runner-receipt-ordered semantic
   records, distinct causal partial-order evidence, participant and boundary
-  identities, correlation and causation, and typed payloads. Namespaced
+  identities, correlation, explicit dependency/causation edges, and typed
+  payloads. Correlation associates evidence but never establishes ordering or
+  causation. Namespaced
   implementation diagnostics may extend the trace, but portable consumers
   ignore unknown diagnostics and do not depend on them.
-- **LS.SYS.VER.SCEN-R14 Scenario oracles:** Safety, ordering, convergence,
+- **LS.SYS.VER.SCEN-R14 Scenario properties and oracles:** Safety, ordering, convergence,
   pending resolution, rebase preservation, state, rematerialization, liveness,
-  and optional resource/performance checks are explicit scenario oracles that
-  produce bounded verdicts and evidence references. `refines: LS-R03, LS-R05`
-- **LS.SYS.VER.SCEN-R15 Settlement:** A settle phase stops new work, heals its
+  and optional resource/performance claims are explicit Scenario properties.
+  Scenario oracles evaluate them and produce bounded Scenario verdicts with
+  evidence references. `refines: LS-R03, LS-R05`
+- **LS.SYS.VER.SCEN-R15 Settlement:** A settle phase stops new work, removes its
   named faults, identifies the expected convergence group, and evaluates an
-  explicit profile-appropriate settlement barrier and timeout. Unresolved
+  explicit profile-appropriate convergence-only Settlement barrier and
+  timeout. Unresolved
   pending events or unacknowledged control work prevent successful settlement;
-  there is no hidden global meaning of “eventually.”
+  there is no hidden global meaning of “eventually.” Oracle evaluation follows
+  settlement and cannot retroactively change whether its barrier completed.
 - **LS.SYS.VER.SCEN-R16 Reproducible artifacts:** A scenario run artifact
   contains the normalized scenario, application and source identity, execution
   configuration, component versions, seed, controlled decisions when present,
@@ -123,3 +133,11 @@ LS-R10`
   playback navigation never remove access to the raw records or change
   observation-index cursor semantics. `refines:
 LS.SYS.VER.SCEN-R13, LS.SYS.VER.SCEN-R17`
+- **LS.SYS.VER.SCEN-R21 Operation outcomes and history:** Runner-invoked
+  Scenario operations preserve stable identity and classify their outcome as
+  success, definite failure, or indefinite whenever the execution boundary
+  supplies that knowledge. Timeouts and lost responses never imply that an
+  operation did not occur. A Scenario operation history is a derived
+  invocation/outcome projection and advertises which operation families and
+  concurrency boundaries it covers; the full Scenario trace remains the
+  authoritative evidence envelope.

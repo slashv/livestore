@@ -45,9 +45,9 @@ trace must also reveal that B received or applied the event materially later.
 
 The canonical scenario trace represents a causal partial order, not a global
 total order. Participant-local sequence and explicit instruction,
-acknowledgement, boundary-transition, correlation, and causation records are
-the ordering evidence. Independent records remain unordered even when one has
-a later timestamp.
+acknowledgement, boundary-transition, dependency, and causation records are the
+ordering evidence. Correlation associates related records but creates no edge.
+Independent records remain unordered even when one has a later timestamp.
 
 Profiles that provide cross-process timing record participant-local monotonic
 time and clock calibration sufficient to estimate a shared scenario-time

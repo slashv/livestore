@@ -48,7 +48,8 @@ regression coverage possible, but it makes it difficult to:
 - replay a failed headless run in a visual debugger; or
 - reuse correctness scenarios for later throughput and performance analysis.
 
-The primary concern is correctness: after allowed faults heal, accepted events
+The primary concern is correctness: after allowed faults are removed and
+Recovery is observed, accepted events
 must not be silently lost or duplicated, and all participating clients must
 eventually converge on the authoritative event order. Performance and
 throughput are secondary concerns, but the architecture should not prevent the
@@ -143,14 +144,26 @@ message transport without changing scenario semantics.
 | **Sync-backend realization**      | What the leader synchronizes with: a mock/in-memory backend, a locally running concrete backend, or a deployed backend.                            |
 | **Execution configuration**       | Combination of one participant execution profile, one sync-backend realization, and an optional state profile.                                     |
 | **Workload pattern**              | Reusable generator of application actions assigned to one or more clients.                                                                         |
-| **Fault model**                   | Controlled changes to connectivity, availability, latency, process lifetime, or capacity.                                                          |
+| **Scenario operation**            | Runner-invoked interaction identified across instruction, host response, observations, and outcome.                                                |
+| **Control acknowledgement**       | Evidence that the participant host completed request handling at its advertised boundary; not backend confirmation or propagation.                 |
+| **Operation outcome**             | Success, definite failure, or indefinite completion when the response boundary is lost.                                                            |
+| **Scenario operation history**    | Derived invocation/outcome projection for history checks; complete only for retained operation and concurrency boundaries.                         |
+| **Scenario fault model**          | Supported adverse connectivity, availability, latency, process-lifetime, or capacity conditions and assumptions.                                   |
+| **Fault injection / removal**     | Operations that introduce or stop an adverse condition; removal does not itself prove recovery.                                                    |
+| **Recovery**                      | Observed progression after fault removal toward the required operating or converged state.                                                         |
+| **Quiescence**                    | No new workload or relevant in-flight runner-controlled work, even if background streams or future polling remain.                                 |
+| **Convergence**                   | Required participants satisfy the declared agreement condition under stated assumptions.                                                           |
 | **Convergence group**             | Scenario participants that a settle phase requires to reach the same authoritative eventlog and, when requested, equivalent state.                 |
 | **Settlement barrier**            | Profile-appropriate confirmation that convergence predicates form a stable fixed point even if background streams or future polling remain active. |
 | **Scenario trace**                | Versioned semantic stream of runner-receipt-ordered records plus distinct causal partial-order evidence.                                           |
 | **Scenario observation capture**  | One non-atomic runner collection pass grouping component facts sampled at potentially different instants.                                          |
-| **Scenario causal order**         | Partial order supported by participant-local sequence and explicit control, boundary-transition, correlation, and causation evidence.              |
+| **Scenario correlation**          | Association of related evidence; it creates neither direction nor causation.                                                                       |
+| **Scenario dependency**           | Evidence-supported ordering relationship between trace records.                                                                                    |
+| **Scenario causal order**         | Partial order supported by participant-local sequence and explicit dependency/causation edges.                                                     |
 | **Calibrated scenario time**      | Estimated shared monotonic elapsed-time interval with recorded clock-calibration uncertainty; never a sync ordering mechanism.                     |
-| **Scenario oracle**               | Executable rule that turns observed state and scenario-trace data into a verdict.                                                                  |
+| **Scenario property**             | Correctness or reliability claim under stated assumptions.                                                                                         |
+| **Scenario oracle**               | Mechanism that evaluates a Scenario property from bounded evidence.                                                                                |
+| **Scenario verdict**              | Property result with its explanation and evidence references.                                                                                      |
 | **Scenario run artifact**         | Scenario, seed, execution configuration, trace, measurements, snapshots, and oracle results needed to inspect or reproduce one run.                |
 
 “Scenario runner” is used instead of “scenario runtime” to avoid confusing the
@@ -371,14 +384,14 @@ state database before applying the inspector.
 The scenario plan is a declarative tree of typed steps. Its initial stable step
 families are:
 
-| Step family                | Examples                                                                                                |
-| -------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Application                | Commit a schema event or invoke a named application action.                                             |
-| Participant/role lifecycle | Add a client or session; stop or restart a session, client, or leader role.                             |
-| Connectivity and faults    | Disconnect a link, partition a client, make a backend unavailable, or heal a fault.                     |
-| Workload                   | Run a named seeded pattern, repeat an action, or generate a burst.                                      |
-| Scheduling                 | Sequence, run in parallel, run at/after a logical time, repeat, or wait for a declared condition.       |
-| Settlement                 | Stop workloads, heal declared faults, establish a convergence group, and evaluate a settlement barrier. |
+| Step family                | Examples                                                                                                  |
+| -------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Application                | Commit a schema event or invoke a named application action.                                               |
+| Participant/role lifecycle | Add a client or session; stop or restart a session, client, or leader role.                               |
+| Connectivity and faults    | Disconnect a link, partition a client, make a backend unavailable, or remove an injected fault.           |
+| Workload                   | Run a named seeded pattern, repeat an action, or generate a burst.                                        |
+| Scheduling                 | Sequence, run in parallel, run at/after a logical time, repeat, or wait for a declared condition.         |
+| Settlement                 | Stop workloads, remove declared faults, establish a convergence group, and evaluate a settlement barrier. |
 
 The corresponding normalized representation is an Effect Schema tagged union,
 not a collection of callbacks. Initial scheduling combinators are `sequence`,
@@ -445,8 +458,8 @@ must support:
 - creating a client and adding a session to an existing client;
 - executing a named, serialized application action in a target session;
 - stopping and restarting a session, client, or leader where supported;
-- applying and healing faults exposed by the selected profile;
-- acknowledging lifecycle and control operations;
+- injecting and removing faults exposed by the selected profile;
+- acknowledging lifecycle and control handling at the host boundary;
 - advertising profile capabilities before a run starts; and
 - emitting the normalized trace without exposing participant implementation
   objects to the runner.
@@ -601,7 +614,7 @@ The controlled in-process correctness profile must additionally support
 controlled boundary record/replay. The runner records the order in which it:
 
 - dispatches scenario actions and lifecycle operations;
-- activates and heals faults;
+- injects and removes faults;
 - releases mock-backend responses;
 - releases controlled session-to-leader and leader-to-backend deliveries; and
 - advances runner-owned logical time.
@@ -734,13 +747,14 @@ Every stable trace record then uses a small common envelope containing:
 - observation-capture identity where facts came from one sampling pass;
 - evidence semantics distinguishing explicit sent, received, or applied
   transitions from state only first observed by later sampling;
-- correlation and causation identifiers where applicable; and
+- correlation identifiers plus explicit dependency/causation references where applicable; and
 - a typed, versioned payload for the record kind.
 
 The observation index defines the order in which the runner received records;
 it does not claim that distributed operations happened atomically in that
 order. Correlation joins records belonging to one action, batch, request, or
-fault, while causation records why a transition occurred.
+fault; it establishes no direction or causation. Only explicit
+dependency/causation references and participant-local sequence order records.
 
 One observation capture may sample backend and participant state at different
 instants. Capture membership therefore means only that facts were collected in
@@ -805,7 +819,7 @@ The stable semantic record families cover:
 - observed local, upstream, and backend positions;
 - advance and rebase transitions with relevant event identities and
   generations;
-- fault request, observed activation, and healing;
+- Fault injection, observed activation, and Fault removal;
 - settlement progress and barrier results;
 - oracle verdicts and their evidence references; and
 - structured failure classifications.
@@ -830,26 +844,27 @@ The trace must distinguish a scenario instruction (“disconnect client A”) fr
 an observation (“client A reported offline”). This preserves causality and
 lets the runner detect when a requested fault did not take effect.
 
-### Correctness Oracles
+### Properties, Oracles, and Verdicts
 
-Oracles are first-class scenario configuration, not assertions hidden inside
-runner code.
+Scenario properties are first-class configuration, not assertions hidden
+inside runner code. Scenario oracles evaluate those claims and emit bounded
+Scenario verdicts with evidence references.
 
-| Oracle family       | Example property                                                                                                     |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Safety              | No accepted event disappears or appears more than once in the authoritative history.                                 |
-| Ordering            | Every confirmed client eventlog is a prefix of, and eventually equal to, the backend order.                          |
-| Convergence         | After faults heal and workloads stop, all connected clients reach the same eventlog head within a bounded condition. |
-| Pending resolution  | Pending events become confirmed or produce an explicit terminal failure; they are not silently abandoned.            |
-| Rebase preservation | Rebase changes ancestry/order as specified without losing the relevant local events.                                 |
-| State convergence   | Enabled clients produce equivalent normalized state from the converged eventlog.                                     |
-| Rematerialization   | Rebuilding from the authoritative eventlog yields the same normalized state.                                         |
-| Liveness            | The system reaches quiescence or a declared steady state after recovery.                                             |
-| Resource bound      | Queues, retries, convergence delay, or memory stay within a scenario-specific bound.                                 |
+| Oracle family       | Example property                                                                                                            |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Safety              | No accepted event disappears or appears more than once in the authoritative history.                                        |
+| Ordering            | Every confirmed client eventlog is a prefix of, and eventually equal to, the backend order.                                 |
+| Convergence         | After fault removal and workload quiescence, all connected clients reach the same eventlog head within a bounded condition. |
+| Pending resolution  | Pending events become confirmed or produce an explicit terminal failure; they are not silently abandoned.                   |
+| Rebase preservation | Rebase changes ancestry/order as specified without losing the relevant local events.                                        |
+| State convergence   | Enabled clients produce equivalent normalized state from the converged eventlog.                                            |
+| Rematerialization   | Rebuilding from the authoritative eventlog yields the same normalized state.                                                |
+| Liveness            | The system reaches quiescence or a declared steady state after recovery.                                                    |
+| Resource bound      | Queues, retries, convergence delay, or memory stay within a scenario-specific bound.                                        |
 
 Safety failures should terminate or freeze the run promptly while preserving
 artifacts. Liveness and convergence oracles require explicit assumptions about
-which faults have healed and which participants are expected to remain online.
+which faults were removed and which participants are expected to remain online.
 
 Performance thresholds are optional oracles in wall-clock profiles. A long
 convergence delay may eventually be treated as a correctness failure, but the
@@ -864,9 +879,9 @@ work, and telemetry may continue after a run has converged.
 
 A scenario enters a settle phase by:
 
-1. stopping new workload actions and awaiting acknowledgement of actions
+1. stopping new workload actions and awaiting Control acknowledgement of actions
    already dispatched;
-2. healing the faults named by the phase;
+2. removing the injected faults named by the phase;
 3. declaring the convergence group, including which intentionally removed or
    offline participants are excluded; and
 4. stopping new writes from that group while the settlement barrier is being
@@ -874,10 +889,10 @@ A scenario enters a settle phase by:
 
 For an authoritative backend head `H`, convergence requires every expected
 participant to hold the same authoritative event order through `H`, with no
-unexplained pending events. Local and upstream heads must agree at `H`, and any
-requested state-convergence or rematerialization oracle must also pass. The
+unexplained pending events. Local and upstream heads must agree at `H`. The
 runner must have no unacknowledged control operations or held, due controlled
-delivery capable of changing the verdict.
+delivery capable of changing the convergence result. State-convergence,
+rematerialization, and other property oracles run after this barrier.
 
 An unresolved pending event prevents successful settlement. It must become
 backend-confirmed, explicitly rejected, or reach a terminal failure that the
@@ -887,7 +902,8 @@ pending is a liveness failure.
 The controlled in-process profile confirms stability through an explicit
 settlement barrier: it releases boundary work due under the selected schedule,
 advances logical time until no immediately due controlled work can change the
-verdict, observes every expected participant at `H`, confirms that the backend
+convergence result, observes every expected participant at `H`, confirms that
+the backend
 head remains `H`, and re-evaluates the convergence predicates. Open streams and
 future polling timers do not prevent success.
 
@@ -896,6 +912,10 @@ repeated observations or a bounded wall-clock stability window. The profile
 must advertise that weaker capability, and the run artifact records which
 confirmation mechanism was used. Every settle phase has an explicit logical-
 or wall-clock timeout; there is no hidden global meaning of “eventually.”
+
+Successful settlement confirms only the convergence barrier. Scenario oracles
+then evaluate declared properties. A failed verdict can fail the run without
+retroactively changing the completed settlement boundary.
 
 When that timeout expires, the trace records a structured settlement failure
 with the declared budget and the latest successfully sampled heads, pending
@@ -1029,7 +1049,7 @@ through an explicit control API rather than mutate participants directly.
 Scrubbing a completed artifact advances through observation-index boundaries
 and projects backend, Client, Leader-role, session, boundary, and event state
 from the trace prefix. Timeline arrows use explicit event references and
-correlation/causation records rather than temporal proximity, timestamp order,
+dependency/causation records rather than temporal proximity, timestamp order,
 or capture membership; absent evidence produces no arrow. Optional complete
 projection checkpoints may accelerate seeking, but they are derived cache data
 and do not replace the trace as authoritative evidence.

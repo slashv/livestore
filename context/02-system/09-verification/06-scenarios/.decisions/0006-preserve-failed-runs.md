@@ -31,7 +31,10 @@ After `run.started`, execution failures are captured as a valid run artifact
 with `status: failed`. A failed settlement records its declared timeout, stable
 error classification, and the latest successfully sampled observations for
 every expected participant before the run emits its terminal failure record.
-The trace retains the active phase, step, and correlation identity.
+The trace retains the active phase, step, and correlation identity. An
+Operation outcome separately records definite failure or indefinite completion
+when a request boundary is lost; neither replaces participant runtime,
+settlement, or terminal run failure records.
 Participant hosts also drain runtime failures exposed by their execution
 boundary. For example, the browser host records a LiveStore worker error as a
 participant-scoped `runtime.failure.observed` record before settlement and run

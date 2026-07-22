@@ -33,8 +33,10 @@ propagation arrows.
 
 The coherent baseline is still incomplete. The current slice does not provide
 direct schema-event steps, dynamic participant addition/removal or Leader-role
-lifecycle, reusable workloads, generated scheduling, runner-controlled
-delivery gates and replay, backend-availability or latency faults,
+lifecycle, reusable workload primitives (generated helpers currently expand to
+ordinary steps), overlapping operation execution or generated parallel
+scheduling, runner-controlled delivery gates and replay, first-class fault
+models beyond disconnect/reconnect, backend-availability or latency faults,
 rematerialization, the broader oracle catalog, a fully shared
 capability-driven host-conformance suite, or live trace streaming and runner
 control from the visualizer. Process and browser observation responses now emit
@@ -58,7 +60,7 @@ in-process and process hosts rather than hidden profile parity.
 
 ## VRS
 
-[requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R01…R18`, accepted via
+[requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R01…R21`, accepted via
 [RFC 0003](../../../../../contributor-docs/rfcs/0003-scenario-based-sync-verification.md).
 
 ## Implementation Contract

@@ -205,6 +205,8 @@ describe('intent layer (context/)', () => {
           }
           continue
         }
+        // context/spec.md reserves this non-decision file for timeless rename mappings.
+        if (entry.name === 'mapping.md') continue
         if (/^\d{4}-[a-z0-9-]+\.md$/.test(entry.name) === false) {
           violations.push(`${rel(entryPath)} — decision filename must match NNNN-slug.md`)
         }

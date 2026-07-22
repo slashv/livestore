@@ -26,6 +26,8 @@ the local fidelity mappings recorded in
 [decision 0003](./.decisions/0003-local-process-and-browser-realizations.md).
 Failed execution capture is specified by
 [decision 0006](./.decisions/0006-preserve-failed-runs.md).
+Operation, evidence, property, and convergence vocabulary is specified by
+[decision 0007](./.decisions/0007-operation-evidence-and-property-vocabulary.md).
 In-process, isolated-process, and persistent-browser vertical slices now run,
 while the coherent baseline remains incomplete
 ([DELTA-001](./.delta/DELTA-001-scenario-verification-not-built.md)).
@@ -49,9 +51,11 @@ versioned scenario AST ──▶ scenario runner ──▶ participant hosts
                                   ▼
                             scenario trace
                                   │
-                 ┌────────────────┼────────────────┐
-                 ▼                ▼                ▼
-           scenario oracles  run artifact  live/replay visualizer
+                 ┌────────────────┼─────────────────────┐
+                 ▼                ▼                     ▼
+       operation history    scenario oracles     live/replay visualizer
+                                  │                     │
+                                  └──────▶ run artifact ◀┘
 ```
 
 Scenario semantics, runner control, trace protocol, oracles, and consumers are
@@ -77,7 +81,7 @@ The AST carries:
 | Lifecycle    | Initial and dynamically added, restarted, or removed identities |
 | Workloads    | Explicit actions and named parameterized patterns               |
 | Schedule     | Logical time, dependencies, observed conditions, phases         |
-| Faults       | Requested failures and healing operations                       |
+| Faults       | Fault injection and Fault removal operations                    |
 | Completion   | Explicit terminal action or bounded settle phase                |
 | Assertions   | Selected scenario oracles and their assumptions                 |
 | Capture      | Trace detail, snapshots, measurements, artifact policy          |
@@ -129,18 +133,20 @@ participant. The sync backend is a separate topology component.
 
 Plans use these stable step families:
 
-| Family             | Meaning                                                                         |
-| ------------------ | ------------------------------------------------------------------------------- |
-| Application        | Commit a schema event or invoke a named action                                  |
-| Lifecycle          | Add, stop, restart, or remove a supported participant or role                   |
-| Connectivity/fault | Request or heal a supported failure                                             |
-| Workload           | Run a named seeded pattern, repetition, or burst                                |
-| Scheduling         | Sequence, parallelism, logical timing, repetition, condition wait               |
-| Settlement         | Stop work, heal named faults, establish a convergence group, evaluate a barrier |
+| Family             | Meaning                                                                           |
+| ------------------ | --------------------------------------------------------------------------------- |
+| Application        | Commit a schema event or invoke a named action                                    |
+| Lifecycle          | Add, stop, restart, or remove a supported participant or role                     |
+| Connectivity/fault | Inject or remove a supported adverse condition                                    |
+| Workload           | Run a named seeded pattern, repetition, or burst                                  |
+| Scheduling         | Sequence, parallelism, logical timing, repetition, condition wait                 |
+| Settlement         | Stop work, remove named faults, establish a convergence group, evaluate a barrier |
 
-Instructions and observations are distinct. A requested lifecycle or fault
-transition succeeds only after the appropriate acknowledgement or observation;
-issuing the instruction is not proof that it took effect.
+Instructions and observations are distinct. A Control acknowledgement proves
+only completion of Participant-host request handling at the advertised
+boundary. It is not proof of Sync backend confirmation, propagation, Recovery,
+or the requested observed state. Scenario operations retain successful,
+definite-failure, or indefinite outcomes; a timeout never proves non-execution.
 
 Workload patterns declare compatible application actions, parameters, targets,
 rate/count, and stopping condition. Their deterministic expansion is compact in
@@ -170,8 +176,8 @@ contract that can:
 - create a Client and add a Client session;
 - dispatch a serialized named action to a target session;
 - stop or restart supported sessions, Clients, or Leader roles;
-- request and heal supported faults;
-- acknowledge lifecycle and control operations;
+- inject and remove supported faults;
+- acknowledge lifecycle and control handling at the host boundary;
 - advertise capabilities before the run; and
 - emit stable trace records without exposing participant objects.
 
@@ -247,8 +253,9 @@ fallback observation, not a substitute for participant occurrence time.
 
 Participant-local sequence establishes observed order within that participant.
 Explicit instruction/acknowledgement, request/response, boundary-transition,
-correlation, and causation records establish supported cross-participant
-relationships. Timestamp order alone never creates a causal edge. Overlapping
+dependency, and causation records establish supported cross-participant
+relationships. Correlation associates related evidence but creates no edge.
+Timestamp order alone never creates a causal edge. Overlapping
 calibrated intervals remain temporally unordered, and a timestamp that
 contradicts an explicit causal edge beyond its uncertainty is reported as a
 clock-calibration or instrumentation problem rather than used to rewrite the
@@ -259,7 +266,7 @@ requested timing, workloads, and fault choices, but does not promise identical
 host interleaving.
 
 The controlled in-process profile additionally records the order in which the
-runner dispatches actions/lifecycle operations, activates or heals faults,
+runner dispatches actions/lifecycle operations, injects or removes faults,
 releases controlled session↔leader and leader↔backend deliveries or backend
 responses, and advances logical time. Replay gates those same boundaries. If a
 recorded operation cannot become available or its preconditions differ, replay
@@ -281,6 +288,10 @@ Faults are injected at the highest boundary that still exercises the behavior
 under test. Corruption, duplication, or arbitrary reordering is legal only when
 the selected transport can exhibit it or the scenario selects an adversarial
 realization/capability.
+
+Fault removal stops the injected condition. Recovery is a separate observed
+progression toward the scenario's required operating or converged state; a
+successful reconnect Control acknowledgement alone does not prove it.
 
 ## Sync and State Evidence (LS.SYS.VER.SCEN-R12)
 
@@ -319,7 +330,8 @@ Stable records share an envelope containing:
 - observation-capture identity for facts sampled in one collection pass;
 - evidence semantics distinguishing boundary sent/received/applied transitions
   from state that was only first observed by sampling;
-- correlation and causation identifiers where applicable; and
+- correlation identifiers for association and explicit dependency/causation
+  references where supported; and
 - stable record kind plus typed, versioned payload.
 
 The observation index orders runner receipt; it does not assert an atomic
@@ -332,16 +344,23 @@ propagation transitions that occurred between samples.
 
 The trace's canonical ordering evidence is a partial order. It combines
 participant-local sequence with explicit control and boundary-transition
-causation. Independent branches remain unordered even when calibrated time
-shows that one completed much later. Calibrated time annotates this graph with
-latency and scheduling evidence; it does not turn it into a fabricated global
-total order.
+dependency/causation references. A shared correlation identifier only groups
+evidence and never creates an edge. Independent branches remain unordered even
+when calibrated time shows that one completed much later. Calibrated time
+annotates this graph with latency and scheduling evidence; it does not turn it
+into a fabricated global total order.
 
 Stable semantic families cover run/phase lifecycle,
-participant lifecycle, control acknowledgements, application actions,
+participant lifecycle, Control acknowledgements, Operation outcomes,
+application actions,
 connectivity and boundary batches, event disposition, eventlog positions,
-advance/rebase transitions, fault activation/healing, settlement progress,
+advance/rebase transitions, Fault injection/removal, settlement progress,
 oracle verdicts, and structured failures.
+
+The full Scenario trace is the evidence envelope. A Scenario operation history
+is a derived projection of retained instruction and outcome boundaries for
+history-based checks. Consumers must not call that projection complete unless
+it covers the required failed, indefinite, and overlapping operations.
 
 Trace consumers reconstruct an **observed system state at cursor** from the
 prefix ending at a selected observation index. That projection is the runner's
@@ -385,25 +404,27 @@ namespaced diagnostics. Portable oracles ignore unknown diagnostics unless the
 scenario explicitly requires their capability. Additive optional fields are
 compatible; removal or semantic change requires a protocol-version change.
 
-## Oracles and Settlement (LS.SYS.VER.SCEN-R14, R15)
+## Properties, Oracles, and Settlement (LS.SYS.VER.SCEN-R14, R15, R21)
 
-Scenario oracles are explicit configuration and return bounded verdicts with
-evidence references. Families include safety, ordering, convergence, pending
-resolution, rebase preservation, State convergence, rematerialization,
-liveness, resource bounds, and optional wall-clock performance thresholds.
+Scenario properties are explicit correctness or reliability claims under
+declared assumptions. Scenario oracles evaluate those properties and return
+bounded Scenario verdicts with evidence references. Families include safety,
+ordering, convergence, pending resolution, rebase preservation, State
+convergence, rematerialization, liveness, resource bounds, and optional
+wall-clock performance thresholds.
 
 A settle phase:
 
-1. stops new workload actions and awaits dispatched-action acknowledgements;
-2. heals the faults named by the phase;
+1. stops new workload actions and awaits dispatched-action Control acknowledgements;
+2. removes the injected faults named by the phase;
 3. declares the convergence group and any intentional exclusions; and
 4. stops new writes from that group while evaluating a bounded barrier.
 
 Successful settlement requires the expected participants to hold the same
 authoritative order through backend head `H`, with local/upstream heads at `H`,
-no unexplained pending events, no unacknowledged controls, no held due
-controlled delivery that can change the verdict, and all requested State
-oracles passing.
+no unexplained pending events, no unacknowledged controls, and no held due
+controlled delivery that can change the convergence result. This barrier does
+not include State or other property verdicts.
 
 The controlled profile releases due work, advances logical time until no
 immediately due controlled work can affect the verdict, observes every expected
@@ -418,6 +439,11 @@ successfully sampled participant heads, pending counts, and synced flags. It
 then records the active phase and step in a terminal `run.failed` boundary.
 Increasing the timeout is not a substitute for preserving and exposing a
 stable non-convergent state.
+
+After settlement, Scenario oracles evaluate the declared properties. A failed
+verdict may make the run fail without changing the completed convergence
+barrier. Conversely, settlement failure prevents later property evaluation
+when the required evidence cannot be captured.
 
 Participant hosts expose runtime failures observable at their execution
 boundary as participant-scoped `runtime.failure.observed` records. A browser
@@ -554,7 +580,7 @@ second cursor.
 
 Scrubbing selects an observation-index boundary and projects the trace prefix
 into backend, Client, Leader-role, session, boundary, and event state. Timeline
-arrows use explicit event references and correlation/causation records rather
+arrows use explicit event references and dependency/causation records rather
 than capture membership or temporal proximity. No arrow is drawn when the
 trace lacks that evidence. Playback of a completed artifact advances this
 cursor, either through every record or through derived moment boundaries; it is

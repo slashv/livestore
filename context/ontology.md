@@ -120,20 +120,45 @@
   Scenario run.
 - **Workload pattern** — A named, parameterized, seeded generator of
   application actions assigned to scenario participants.
-- **Fault model** — The declared connectivity, availability, latency,
-  lifecycle, or capacity failures an execution configuration can apply and
-  heal without violating its advertised transport guarantees.
+- **Scenario operation** — A runner-invoked interaction identified across its
+  instruction, participant-host response, related observations, and operation
+  outcome.
+- **Control acknowledgement** — Evidence that a Participant host completed
+  handling a controller request at its advertised boundary. It is neither Sync
+  backend confirmation nor proof of propagation.
+- **Operation outcome** — The controller's classification of a Scenario
+  operation as successful, definitely failed, or indefinite. An indefinite
+  outcome means the completion boundary was lost; it does not prove that the
+  requested effect did not occur.
+- **Scenario operation history** — A projection of Scenario operation
+  invocations and outcomes for history-based checks. It is complete only for
+  the operation families and invocation/completion boundaries retained by the
+  Scenario trace.
+- **Scenario fault model** — The supported adverse connectivity,
+  availability, latency, lifecycle, or capacity conditions and assumptions of
+  an Execution configuration.
+- **Fault injection** — A Scenario operation that introduces a condition from
+  the Scenario fault model.
+- **Fault removal** — A Scenario operation that stops an injected condition.
+  It does not itself prove Recovery.
+- **Recovery** — Observed progression after Fault removal toward the required
+  operating or converged state.
+- **Quiescence** — No new scenario workload and no relevant in-flight
+  runner-controlled work; background streams and future polling may remain.
+- **Convergence** — The required participants reach a declared agreement
+  condition under the scenario's stated assumptions.
 - **Convergence group** — The scenario participants that a settle phase
   requires to reach the same authoritative Eventlog and, when requested,
   equivalent normalized State.
 - **Settlement barrier** — A profile-appropriate, bounded confirmation that
-  the selected convergence predicates form a stable fixed point even while
-  background streams or future polling remain active.
+  the selected Convergence predicates form a stable fixed point after required
+  Quiescence and Fault removal. It does not include Scenario property verdicts.
 - **Scenario runner** — The headless orchestrator that validates a Scenario
   specification, controls participants and faults, and emits a Scenario trace.
   _Avoid:_ scenario runtime (conflicts with LiveStore's Runtime).
 - **Scenario trace** — A versioned semantic stream of Scenario instructions,
-  acknowledgements, observations, and verdicts. OTel spans and other
+  Control acknowledgements, Operation outcomes, observations, and verdicts.
+  OTel spans and other
   implementation details are namespaced diagnostic extensions. Its canonical
   ordering evidence is a causal partial order; runner receipt order and
   timestamps remain separately inspectable observations.
@@ -141,16 +166,24 @@
   component observations. It groups facts sampled during the same collection
   pass but is neither an atomic distributed snapshot nor proof that the
   observed transitions happened simultaneously.
+- **Scenario correlation** — Association of evidence belonging to the same
+  Scenario operation or investigation. Correlation alone establishes neither
+  direction nor causation.
+- **Scenario dependency** — An evidence-supported ordering relationship
+  between Scenario trace records.
 - **Scenario causal order** — The partial order supported by participant-local
-  sequence and explicit control, boundary-transition, correlation, and
-  causation evidence. Events without such a relationship remain unordered even
-  when their timestamps differ.
+  sequence and explicit Scenario dependency or causation edges. Correlation,
+  timestamps, and capture membership alone never create an edge.
 - **Calibrated scenario time** — An estimated shared monotonic elapsed-time
   interval derived from a participant's local monotonic clock and a recorded
   clock calibration. Its uncertainty is part of the estimate; it measures
   latency but never establishes LiveStore sync causality.
-- **Scenario oracle** — An executable rule producing a bounded verification
-  verdict and evidence references from Scenario observations and State.
+- **Scenario property** — A declared correctness or reliability claim under
+  stated scenario assumptions.
+- **Scenario oracle** — The mechanism that evaluates a Scenario property from
+  bounded Scenario trace, observation, and State evidence.
+- **Scenario verdict** — A Scenario oracle's result for one Scenario property,
+  including its evidence references and explanation.
 - **Scenario run artifact** — The reproduction bundle containing the
   normalized Scenario specification, source and Application identity,
   Execution configuration, seed, Scenario trace, snapshots, and verdicts.
@@ -163,18 +196,19 @@
 - **Facts** _(experimental)_ — Declarative constraints an event sets,
   unsets, requires, or reads; input to ordering, compaction, and conflict
   detection.
+
 ## Structure
 
 The **event** is the spine: every other concept produces events, orders
 them, derives from them, or observes the result.
 
-| Relation to the spine | Terms |
-| --- | --- |
-| Produce | Store (commit), Client session |
-| Order | Eventlog, Event sequence number, Sync backend, Rebase, Facts _(experimental)_ |
-| Derive | Materializer, State, Client document |
-| Observe | Live query, Reactivity graph, Devtools |
-| Verify | Scenario specification, Scenario runner, Scenario trace, Scenario oracle |
+| Relation to the spine | Terms                                                                                                         |
+| --------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Produce               | Store (commit), Client session                                                                                |
+| Order                 | Eventlog, Event sequence number, Sync backend, Rebase, Facts _(experimental)_                                 |
+| Derive                | Materializer, State, Client document                                                                          |
+| Observe               | Live query, Reactivity graph, Devtools                                                                        |
+| Verify                | Scenario specification, Scenario runner, Scenario trace, Scenario property, Scenario oracle, Scenario verdict |
 
 ### Term families and leitwörter
 
@@ -204,11 +238,15 @@ in their name:
   Control operation are its discovery/inspection vocabulary.
 - **Scenario family** (leitwort "scenario") — anchor **Scenario
   specification**; followers Scenario participant, Scenario runner, Scenario
-  trace, Scenario observation capture, Scenario causal order, Scenario oracle,
-  and Scenario run artifact. Application definition, Participant host,
+  operation, Scenario operation history, Scenario trace, Scenario observation
+  capture, Scenario correlation, Scenario dependency, Scenario causal order,
+  Scenario property, Scenario oracle, Scenario verdict, and Scenario run
+  artifact. Application definition, Participant host,
   Participant execution profile, Execution configuration, Workload pattern,
-  Fault model, Convergence group, Settlement barrier, and Calibrated scenario
-  time are its execution and evidence vocabulary.
+  Scenario fault model, Fault injection, Fault removal, Recovery, Quiescence,
+  Convergence, Convergence group, Settlement barrier, Control acknowledgement,
+  Operation outcome, and Calibrated scenario time are its execution and
+  evidence vocabulary.
 
 ### Naming rubric
 
