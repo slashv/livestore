@@ -7,8 +7,9 @@ Status: open
 Several vertical slices now exist in the private `tests/scenarios/` workspace.
 They provide a versioned serializable AST, schema-backed named actions and
 inspectors, a transport-neutral host, controlled disconnect/reconnect, bounded
-stable-poll settlement, semantic trace records, four core oracles, and a
-schema-validated run artifact. The portable offline-writer scenario runs
+parallel operation groups, stable-poll settlement, semantic trace records,
+five core oracles, and a schema-validated run artifact. The portable
+offline-writer scenario runs
 unchanged through a production-shaped in-process host, one isolated Node
 process per Client, or one persistent Chromium context per Client. The local
 profiles connect to the real sync-cf Worker and SQLite Durable Object through
@@ -31,15 +32,19 @@ records, fitted and raw elapsed-time scales with explicit gap compression, a
 raw-time trace carpet, and matching-event highlighting without inferring
 propagation arrows.
 
-The coherent baseline is still incomplete. The current slice does not provide
-direct schema-event steps, dynamic participant addition/removal or Leader-role
-lifecycle, reusable workload primitives (generated helpers currently expand to
-ordinary steps), overlapping operation execution or generated parallel
-scheduling, runner-controlled delivery gates and replay, first-class fault
-models beyond disconnect/reconnect, backend-availability or latency faults,
-rematerialization, the broader oracle catalog, a fully shared
-capability-driven host-conformance suite, or live trace streaming and runner
-control from the visualizer. Process and browser observation responses now emit
+The runner now retains independently identified child operations across
+bounded parallel groups, derives histories with declared coverage, and uses a
+history oracle to verify actual overlap. The coherent baseline is nevertheless
+still incomplete. The remaining gaps are decomposed into narrow contracts for
+the [scenario surface and workloads](DELTA-005-scenario-surface-and-workloads.md),
+[controlled scheduling and replay](DELTA-006-controlled-scheduling-and-replay.md),
+[fault-model breadth](DELTA-007-fault-model-breadth.md),
+[sync-transition observation seams](DELTA-008-sync-transition-observation-seams.md),
+[oracle breadth](DELTA-009-oracle-catalogue-breadth.md),
+[shared host conformance](DELTA-010-shared-host-conformance.md), and
+[live visualizer control](DELTA-011-live-visualizer-control.md).
+
+Process and browser observation responses now emit
 participant-local sequence and monotonic time; controller round-trip samples
 calibrate those occurrences into explicit uncertainty intervals. They do not
 yet expose exact sync boundary receive/apply transitions, however. Component
@@ -80,9 +85,9 @@ Establish the first coherent headless subsystem in `tests/scenarios/`:
 7. requirement traceability annotations on the evidence that implements these
    contracts.
 
-Close this umbrella delta when that coherent baseline runs headlessly. In the
-same change, create narrower deltas for every accepted requirement that remains
-unimplemented, such as richer workloads/faults, optional trace capabilities,
-or live visualization and control. Optional participant profiles, backend
-realizations, and cross-profile comparisons do not create deltas merely because
-they have not been implemented.
+Close this umbrella delta when the baseline hard blockers—controlled-boundary
+record/replay, a backend-availability fault, and a fully shared
+capability-driven host-conformance suite—run headlessly. The other accepted
+extensions may remain in their narrow deltas. Optional participant profiles,
+backend realizations, and cross-profile comparisons do not create deltas merely
+because they have not been implemented.

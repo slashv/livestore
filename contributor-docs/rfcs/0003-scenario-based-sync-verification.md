@@ -409,6 +409,13 @@ Arbitrary `Effect.sleep` calls and predicate closures are not scenario syntax;
 time and observable conditions must be explicit AST nodes so the runner can
 validate, record, replay, and visualize them.
 
+The implemented scheduling subset currently realizes sequence through phase
+order and bounded `parallel` groups. Parallel children retain separate
+instruction-to-Control-outcome intervals, and the runner joins every child
+before advancing to the next step or settlement. Logical-time triggers,
+repetition, condition waits, and controlled-boundary record/replay remain
+tracked implementation gaps rather than implied capabilities of this subset.
+
 The model distinguishes instructions from observations. “Add client A” is a
 participant-lifecycle instruction; “disconnect client A” is a connectivity
 fault; “stop client A” is participant termination; and “client A reported

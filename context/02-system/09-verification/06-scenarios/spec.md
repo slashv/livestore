@@ -169,6 +169,12 @@ Workload patterns declare compatible application actions, parameters, targets,
 rate/count, and stopping condition. Their deterministic expansion is compact in
 the AST, while each emitted application action is recorded in the trace.
 
+The implemented `parallel` scheduling step contains two or more ordinary
+non-settlement operations. Every child retains its own identity; the runner
+records all child instructions before releasing their host requests, executes
+the requests concurrently, and awaits every child outcome before advancing.
+The container is orchestration rather than a synthetic Scenario operation.
+
 ## Execution Configuration (LS.SYS.VER.SCEN-R05…R08)
 
 An execution configuration composes three independent selections:
@@ -378,7 +384,11 @@ oracle verdicts, and structured failures.
 The full Scenario trace is the evidence envelope. A Scenario operation history
 is a derived projection of retained instruction and outcome boundaries for
 history-based checks. Consumers must not call that projection complete unless
-it covers the required failed, indefinite, and overlapping operations.
+it covers the required failed, indefinite, and overlapping operations. The
+current projection declares Client creation, application action, connectivity,
+session/Client lifecycle, and settlement families across the
+instruction-to-Control-outcome boundary. System/sync sampling and State
+inspection are explicitly excluded from that application/control history.
 
 Trace consumers reconstruct an **observed system state at cursor** from the
 prefix ending at a selected observation index. That projection is the runner's
@@ -431,6 +441,12 @@ ordering, convergence, pending resolution, rebase preservation, State
 convergence, rematerialization, liveness, resource bounds, and optional
 wall-clock performance thresholds.
 
+The implemented operation-history oracle checks named operations for terminal
+outcomes, can reject indefinite outcomes, and can require retained evidence of
+overlapping invocation intervals. It evaluates only the projection's declared
+coverage and does not imply linearizability, serializability, or another
+general consistency model.
+
 A settle phase:
 
 1. stops new workload actions and awaits dispatched-action Control acknowledgements;
@@ -451,10 +467,11 @@ Other profiles may use repeated observation or a bounded wall-clock stability
 window and must advertise and record that weaker mechanism. Open streams and
 future polling alone do not prevent settlement.
 
-The current serial runner projects outstanding instruction/outcome boundaries
-before each settlement and emits `quiescence.reached` only when no modifying
-operation other than the settlement itself remains in flight. For the supported
-disconnect fault, `fault.injected` and `fault.removed` are first-observed facts:
+The runner joins each bounded parallel group before advancing to a later step,
+projects outstanding instruction/outcome boundaries before settlement, and
+emits `quiescence.reached` only when no modifying operation other than the
+settlement itself remains in flight. For the supported disconnect fault,
+`fault.injected` and `fault.removed` are first-observed facts:
 they follow both the Control acknowledgement and a system observation
 confirming the requested connectivity state. Each later settlement poll emits
 `recovery.observed` while that removed fault is recovering;
