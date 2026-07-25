@@ -266,8 +266,9 @@ proof of host non-conformance or a requirement for one-to-one run equivalence.
 
 ## Time, Scheduling, and Reproduction (LS.SYS.VER.SCEN-R09, R10, R19)
 
-Logical time controls correctness-run timers, scheduled faults, workload rates,
-and runner-owned delivery delays. Participant-local monotonic time and
+Logical time orders Scenario-owned plan and trace facts and may control
+explicitly advertised runner-owned timers, scheduled faults, workload rates,
+or delivery delays. Participant-local monotonic time and
 calibrated scenario time describe observed elapsed time. Wall-clock time
 supplies externally comparable throughput, latency, CPU, and memory evidence.
 These notions are never conflated, and none participates in LiveStore's sync
@@ -292,15 +293,15 @@ clock-calibration or instrumentation problem rather than used to rewrite the
 causal evidence.
 
 Every generated choice derives from the recorded seed. This reproduces inputs,
-requested timing, workloads, and fault choices, but does not promise identical
-host interleaving.
+requested timing, workloads, and fault choices, but does not reproduce internal
+host or sync interleaving. The current profiles do not advertise controlled
+boundary replay and do not gate individual session↔Leader, Leader↔backend, or
+backend-response deliveries.
 
-The controlled in-process profile additionally records the order in which the
-runner dispatches actions/lifecycle operations, injects or removes faults,
-releases controlled session↔leader and leader↔backend deliveries or backend
-responses, and advances logical time. Replay gates those same boundaries. If a
-recorded operation cannot become available or its preconditions differ, replay
-reports the first divergent decision.
+A future profile may advertise recorded boundary replay only when it names and
+controls those boundaries. It records each release decision and reports the
+first decision whose operation is unavailable or whose preconditions differ.
+Seed equality alone is never presented as interleaving replay.
 
 Exact Effect fiber scheduling, browser event-loop scheduling, remote backend
 ordering, and byte-identical traces are outside this guarantee unless a future
@@ -481,18 +482,16 @@ A settle phase:
 
 Successful settlement requires the expected participants to report
 local/upstream heads at backend head `H`, no unexplained pending Events, no
-unacknowledged controls, and no held due controlled delivery that can change
-the convergence result. Repeated observation establishes a stable catch-up
-point for later property evaluation. The barrier does not by itself prove that
-the Eventlog contents behind `H` are equal and does not include State or other
-property verdicts.
+unacknowledged controls, and—when a future profile advertises controlled
+delivery—no held due delivery that can change the convergence result. Repeated
+observation establishes a stable catch-up point for later property evaluation.
+The barrier does not by itself prove that the Eventlog contents behind `H` are
+equal and does not include State or other property verdicts.
 
-The controlled profile releases due work, advances logical time until no
-immediately due controlled work can affect convergence, observes every expected
-participant at `H`, confirms backend stability, and re-evaluates predicates.
-Other profiles may use repeated observation or a bounded wall-clock stability
-window and must advertise and record that weaker mechanism. Open streams and
-future polling alone do not prevent settlement.
+Current profiles use repeated observation and a bounded wall-clock stability
+window. A future controlled-delivery profile must release due work and advance
+logical time until no immediately due controlled work can affect convergence.
+Open streams and future polling alone do not prevent settlement.
 
 The runner joins each bounded parallel group before advancing to a later step,
 projects outstanding instruction/outcome boundaries before settlement, and
@@ -572,9 +571,10 @@ Headless command-line execution persists and catalogs this artifact before
 returning a non-zero status. Preflight configuration errors may fail without an
 artifact because participant execution has not begun.
 
-The minimum replay needs only the artifact and matching source revision. Every
-profile supports seeded replay; profiles with controlled boundaries may also
-support recorded boundary replay.
+The minimum rerun needs the artifact and matching source revision. Every
+profile supports seeded reproduction of inputs and requested choices; this is
+not interleaving replay. Profiles with independently justified controlled
+boundaries may additionally support recorded boundary replay.
 
 The visualizer consumes either a live trace or completed artifact. Its system
 view shows topology, connectivity, traffic, pressure, and convergence; its

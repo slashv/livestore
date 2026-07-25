@@ -37,7 +37,6 @@ bounded parallel groups, derives histories with declared coverage, and uses a
 history oracle to verify actual overlap. The coherent baseline is nevertheless
 still incomplete. The remaining gaps are decomposed into narrow contracts for
 the [scenario surface and workloads](DELTA-005-scenario-surface-and-workloads.md),
-[controlled scheduling and replay](DELTA-006-controlled-scheduling-and-replay.md),
 [fault-model breadth](DELTA-007-fault-model-breadth.md),
 [oracle breadth](DELTA-009-oracle-catalogue-breadth.md),
 [live visualizer control](DELTA-011-live-visualizer-control.md).
@@ -65,6 +64,11 @@ The runner derives structural requirements and session limits before execution,
 so unsupported topology, operations, observations, or oracles fail before any
 Client is created.
 
+Controlled interleaving replay was evaluated and deliberately left outside the
+current capability set. Seeded runs reproduce declared inputs and requested
+choices, not session↔Leader or Leader↔backend delivery order; adding gates to
+those paths solely for Scenario replay is not part of the baseline.
+
 ## VRS
 
 [requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R01…R21`, accepted via
@@ -81,14 +85,14 @@ Establish the first coherent headless subsystem in `tests/scenarios/`:
    materializers, SQLite, and a mock backend;
 4. stable Client/Client-session topology, explicit actions, lifecycle controls,
    basic disconnect/reconnect and backend-availability faults;
-5. seeded scheduling plus controlled-boundary recording/replay;
+5. seeded reproduction with explicit non-guarantees for internal interleaving;
 6. stable scenario trace, core safety/convergence/pending-resolution oracles,
    bounded settlement, and reproducible run artifacts; and
 7. requirement traceability annotations on the evidence that implements these
    contracts.
 
-Close this umbrella delta when the remaining baseline hard blockers—controlled-
-boundary record/replay and a backend-availability fault—run headlessly. The
-other accepted extensions may remain in their narrow deltas. Optional
-participant profiles, backend realizations, and cross-profile comparisons do
-not create deltas merely because they have not been implemented.
+Close this umbrella delta when the remaining baseline hard blocker—a backend-
+availability fault—runs headlessly. The other accepted extensions may remain
+in their narrow deltas. Optional participant profiles, backend realizations,
+and cross-profile comparisons do not create deltas merely because they have
+not been implemented.

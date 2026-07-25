@@ -66,12 +66,14 @@ scenario-runner slices exist; the remaining baseline divergence is recorded in
   profile; cross-profile comparison is optional and declares the properties it
   compares.
 - **LS.SYS.VER.SCEN-R09 Reproduction:** Every profile records a seed governing
-  generated inputs and requested choices. The controlled in-process profile
-  additionally records and replays runner-controlled boundary decisions,
-  reporting the first divergence instead of claiming a false reproduction.
-- **LS.SYS.VER.SCEN-R10 Time semantics:** Correctness runs default to logical
-  time for runner-owned scheduling and delivery controls; performance evidence
-  uses wall-clock time. Logical time is never reported as performance evidence.
+  generated inputs and requested choices. Seeded reproduction never claims to
+  reproduce internal delivery ordering. A profile may advertise recorded
+  boundary replay only when it names and controls those boundaries, records
+  their decisions, and reports the first replay divergence.
+- **LS.SYS.VER.SCEN-R10 Time semantics:** Logical time orders Scenario-owned
+  plan and trace facts and governs any explicitly advertised runner-owned
+  scheduling controls; performance evidence uses wall-clock time. Logical time
+  is never reported as performance evidence or as proof of internal sync order.
 - **LS.SYS.VER.SCEN-R11 Valid fault semantics:** Fault injection occurs at the
   highest boundary that still exercises the behavior under test and respects
   the selected realization's guarantees. Impossible corruption, duplication,
