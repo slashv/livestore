@@ -23,6 +23,14 @@ scenario oracle ← scenario trace ← real LiveStore components
        └── verdict + reproducible run artifact
 ```
 
+The Scenario runner is a correctness falsifier and reproducer, not a proof that
+LiveStore is correct for every workload, schedule, fault, or execution
+configuration. It searches for concrete counterexamples to declared Scenario
+properties and preserves the evidence needed to investigate and reproduce
+them. A passing run means that no declared property was violated by the
+recorded scenario, configuration, workload, schedule, and fault sequence; it
+does not rule out a counterexample elsewhere.
+
 ## Control is not observation
 
 “Disconnect Client A” is an instruction. “Client A reported offline” is an
@@ -59,6 +67,15 @@ Recovery; it does not prove it.
 Settlement answers whether the declared convergence barrier completed. After
 that, Scenario oracles evaluate Scenario properties and emit verdicts. A
 property can fail a settled run without rewriting the convergence evidence.
+
+Head alignment is useful Settlement evidence, but it is not by itself proof of
+Eventlog convergence. Two participants can report the same backend head and no
+pending Events while one has lost, duplicated, reordered, or replaced an Event
+behind that head. Settlement establishes a stable point at which to evaluate
+the stronger property; the Eventlog-convergence oracle compares each selected
+participant's confirmed, ordered Eventlog with the authoritative backend
+Eventlog. When that evidence is unavailable, the oracle cannot emit a passing
+verdict.
 
 Eventlog convergence and State convergence are different evidence. The first
 profile exercises SQLite because current production processors depend on its

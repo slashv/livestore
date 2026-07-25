@@ -324,6 +324,14 @@ successful reconnect Control acknowledgement alone does not prove it.
 - **Full-stack correctness:** after eventlog convergence, normalized
   materialized State converges and can be reproduced from that eventlog.
 
+Eventlog convergence requires ordered equality between the authoritative
+backend Eventlog through the settled head and every selected participant's
+confirmed Eventlog through that head. Equality covers the retained Event facts
+and their authoritative order; equal heads, equal entry counts, zero pending
+Events, or equivalent materialized State are not substitutes. The oracle fails
+on the first retained loss, duplication, reordering, or unequal Event and
+rejects insufficient Eventlog evidence rather than treating it as a pass.
+
 Eventlog convergence does not require a State oracle. State convergence and
 rematerialization require compatible application inspectors and profile
 capabilities. The initial profile nevertheless runs SQLite materialization for
@@ -454,11 +462,13 @@ A settle phase:
 3. declares the convergence group and any intentional exclusions; and
 4. stops new writes from that group while evaluating a bounded barrier.
 
-Successful settlement requires the expected participants to hold the same
-authoritative order through backend head `H`, with local/upstream heads at `H`,
-no unexplained pending events, no unacknowledged controls, and no held due
-controlled delivery that can change the convergence result. This barrier does
-not include State or other property verdicts.
+Successful settlement requires the expected participants to report
+local/upstream heads at backend head `H`, no unexplained pending Events, no
+unacknowledged controls, and no held due controlled delivery that can change
+the convergence result. Repeated observation establishes a stable catch-up
+point for later property evaluation. The barrier does not by itself prove that
+the Eventlog contents behind `H` are equal and does not include State or other
+property verdicts.
 
 The controlled profile releases due work, advances logical time until no
 immediately due controlled work can affect convergence, observes every expected
@@ -490,6 +500,12 @@ After settlement, Scenario oracles evaluate the declared properties. A failed
 verdict may make the run fail without changing the completed convergence
 barrier. Conversely, settlement failure prevents later property evaluation
 when the required evidence cannot be captured.
+
+The Eventlog-convergence oracle evaluates the selected participants against the
+authoritative backend Eventlog captured at the settled head. It emits a passing
+verdict only when the ordered confirmed contents are equal and cites the
+compared evidence. A matching head with missing Eventlog contents is
+insufficient evidence, not convergence.
 
 Participant hosts expose runtime failures observable at their execution
 boundary as participant-scoped `runtime.failure.observed` records. A browser
