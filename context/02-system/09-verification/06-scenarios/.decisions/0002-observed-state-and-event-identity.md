@@ -4,6 +4,8 @@ Status: accepted (maintainer confirmation, 2026-07-20)
 
 Trace ordering and timeline projection are refined by
 [decision 0004](./0004-causal-order-and-calibrated-time.md).
+The scope of product instrumentation for Event lineage is refined by
+[decision 0009](./0009-keep-scenario-lineage-out-of-sync-engine.md).
 
 ## Context
 
@@ -37,9 +39,11 @@ processors, eventlogs, and backend that the scenario is intended to verify.
   not justify redesigning LiveStore events.
 - **Observe product transitions rather than simulate them (chosen).** Existing
   sync-state, eventlog, backend, DevTools, and internal observation surfaces are
-  reused where sufficient; narrow internal testing seams expose missing
-  portable facts. Deriving state changes from scenario instructions was
-  rejected because an instruction is not proof that product state changed.
+  reused where sufficient. When they cannot expose a portable fact, a profile
+  advertises that capability limit unless the owning subsystem independently
+  justifies a new observation seam. Deriving state changes from scenario
+  instructions was rejected because an instruction is not proof that product
+  state changed.
 
 ## Decision
 
@@ -56,8 +60,9 @@ as the concrete target.
 
 - The portable trace needs component-scoped observations for the backend,
   Client Leader roles, and Client sessions rather than one conflated sync row.
-- Rebase and confirmation points must expose explicit old/new position mappings
-  associated with one run-local event reference.
+- A profile claiming exact Event lineage must expose explicit old/new position
+  mappings at rebase and confirmation points. Current profiles omit that
+  capability rather than adding Scenario-only sync-engine instrumentation.
 - Timeline causality is not inferred from temporal proximity; arrows use event
   references plus correlation and causation identifiers.
 - A pure trace-prefix projector becomes a testable contract shared by replay

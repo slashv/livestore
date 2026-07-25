@@ -68,7 +68,9 @@ hook may claim that transition; a later sampled observation claims only
 `firstObserved`. Scenario-side wrappers instrument existing boundaries first.
 Any product change needed to expose an exact application transition is an
 optional internal/dev observation seam owned by that subsystem, not a new
-product event field or synchronization dependency.
+product event field or synchronization dependency. Per
+[decision 0009](./0009-keep-scenario-lineage-out-of-sync-engine.md), Scenario
+Event lineage alone does not justify adding that seam to the sync engine.
 
 ## Consequences
 

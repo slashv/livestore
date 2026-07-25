@@ -349,6 +349,8 @@ The ordering and timing evidence model is selected in
 [decision 0004](./.decisions/0004-causal-order-and-calibrated-time.md).
 Truth-preserving visibility and playback navigation are selected in
 [decision 0005](./.decisions/0005-system-focus-and-playback-moments.md).
+The current limit on engine instrumentation for Event lineage is selected in
+[decision 0009](./.decisions/0009-keep-scenario-lineage-out-of-sync-engine.md).
 
 Stable records share an envelope containing:
 
@@ -434,15 +436,14 @@ must distinguish the inferred link from proven lineage.
 Participant hosts and backend realizations derive these records from actual
 LiveStore sync state, eventlogs, boundary operations, and transition observers;
 the runner does not simulate product state from its instructions. Existing
-DevTools or internal observation surfaces may supply those facts, with the
-smallest explicit internal testing seam added when they cannot expose pending
-event or rebase lineage. Scenario-side wrappers should first instrument the
-existing session↔Leader and Leader↔backend boundaries. If distinguishing
-transport receipt from eventlog application requires a product seam, it is an
-optional dev/internal observation hook owned by the relevant LiveStore
-subsystem rather than a new synchronization dependency. Scenario-level
-references and envelopes make the result portable without replacing LiveStore
-event structure.
+DevTools or internal observation surfaces may supply those facts, and
+Scenario-side wrappers should first instrument the existing session↔Leader and
+Leader↔backend boundaries. A profile advertises the absence of exact transition
+or lineage evidence when those surfaces are insufficient. Scenario verification
+does not by itself justify adding merge mappings or hot-path observers to the
+sync engine; a new product seam must be independently owned and justified by the
+relevant LiveStore subsystem. Scenario-level references and envelopes make
+available evidence portable without replacing LiveStore Event structure.
 
 Private queues, raw depths, scheduler state, SQLite details, provider payloads,
 Web Lock/OPFS internals, OTel spans, stack traces, and performance entries are
