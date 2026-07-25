@@ -188,8 +188,11 @@ optional State profile/capabilities
 ```
 
 The composition is semantic, not a requirement to implement every Cartesian
-combination. Scenarios declare required capabilities; unsupported
-configurations fail validation before execution.
+combination. The runner derives required capabilities from Scenario topology,
+operations, observations, and oracles, then unions them with explicitly
+declared platform requirements. Unsupported configurations and per-Client
+session counts fail validation before the run emits evidence or creates a
+participant.
 
 ### Participant-host contract
 
@@ -251,6 +254,9 @@ it claims: creation, action dispatch, lifecycle control, capability rejection,
 stable identities, core trace families, control/fault failure reporting, and
 valid artifacts. Shared failure conformance verifies the portable category and
 the separate definite/indefinite outcome for each exposed failure boundary.
+The same capability-parameterized suite runs against the in-process, process,
+and browser factories and verifies scope cleanup of process and browser
+resources after execution.
 
 A scenario using only shared capabilities remains unchanged across compatible
 profiles. Results are profile-scoped. Cross-profile comparison is optional;

@@ -39,29 +39,31 @@ still incomplete. The remaining gaps are decomposed into narrow contracts for
 the [scenario surface and workloads](DELTA-005-scenario-surface-and-workloads.md),
 [controlled scheduling and replay](DELTA-006-controlled-scheduling-and-replay.md),
 [fault-model breadth](DELTA-007-fault-model-breadth.md),
-[sync-transition observation seams](DELTA-008-sync-transition-observation-seams.md),
 [oracle breadth](DELTA-009-oracle-catalogue-breadth.md),
-[shared host conformance](DELTA-010-shared-host-conformance.md), and
 [live visualizer control](DELTA-011-live-visualizer-control.md).
 
-Process and browser observation responses now emit
+Process and browser observation responses emit
 participant-local sequence and monotonic time; controller round-trip samples
 calibrate those occurrences into explicit uncertainty intervals. They do not
-yet expose exact sync boundary receive/apply transitions, however. Component
+expose exact sync boundary receive/apply transitions. Component
 facts therefore remain `firstObserved` samples rather than application-time
 claims. The flow view can align captures and display explicit control
-causation, but exact propagation stages and sync arrows remain absent until
-that boundary evidence exists.
+causation, while exact propagation stages and sync arrows are outside the
+capabilities currently advertised by these hosts.
 
 Event references in this first slice are
 correlated from ordered occurrences of actual eventlog observations. An
-explicit sync-transition observation seam is still required to preserve
-lineage unambiguously when equivalent events are rejected, disappear, or
-reorder. The browser's public Store observation exposes session↔Leader status;
-its portable Leader/backend view is therefore reconciled with the actual
-authoritative backend eventlog until a stable browser-safe Leader observation
-seam exists. One session per Client remains an advertised v1 limit of the
-in-process and process hosts rather than hidden profile parity.
+exact lineage seam was explored and deliberately left outside the sync engine;
+the hosts consequently do not advertise `event-lineage`. The browser's public
+Store observation exposes session↔Leader status, so its portable Leader/backend
+view is reconciled with the actual authoritative backend eventlog. One session
+per Client remains an advertised v1 limit of the in-process and process hosts
+rather than hidden profile parity.
+
+All three profiles now run one capability-parameterized host-conformance suite.
+The runner derives structural requirements and session limits before execution,
+so unsupported topology, operations, observations, or oracles fail before any
+Client is created.
 
 ## VRS
 
@@ -85,9 +87,8 @@ Establish the first coherent headless subsystem in `tests/scenarios/`:
 7. requirement traceability annotations on the evidence that implements these
    contracts.
 
-Close this umbrella delta when the baseline hard blockers—controlled-boundary
-record/replay, a backend-availability fault, and a fully shared
-capability-driven host-conformance suite—run headlessly. The other accepted
-extensions may remain in their narrow deltas. Optional participant profiles,
-backend realizations, and cross-profile comparisons do not create deltas merely
-because they have not been implemented.
+Close this umbrella delta when the remaining baseline hard blockers—controlled-
+boundary record/replay and a backend-availability fault—run headlessly. The
+other accepted extensions may remain in their narrow deltas. Optional
+participant profiles, backend realizations, and cross-profile comparisons do
+not create deltas merely because they have not been implemented.
