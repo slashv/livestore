@@ -11,6 +11,12 @@ exact receive/apply transitions or stable lineage when equivalent events are
 rejected, disappear, or reorder. The browser profile also lacks a stable
 browser-safe Leader/backend observation seam.
 
+Current hosts no longer advertise `event-lineage`. They retain
+fingerprint-and-occurrence references as explicitly inferred visualization
+evidence, and portable Eventlog equality ignores those references. The
+remaining delta is the exact transition and stable identity evidence needed to
+support the stronger capability.
+
 ## VRS
 
 [requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R12,

@@ -407,10 +407,10 @@ reproduction but is not a visual claim about when product transitions occurred.
 
 Portable event observations embed the actual encoded LiveStore event facts
 available at the observed component, including origin and current sequence and
-parent positions. Because a sequence number is a mutable eventlog position
-rather than an immutable identity, the trace assigns an opaque, run-local event
-reference when an event is first observed. Actual sync transitions carry that
-reference across session, Leader, and backend observations and explicitly map
+parent positions, plus an opaque run-local event reference. Because a sequence
+number is a mutable eventlog position rather than an immutable identity, a
+profile claiming event-lineage must carry that reference through actual sync
+transitions across session, Leader, and backend observations and explicitly map
 rebase and confirmation position changes. Consumers do not infer identity from
 event arguments, timestamps, or matching positions.
 
@@ -419,7 +419,17 @@ from its base sequence-position string. Replay surfaces render pending events
 with the canonical trailing-prime notation (`e3'`, `e3r1'`) and never infer
 confirmation from a client component or rebase generation. A profile claiming
 event-lineage capability captures the individual pending tail rather than only
-an aggregate pending count.
+an aggregate pending count. That capability guarantees that one run-local
+event reference denotes the same actual Event across sampled components and
+explicit transitions, including when one origin emits equivalent Events or an
+Event rebases, confirms, is rejected, or disappears. Similar Event facts,
+matching positions, and occurrence order are insufficient to claim lineage.
+
+Without event-lineage capability, a host may still assign event references by
+sampled correlation to support debugging and visual grouping. Such a reference
+means only that observations are inferred to concern the same Event. Oracles
+ignore it, causal projections cannot derive edges from it, and replay surfaces
+must distinguish the inferred link from proven lineage.
 
 Participant hosts and backend realizations derive these records from actual
 LiveStore sync state, eventlogs, boundary operations, and transition observers;
