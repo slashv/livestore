@@ -501,6 +501,21 @@ verdict may make the run fail without changing the completed convergence
 barrier. Conversely, settlement failure prevents later property evaluation
 when the required evidence cannot be captured.
 
+The current snapshot-based oracles (`pending-resolution`,
+`eventlog-convergence`, `state-convergence`, and `state-contains-ids`) share one
+terminal Settlement evidence boundary. When any such oracle is selected, the
+last Scenario step must be a settle phase whose convergence group includes
+every participant selected by those oracles. No later modifying operation may
+invalidate that boundary before final evidence capture and property
+evaluation. Earlier settle phases remain legal checkpoints, but they cannot
+stand in for the terminal boundary. An `operation-history`-only Scenario does
+not require Settlement because its verdict is derived from retained operation
+boundaries rather than a final system snapshot.
+
+Scenario construction validates this relationship between the plan and its
+oracles. Runner preflight repeats the invariant before creating participants so
+a caller cannot bypass it by supplying a manually constructed typed AST.
+
 The Eventlog-convergence oracle evaluates the selected participants against the
 authoritative backend Eventlog captured at the settled head. It emits a passing
 verdict only when the ordered confirmed contents are equal and cites the
