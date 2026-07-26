@@ -32,9 +32,9 @@ scenario-runner slices exist; the remaining baseline divergence is recorded in
 - **LS.SYS.VER.SCEN-R03 Topology and lifecycle:** The scenario model represents
   a sync backend separately from one or more Clients. A Client is the stable
   top-level participant containing one active Leader role and one or more
-  Client-session participants. Plans can add, stop, restart, and remove
-  supported participants or roles while preserving their scenario identities.
-  `refines: LS.SYS-R04`
+  Client-session participants. Plans can create Clients, add Client sessions,
+  and stop or restart supported session or Client runtimes while preserving
+  their scenario identities. `refines: LS.SYS-R04`
 - **LS.SYS.VER.SCEN-R04 Explicit plans and workloads:** Plans declaratively
   compose application actions, participant lifecycle, connectivity and faults,
   workloads, scheduling, observed conditions, phases, and settlement. Reusable

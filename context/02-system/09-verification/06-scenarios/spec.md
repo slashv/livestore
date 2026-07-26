@@ -78,7 +78,7 @@ The AST carries:
 | Reproduction | Seed, scheduling mode, execution configuration                  |
 | Application  | Stable application-definition reference                         |
 | Topology     | Backend, Clients, Client sessions, boundaries, connectivity     |
-| Lifecycle    | Initial and dynamically added, restarted, or removed identities |
+| Lifecycle    | Initial and dynamically added or restarted identities            |
 | Workloads    | Explicit actions and named parameterized patterns               |
 | Schedule     | Logical time, dependencies, observed conditions, phases         |
 | Faults       | Fault injection and Fault removal operations                    |
@@ -99,8 +99,7 @@ generated scenarios reviewable by contributors and agents.
 An application definition wraps the actual `LiveStoreSchema`; it does not
 redeclare event definitions or materializers. From that schema it exposes:
 
-- direct schema-event commits, optionally restricted by the application;
-- named higher-level actions with Effect Schema-encoded inputs;
+- named application actions with Effect Schema-encoded inputs;
 - optional state inspectors returning schema-encoded normalized values; and
 - stable application and schema identities used during reproduction.
 
@@ -108,6 +107,12 @@ Action implementations execute inside the target participant host with its
 real typed Store. Only the action name and encoded input cross the scenario
 boundary. Reproducible actions use runner-provided randomness and time;
 uncontrolled external effects cannot claim deterministic replay.
+
+Named actions are the sole portable application-mutation boundary. An
+application fixture may expose a deliberately low-level or test-only action
+that commits one schema event when a concrete Scenario needs event-level
+control; the Scenario AST and participant-host protocol do not carry a
+separate direct schema-event command.
 
 State inspectors read already-materialized State. They are not materializers.
 Rematerialization replays the authoritative eventlog through the application's
@@ -131,12 +136,34 @@ data, one active Leader role, and one or more Client-session participants. The
 Leader is a controllable and observable role within its Client, not a separate
 participant. The sync backend is a separate topology component.
 
+`topology.clients` contains only the Clients and sessions created before the
+first phase. A sequential `create-client` step carries the new Client's initial
+definition; a sequential `add-session` step introduces a new session identity
+under an already-created Client. Both operations fail preflight on duplicate or
+out-of-order identity use and are excluded from `parallel` groups. All profiles
+support dynamic Client creation through the existing host creation boundary;
+dynamic session addition is currently a browser capability realized by opening
+a page in the Client's existing persistent context. The creation
+acknowledgement proves host handling and startup, while later observations and
+Settlement prove catch-up or Convergence.
+
+The portable vocabulary has no generic Client or session removal operation.
+Client disconnection changes only backend connectivity while its runtime and
+local data remain live. Stopping a session models closing that session runtime,
+such as a browser tab, while retaining its identity so a supported host can
+restart it. Runtime termination for an entire Client, deletion of persistent
+local data, access revocation, and exclusion from a Settlement convergence
+group are distinct semantics and are not implied by either disconnect or
+session stop. Any future control for one of those behaviors must name it
+directly and identify the owning runtime, persistence, or authorization
+boundary.
+
 Plans use these stable step families:
 
 | Family             | Meaning                                                                           |
 | ------------------ | --------------------------------------------------------------------------------- |
-| Application        | Commit a schema event or invoke a named action                                    |
-| Lifecycle          | Add, stop, restart, or remove a supported participant or role                     |
+| Application        | Invoke a named application action                                                  |
+| Lifecycle          | Create a Client; add or restart a supported session or Client                     |
 | Connectivity/fault | Inject or remove a supported adverse condition                                    |
 | Workload           | Run a named seeded pattern, repetition, or burst                                  |
 | Scheduling         | Sequence, parallelism, logical timing, repetition, condition wait                 |
@@ -165,9 +192,16 @@ category alone never establishes certainty: a transport failure before send
 can be definite, while loss after dispatch is indefinite; a response timeout
 is indefinite. Profile-native details remain in the diagnostic message.
 
-Workload patterns declare compatible application actions, parameters, targets,
-rate/count, and stopping condition. Their deterministic expansion is compact in
-the AST, while each emitted application action is recorded in the trace.
+The implemented workload node declares a stable application-owned pattern,
+serializable input, allowed targets, and a bounded action count. Before creating
+participants, the runner resolves that name from the application workload
+library, derives a workload seed from the recorded Scenario seed plus stable
+phase/step identity, and expands it exactly once. Callbacks never enter the AST
+or participant transport. Every generated action has a stable child operation
+ID and ordinary action instruction/outcome evidence; the enclosing workload has
+its own instruction/outcome boundary. Workload v1 executes generated actions
+sequentially. Rate, stopping-condition, and generated-parallel scheduling remain
+unsupported syntax.
 
 The implemented `parallel` scheduling step contains two or more ordinary
 non-settlement operations. Every child retains its own identity; the runner
@@ -201,7 +235,7 @@ contract that can:
 
 - create a Client and add a Client session;
 - dispatch a serialized named action to a target session;
-- stop or restart supported sessions, Clients, or Leader roles;
+- stop or restart supported sessions or Clients;
 - inject and remove supported faults;
 - acknowledge lifecycle and control handling at the host boundary;
 - advertise capabilities before the run; and
@@ -233,6 +267,17 @@ to each Client session. Pages within a Client therefore share the production
 SharedWorker leader, Web Locks, origin, and OPFS, while browser contexts isolate
 Clients. Reopening one page preserves the Client; reopening the context with the
 same profile directory models a persistent Client restart.
+
+The browser corpus exercises behavioral Leader turnover without a separate
+Leader lifecycle operation. Its first session starts before a second session is
+added, so the fixture's blocking Web Lock election gives the first session the
+initial Leader role. The Scenario stops that session, successfully writes
+through the remaining session, restarts the first session, and then proves
+Convergence. This is production-path recovery evidence, but the portable trace
+does not claim authoritative old/new Leader-session identity. A future need to
+prove exact role ownership or absence of overlapping Leaders requires an
+independently justified runtime observation seam; it must not be inferred from
+operation order alone.
 
 ### Sync-backend realizations
 
@@ -311,7 +356,7 @@ profile explicitly advertises them.
 
 The implemented portable baseline supports Client disconnect/reconnect and
 shared backend unavailability/recovery. Delayed responses, bounded
-latency/jitter, constrained throughput, supported participant or Leader-role
+latency/jitter, constrained throughput, supported participant
 termination/restart, and stale-head or concurrent-push conditions produced
 through valid protocol behavior are future fault families and must not be
 advertised by a profile that cannot realize them.
@@ -412,8 +457,8 @@ The full Scenario trace is the evidence envelope. A Scenario operation history
 is a derived projection of retained instruction and outcome boundaries for
 history-based checks. Consumers must not call that projection complete unless
 it covers the required failed, indefinite, and overlapping operations. The
-current projection declares Client creation, application action, connectivity,
-session/Client lifecycle, and settlement families across the
+current projection declares Client creation, application action, workload,
+connectivity, session/Client lifecycle, and settlement families across the
 instruction-to-Control-outcome boundary. System/sync sampling and State
 inspection are explicitly excluded from that application/control history.
 
