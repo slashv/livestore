@@ -1,8 +1,9 @@
 # DELTA-001 — Scenario verification baseline incomplete
 
-Status: open
+Status: closed (2026-07-25) — the coherent headless baseline is implemented;
+accepted extensions remain tracked in their narrow deltas.
 
-## Divergence
+## Resolution
 
 Several vertical slices now exist in the private `tests/scenarios/` workspace.
 They provide a versioned serializable AST, schema-backed named actions and
@@ -34,10 +35,9 @@ propagation arrows.
 
 The runner now retains independently identified child operations across
 bounded parallel groups, derives histories with declared coverage, and uses a
-history oracle to verify actual overlap. The coherent baseline is nevertheless
-still incomplete. The remaining gaps are decomposed into narrow contracts for
+history oracle to verify actual overlap. The coherent baseline is complete.
+Accepted extensions remain decomposed into narrow contracts for
 the [scenario surface and workloads](DELTA-005-scenario-surface-and-workloads.md),
-[fault-model breadth](DELTA-007-fault-model-breadth.md),
 [oracle breadth](DELTA-009-oracle-catalogue-breadth.md),
 [live visualizer control](DELTA-011-live-visualizer-control.md).
 
@@ -69,12 +69,20 @@ current capability set. Seeded runs reproduce declared inputs and requested
 choices, not session↔Leader or Leader↔backend delivery order; adding gates to
 those paths solely for Scenario replay is not part of the baseline.
 
+Backend availability is realized without a sync-engine seam. The controlled
+mock exposes availability directly; local `sync-cf` uses a Scenario-owned proxy
+that withholds participant traffic while Wrangler and Durable Object state stay
+live. A portable outage/write/recovery scenario converges through the
+in-process, process, and browser placements. Hard socket destruction and
+backend-process restart remain explicitly unsupported stronger faults under
+[decision 0011](../.decisions/0011-model-backend-outage-at-participant-route.md).
+
 ## VRS
 
 [requirements.md](../requirements.md) `LS.SYS.VER.SCEN-R01…R21`, accepted via
 [RFC 0003](../../../../../contributor-docs/rfcs/0003-scenario-based-sync-verification.md).
 
-## Implementation Contract
+## Accepted Contract
 
 Establish the first coherent headless subsystem in `tests/scenarios/`:
 
@@ -91,8 +99,8 @@ Establish the first coherent headless subsystem in `tests/scenarios/`:
 7. requirement traceability annotations on the evidence that implements these
    contracts.
 
-Close this umbrella delta when the remaining baseline hard blocker—a backend-
-availability fault—runs headlessly. The other accepted extensions may remain
-in their narrow deltas. Optional participant profiles, backend realizations,
-and cross-profile comparisons do not create deltas merely because they have
-not been implemented.
+The baseline closure condition is satisfied by the headless backend-
+availability scenario. The other accepted extensions may remain in their
+narrow deltas. Optional participant profiles, backend realizations, and cross-
+profile comparisons do not create deltas merely because they have not been
+implemented.

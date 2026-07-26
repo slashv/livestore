@@ -309,11 +309,21 @@ profile explicitly advertises them.
 
 ## Fault Semantics (LS.SYS.VER.SCEN-R11)
 
-Initial supported fault families are disconnect/reconnect, backend
-unavailability/recovery, delayed responses, bounded latency/jitter, constrained
-throughput, supported participant or Leader-role termination/restart, and
-stale-head or concurrent-push conditions produced through valid protocol
-behavior.
+The implemented portable baseline supports Client disconnect/reconnect and
+shared backend unavailability/recovery. Delayed responses, bounded
+latency/jitter, constrained throughput, supported participant or Leader-role
+termination/restart, and stale-head or concurrent-push conditions produced
+through valid protocol behavior are future fault families and must not be
+advertised by a profile that cannot realize them.
+
+The local `sync-cf` realization places a Scenario-owned TCP proxy between every
+participant and Wrangler. While unavailable, the proxy withholds traffic on
+existing participant sockets and rejects new connections. Wrangler, the Worker,
+and Durable Object remain live, and the evidence-only backend observer bypasses
+the proxy. Removing the fault resumes the retained transport route; this
+baseline does not claim recovery after TCP/WebSocket destruction, Worker or
+Durable Object restart, or persisted-backend process death. The controlled mock
+backend realizes the same portable fault through its availability control.
 
 Faults are injected at the highest boundary that still exercises the behavior
 under test. Corruption, duplication, or arbitrary reordering is legal only when
@@ -488,6 +498,10 @@ observation establishes a stable catch-up point for later property evaluation.
 The barrier does not by itself prove that the Eventlog contents behind `H` are
 equal and does not include State or other property verdicts.
 
+For a Client-session participant, the implemented predicate covers both that
+session and its current Leader: every local/upstream component head must reach
+`H`, and pending work in either component prevents settlement.
+
 Current profiles use repeated observation and a bounded wall-clock stability
 window. A future controlled-delivery profile must release due work and advance
 logical time until no immediately due controlled work can affect convergence.
@@ -496,7 +510,8 @@ Open streams and future polling alone do not prevent settlement.
 The runner joins each bounded parallel group before advancing to a later step,
 projects outstanding instruction/outcome boundaries before settlement, and
 emits `quiescence.reached` only when no modifying operation other than the
-settlement itself remains in flight. For the supported disconnect fault,
+settlement itself remains in flight. For the supported disconnect and backend-
+availability faults,
 `fault.injected` and `fault.removed` are first-observed facts:
 they follow both the Control acknowledgement and a system observation
 confirming the requested connectivity state. Each later settlement poll emits
