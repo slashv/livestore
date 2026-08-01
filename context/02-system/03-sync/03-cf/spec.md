@@ -32,15 +32,19 @@ arbitrates pushes and fans out live pull streams to subscribers
   `currentHead`, `backendId`). `<V>` = `PERSISTENCE_FORMAT_VERSION`
   (currently 7, `cf-worker/shared.ts:135`); bumping it renames the tables —
   a soft reset that orphans old data (LS.SYS.SYNC.CF-R03).
-- **Push arbitration** (`cf-worker/do/push.ts:63-87`): inside
-  `ctx.blockConcurrencyWhile`, accept iff
+- **Push arbitration** (`cf-worker/do/push.ts`): Durable Object context
+  initialization is single-flight, yielding one shared head reference and push
+  semaphore per instance. Under that semaphore, accept iff
   `batch[0].parentSeqNum === currentHead` (else `ServerAheadError` with
   `minimumExpectedNum`), append client-supplied sequence numbers, advance
-  `currentHead`. Empty batches short-circuit to an ack. There is no
-  explicit idempotency/dedup beyond the head check (TODO `push.ts:65`).
-- **Fan-out** (`push.ts:90-187`): after the serialized section, an
-  uninterruptible background fiber re-chunks the batch and emits to two
-  subscriber sets — hibernatable WebSockets (per-socket `pullRequestIds`
+  `currentHead`, and publish the matching pull response before honoring
+  interruption or admitting the next push. Persistence remains inside
+  `ctx.blockConcurrencyWhile`; the larger admission-to-publication transition
+  is serialized and uninterruptible. Empty batches short-circuit to an ack.
+  There is no explicit idempotency/dedup beyond the head check (see
+  [.decisions/0002-atomic-push-publication.md](./.decisions/0002-atomic-push-publication.md)).
+- **Fan-out** (`push.ts`): accepted batches are re-chunked and emitted in
+  admission order to two subscriber sets — hibernatable WebSockets (per-socket `pullRequestIds`
   attachments; hand-crafted RPC chunk frames) and DO-RPC subscriptions (an
   in-memory map fed by live pulls).
 - **BackendId** (`layer.ts:98-114`): `nanoid()` on first context build,
@@ -48,7 +52,7 @@ arbitrates pushes and fans out live pull streams to subscribers
   fail with `BackendIdMismatchError` (client records it lazily from pull
   responses).
 - **Limits** (`common/constants.ts`): `MAX_TRANSPORT_PAYLOAD_BYTES =
-  900_000` (below the ~1 MB hibernated-WS frame cap),
+900_000` (below the ~1 MB hibernated-WS frame cap),
   `MAX_PULL_EVENTS_PER_MESSAGE = MAX_PUSH_EVENTS_PER_REQUEST = 100`. D1
   paths additionally paginate adaptively (~1 MB response target, page size
   shrinking from 256) and chunk inserts to 14 events per statement
@@ -56,11 +60,11 @@ arbitrates pushes and fans out live pull streams to subscribers
 
 ## Transports
 
-| Transport | Schema | Liveness | Notes |
-| --- | --- | --- | --- |
-| WebSocket | `ws-rpc-schema.ts` | server-held stream (`live` flag + `Stream.never`), pushed chunks | default; DO auto ping/pong; hibernation-aware |
-| HTTP | `http-rpc-schema.ts` | client-side polling (~5 s default) | 10 s hard request timeout; explicit `Ping` RPC; push `payload` not threaded (see gaps) |
-| DO-RPC | `do-rpc-schema.ts` | RPC callback queue (`rpcContext` presence = live) | for same-Cloudflare-app callers (`adapter-cloudflare`); explicit `Ping` |
+| Transport | Schema               | Liveness                                                         | Notes                                                                                  |
+| --------- | -------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| WebSocket | `ws-rpc-schema.ts`   | server-held stream (`live` flag + `Stream.never`), pushed chunks | default; DO auto ping/pong; hibernation-aware                                          |
+| HTTP      | `http-rpc-schema.ts` | client-side polling (~5 s default)                               | 10 s hard request timeout; explicit `Ping` RPC; push `payload` not threaded (see gaps) |
+| DO-RPC    | `do-rpc-schema.ts`   | RPC callback queue (`rpcContext` presence = live)                | for same-Cloudflare-app callers (`adapter-cloudflare`); explicit `Ping`                |
 
 Message payloads share `sync-message-types.ts`
 (PullRequest/PullResponse/PushRequest/PushAck/Ping/Pong + unwired admin
