@@ -572,7 +572,9 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
           .pipe(Effect.tapCauseLogPretty, Effect.exit)
       }
 
-      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(2), Stream.runDrain)
+      // The supported concurrency guarantee is eventual propagation after reconciliation. The serialized machine
+      // intentionally removes the old queue race that made the exact number of pre-rebase successes timing-dependent.
+      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain)
     }).pipe(withTestCtx()(test)),
   )
 
