@@ -389,6 +389,65 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
     ),
   )
 
+  Vitest.live('provider push defects re-enter the machine and retry', (test) => {
+    let shouldDefect = true
+
+    return Effect.gen(function* () {
+      const testContext = yield* TestContext
+
+      yield* testContext.pushEncoded(
+        testContext.eventFactory.todoCreated.next({ id: 'push-after-defect', text: 'retried', completed: false }),
+      )
+
+      const pushed = yield* testContext.mockSyncBackend.pushedEvents.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.timeout(4000),
+      )
+      expect(pushed[0]?.args.id).toEqual('push-after-defect')
+    }).pipe(
+      withTestCtx({
+        syncOptions: { livePull: false, onSyncError: 'ignore' },
+        mockBackendOverride: (mockBackend) => () =>
+          Effect.gen(function* () {
+            const syncBackend = yield* mockBackend.makeSyncBackend
+            return {
+              ...syncBackend,
+              push: (batch) => {
+                if (shouldDefect === true) {
+                  shouldDefect = false
+                  return Effect.die(new Error('Simulated provider push defect'))
+                }
+                return syncBackend.push(batch)
+              },
+            }
+          }),
+      })(test),
+    )
+  })
+
+  Vitest.live('provider pull defects follow the configured shutdown path', (test) =>
+    Effect.gen(function* () {
+      const testContext = yield* TestContext
+
+      const shutdownError = yield* Deferred.await(testContext.shutdownDeferred).pipe(Effect.flip, Effect.timeout(3000))
+      expect(shutdownError._tag).toEqual('UnknownError')
+    }).pipe(
+      withTestCtx({
+        syncOptions: { livePull: false, onSyncError: 'shutdown' },
+        captureShutdown: true,
+        mockBackendOverride: (mockBackend) => () =>
+          Effect.gen(function* () {
+            const syncBackend = yield* mockBackend.makeSyncBackend
+            return {
+              ...syncBackend,
+              pull: () => Stream.fromEffect(Effect.die(new Error('Simulated provider pull defect'))),
+            }
+          }),
+      })(test),
+    ),
+  )
+
   Vitest.live('local push old-gen items fail promptly with StaleRebaseGenerationError', (test) =>
     Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx

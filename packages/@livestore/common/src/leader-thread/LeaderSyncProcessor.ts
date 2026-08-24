@@ -521,6 +521,13 @@ const runProviderPush = (
       onFailure: (error) => send({ _tag: 'PushFailed', operationId: command.operationId, error }),
       onSuccess: () => send({ _tag: 'PushSucceeded', operationId: command.operationId }),
     }),
+    Effect.catchCause((cause) =>
+      send({
+        _tag: 'PushFailed',
+        operationId: command.operationId,
+        error: UnknownError.make({ cause, note: 'Sync backend push defected' }),
+      }),
+    ),
     Effect.interruptible,
   )
 
@@ -579,6 +586,13 @@ const runProviderPull = ({
       onFailure: (error) => send({ _tag: 'PullFailed', pullId: command.pullId, error }),
       onSuccess: () => Effect.void,
     }),
+    Effect.catchCause((cause) =>
+      send({
+        _tag: 'PullFailed',
+        pullId: command.pullId,
+        error: UnknownError.make({ cause, note: 'Sync backend pull defected' }),
+      }),
+    ),
     // Stream interruption is not a typed provider failure. Completion still releases pagination priority; a typed
     // failure event, when present, is processed first and can replace this with retry or terminal handling.
     Effect.ensuring(send({ _tag: 'PullCompleted', pullId: command.pullId })),
