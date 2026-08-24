@@ -99,6 +99,10 @@ interface LocalRequest {
   readonly remaining: number
 }
 
+type LocalRequestRegistry =
+  | { readonly _tag: 'open'; readonly requests: Map<Machine.LocalRequestId, LocalRequest> }
+  | { readonly _tag: 'closed' }
+
 export const make = Effect.fnUntraced(function* ({
   schema,
   runtime,
@@ -121,7 +125,7 @@ export const make = Effect.fnUntraced(function* ({
   const stoppedDeferred = yield* Deferred.make<void>()
   const nextLocalRequestId = yield* Ref.make(1)
   const nextPullBatchId = yield* Ref.make(1)
-  const localRequests = yield* Ref.make(new Map<Machine.LocalRequestId, LocalRequest>())
+  const localRequests = yield* Ref.make<LocalRequestRegistry>({ _tag: 'open', requests: new Map() })
   const pullBatches = yield* Ref.make(new Map<Machine.PullBatchId, Deferred.Deferred<void>>())
   const bootStarted = yield* Ref.make(false)
 
@@ -133,9 +137,17 @@ export const make = Effect.fnUntraced(function* ({
       if (events.length === 0) return
       const requestId = yield* Ref.modify(nextLocalRequestId, (id) => [id, id + 1])
       const deferred = yield* Deferred.make<void, RejectedPushError>()
-      yield* Ref.update(localRequests, (requests) =>
-        new Map(requests).set(requestId, { deferred, remaining: events.length }),
-      )
+      const admitted = yield* Ref.modify(localRequests, (registry) => {
+        if (registry._tag === 'closed') return [false, registry]
+        return [
+          true,
+          {
+            _tag: 'open' as const,
+            requests: new Map(registry.requests).set(requestId, { deferred, remaining: events.length }),
+          },
+        ]
+      })
+      if (admitted === false) return yield* Effect.interrupt
       const machine = yield* Deferred.await(machineDeferred)
       yield* machine.send({ _tag: 'LocalPushRequested', requestId, events })
       yield* Deferred.await(deferred)
@@ -198,7 +210,7 @@ export const make = Effect.fnUntraced(function* ({
         .pipe(Effect.ignore, Effect.andThen(Deferred.await(stoppedDeferred))),
     )
     return { initialLeaderHead: yield* Deferred.await(bootDeferred) }
-  }).pipe(Effect.withSpanScoped('@livestore/common:LeaderSyncProcessor:boot'))
+  }).pipe(Effect.withSpanScoped('@livestore/common:LeaderSyncProcessor:boot'), Effect.uninterruptible)
 
   return LeaderSyncProcessor.of({
     [TypeId]: TypeId,
@@ -269,7 +281,7 @@ const makeCommandExecutor = ({
   syncCommitter: LeaderSyncCommitter.Service
   syncStateRef: SubscriptionRef.SubscriptionRef<SyncState.SyncState>
   connectedSessions: PullQueueSet
-  localRequests: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>
+  localRequests: Ref.Ref<LocalRequestRegistry>
   pullBatches: Ref.Ref<Map<Machine.PullBatchId, Deferred.Deferred<void>>>
   nextPullBatchId: Ref.Ref<number>
   bootDeferred: Deferred.Deferred<EventSequenceNumber.Client.Composite>
@@ -410,8 +422,7 @@ const makeCommandExecutor = ({
           FiberSet.clear(commandFibers),
           interruptAllLocalRequests(localRequests),
           interruptAllPullBatches(pullBatches),
-          Deferred.succeed(stoppedDeferred, void 0),
-        ]).pipe(Effect.asVoid)
+        ]).pipe(Effect.asVoid, Effect.ensuring(Deferred.succeed(stoppedDeferred, void 0)))
       default:
         return casesHandled(command)
     }
@@ -574,15 +585,13 @@ const runProviderPull = ({
     Effect.interruptible,
   )
 
-const completeLocalItems = (
-  requestsRef: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>,
-  items: ReadonlyArray<Machine.LocalItem>,
-) =>
+const completeLocalItems = (requestsRef: Ref.Ref<LocalRequestRegistry>, items: ReadonlyArray<Machine.LocalItem>) =>
   Effect.gen(function* () {
     const counts = countRequestItems(items)
     const completions: Deferred.Deferred<void, RejectedPushError>[] = []
-    yield* Ref.update(requestsRef, (current) => {
-      const next = new Map(current)
+    yield* Ref.update(requestsRef, (registry) => {
+      if (registry._tag === 'closed') return registry
+      const next = new Map(registry.requests)
       for (const [requestId, count] of counts) {
         const request = next.get(requestId)
         if (request === undefined) continue
@@ -592,52 +601,55 @@ const completeLocalItems = (
           completions.push(request.deferred)
         } else next.set(requestId, { ...request, remaining })
       }
-      return next
+      return { _tag: 'open' as const, requests: next }
     })
     yield* Effect.forEach(completions, (deferred) => Deferred.succeed(deferred, void 0), { discard: true })
   })
 
 const rejectLocalItems = (
-  requestsRef: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>,
+  requestsRef: Ref.Ref<LocalRequestRegistry>,
   items: ReadonlyArray<{ readonly item: Machine.LocalItem; readonly error: RejectedPushError }>,
 ) =>
   Effect.gen(function* () {
     const failures: Array<{ deferred: Deferred.Deferred<void, RejectedPushError>; error: RejectedPushError }> = []
-    yield* Ref.update(requestsRef, (current) => {
-      const next = new Map(current)
+    yield* Ref.update(requestsRef, (registry) => {
+      if (registry._tag === 'closed') return registry
+      const next = new Map(registry.requests)
       for (const { item, error } of items) {
         const request = next.get(item.requestId)
         if (request === undefined) continue
         next.delete(item.requestId)
         failures.push({ deferred: request.deferred, error })
       }
-      return next
+      return { _tag: 'open' as const, requests: next }
     })
     yield* Effect.forEach(failures, ({ deferred, error }) => Deferred.fail(deferred, error), { discard: true })
   })
 
 const interruptLocalRequests = (
-  requestsRef: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>,
+  requestsRef: Ref.Ref<LocalRequestRegistry>,
   requestIds: ReadonlyArray<Machine.LocalRequestId>,
 ) =>
   Effect.gen(function* () {
     const deferreds: Deferred.Deferred<void, RejectedPushError>[] = []
-    yield* Ref.update(requestsRef, (current) => {
-      const next = new Map(current)
+    yield* Ref.update(requestsRef, (registry) => {
+      if (registry._tag === 'closed') return registry
+      const next = new Map(registry.requests)
       for (const requestId of new Set(requestIds)) {
         const request = next.get(requestId)
         if (request !== undefined) deferreds.push(request.deferred)
         next.delete(requestId)
       }
-      return next
+      return { _tag: 'open' as const, requests: next }
     })
     yield* Effect.forEach(deferreds, Deferred.interrupt, { discard: true })
   })
 
-const interruptAllLocalRequests = (requestsRef: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>) =>
+const interruptAllLocalRequests = (requestsRef: Ref.Ref<LocalRequestRegistry>) =>
   Effect.gen(function* () {
-    const requests = yield* Ref.getAndSet(requestsRef, new Map())
-    yield* Effect.forEach(requests.values(), ({ deferred }) => Deferred.interrupt(deferred), { discard: true })
+    const registry = yield* Ref.getAndSet(requestsRef, { _tag: 'closed' })
+    if (registry._tag === 'closed') return
+    yield* Effect.forEach(registry.requests.values(), ({ deferred }) => Deferred.interrupt(deferred), { discard: true })
   })
 
 const interruptAllPullBatches = (batchesRef: Ref.Ref<Map<Machine.PullBatchId, Deferred.Deferred<void>>>) =>

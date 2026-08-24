@@ -47,6 +47,10 @@ but no single model described which operation owned synchronization state or how
     eventlog truth and requires external recovery.
 11. Reset and shutdown enter a quiescing phase when durable work is active. The matching commit outcome is published
     or failed before database reset or runtime termination begins.
+12. Command execution stops at the first defect. The defect is processed before another mailbox event, so publication
+    or propagation failures cannot be followed by acknowledgement from the same transition.
+13. Runtime termination atomically closes local-push admission before draining acknowledgement and pull-page
+    registries. A push racing shutdown is interrupted instead of being left unresolved.
 
 ## Proposed Solution
 

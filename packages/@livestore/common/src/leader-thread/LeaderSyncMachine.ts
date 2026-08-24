@@ -549,7 +549,9 @@ const onUpstreamBatchReceived = (
     return { state, commands: [{ _tag: 'CompletePullBatch', batch: event.batch }] }
   }
   if (event.batch.events.length === 0) {
-    return scheduleNextWork(state, [{ _tag: 'CompletePullBatch', batch: event.batch }])
+    const pull =
+      event.batch.pageInfo._tag === 'NoMore' ? { ...state.pull, pagination: 'between-pages' as const } : state.pull
+    return scheduleNextWork({ ...state, pull }, [{ _tag: 'CompletePullBatch', batch: event.batch }])
   }
   const pull: PullState = {
     ...state.pull,
@@ -793,6 +795,19 @@ const transitionResetting = (state: Extract<State, { _tag: 'resetting' }>, event
       ],
     }
   }
+  if (event._tag === 'CommandDefected') {
+    const failure: Failure = {
+      _tag: 'CommandDefected',
+      cause: { commandTag: event.commandTag, cause: event.cause },
+    }
+    return {
+      state: { _tag: 'failed', syncState: state.syncState, failure, shutdownSent: true },
+      commands: [
+        { _tag: 'SendShutdown', error: failure.cause },
+        { _tag: 'StopRuntime', reason: failure._tag },
+      ],
+    }
+  }
   if (event._tag === 'ShutdownRequested') {
     return {
       state: { _tag: 'stopping', syncState: state.syncState, reason: event.reason },
@@ -878,6 +893,31 @@ const transitionQuiescing = (
     pull: { _tag: 'disabled' } as const,
     push: { _tag: 'disabled' } as const,
   }
+  if (
+    (event._tag === 'LocalCommitFailed' || event._tag === 'LocalCommitDefected') &&
+    running.work._tag === 'committing-local' &&
+    event.operationId === running.work.operationId
+  ) {
+    return completeTerminalIntent({ ...running, work: { _tag: 'idle' } }, state.intent, [])
+  }
+  if (
+    (event._tag === 'UpstreamCommitFailed' || event._tag === 'UpstreamCommitDefected') &&
+    running.work._tag === 'committing-upstream' &&
+    event.operationId === running.work.operationId
+  ) {
+    return completeTerminalIntent({ ...running, work: { _tag: 'idle' } }, state.intent, [])
+  }
+  if (event._tag === 'CommandDefected') {
+    return completeTerminalIntent(
+      { ...running, work: { _tag: 'idle' } },
+      {
+        _tag: 'fail',
+        failure: { _tag: 'CommandDefected', cause: { commandTag: event.commandTag, cause: event.cause } },
+        sendShutdown: true,
+      },
+      [],
+    )
+  }
   const result =
     event._tag === 'LocalCommitSucceeded' ||
     event._tag === 'LocalCommitFailed' ||
@@ -892,10 +932,15 @@ const transitionQuiescing = (
   return completeTerminalIntent(result.state, state.intent, result.commands)
 }
 
-const transitionTerminal = (state: Extract<State, { _tag: 'stopping' | 'failed' }>, event: Event): TransitionResult =>
-  event._tag === 'LocalPushRequested'
-    ? { state, commands: [{ _tag: 'InterruptLocalRequests', requestIds: [event.requestId] }] }
-    : { state, commands: [] }
+const transitionTerminal = (state: Extract<State, { _tag: 'stopping' | 'failed' }>, event: Event): TransitionResult => {
+  if (event._tag === 'LocalPushRequested') {
+    return { state, commands: [{ _tag: 'InterruptLocalRequests', requestIds: [event.requestId] }] }
+  }
+  if (event._tag === 'CommandDefected') {
+    return { state, commands: [{ _tag: 'StopRuntime', reason: `command-defect:${event.commandTag}` }] }
+  }
+  return { state, commands: [] }
+}
 
 type RunningTransitionResult = { readonly state: RunningState; readonly commands: ReadonlyArray<Command> }
 

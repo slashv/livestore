@@ -1,4 +1,4 @@
-import { type Scope, Effect, Queue, Subscribable, SubscriptionRef } from '@livestore/utils/effect'
+import { type Scope, Effect, Exit, Option, Queue, Subscribable, SubscriptionRef } from '@livestore/utils/effect'
 
 import type * as Machine from './LeaderSyncMachine.ts'
 
@@ -28,15 +28,22 @@ export const make = ({
 
     const run: Runtime['run'] = Effect.gen(function* () {
       let running = true
+      let nextEvent = Option.none<Machine.Event>()
       while (running === true) {
-        const event = yield* Queue.take(mailbox)
+        const event = Option.isSome(nextEvent) === true ? nextEvent.value : yield* Queue.take(mailbox)
+        nextEvent = Option.none()
         const current = yield* SubscriptionRef.get(stateRef)
         const result = transition(current, event)
         yield* SubscriptionRef.set(stateRef, result.state)
         for (const command of result.commands) {
-          yield* execute(command, send).pipe(
-            Effect.catchCause((cause) => send({ _tag: 'CommandDefected', commandTag: command._tag, cause })),
-          )
+          const exit = yield* execute(command, send).pipe(Effect.exit)
+          if (Exit.isFailure(exit) === true) {
+            if (command._tag === 'StopRuntime') running = false
+            else {
+              nextEvent = Option.some({ _tag: 'CommandDefected', commandTag: command._tag, cause: exit.cause })
+            }
+            break
+          }
           if (command._tag === 'StopRuntime') {
             running = false
             break

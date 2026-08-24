@@ -81,4 +81,62 @@ Vitest.describe('LeaderSyncMachineRuntime', () => {
       expect((yield* runtime.state.get)._tag).toBe('failed')
     }).pipe(Vitest.withTestCtx(test)),
   )
+
+  Vitest.live('stops a command tail after the first defect', (test) =>
+    Effect.gen(function* () {
+      const syncState = new SyncState.SyncState({
+        pending: [],
+        upstreamHead: EventSequenceNumber.Client.ROOT,
+        localHead: EventSequenceNumber.Client.ROOT,
+      })
+      const executed: Machine.Command['_tag'][] = []
+      const runtime = yield* MachineRuntime.make({
+        initialState: Machine.initial(
+          {
+            backendEnabled: false,
+            livePull: false,
+            localCommitBatchSize: 10,
+            backendPushBatchSize: 50,
+            onError: 'shutdown',
+            onBackendIdMismatch: 'shutdown',
+            localWorkInitiallyBlocked: false,
+          },
+          syncState,
+        ),
+        transition: (state, event) => {
+          if (event._tag === 'Start') {
+            return {
+              state,
+              commands: [
+                {
+                  _tag: 'PublishSessions',
+                  payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: [] }),
+                  globalHead: EventSequenceNumber.Client.ROOT,
+                  leaderHead: EventSequenceNumber.Client.ROOT,
+                },
+                { _tag: 'CompleteLocalItems', items: [] },
+              ],
+            }
+          }
+          if (event._tag === 'CommandDefected') {
+            return {
+              state: { _tag: 'stopping', syncState, reason: 'command-defect' },
+              commands: [{ _tag: 'StopRuntime', reason: 'command-defect' }],
+            }
+          }
+          return { state, commands: [] }
+        },
+        execute: (command) =>
+          Effect.sync(() => executed.push(command._tag)).pipe(
+            Effect.andThen(command._tag === 'PublishSessions' ? Effect.die(new Error('publish defect')) : Effect.void),
+          ),
+      })
+      const fiber = yield* runtime.run.pipe(Effect.forkScoped)
+      yield* runtime.send({ _tag: 'Start' })
+      yield* Fiber.join(fiber)
+
+      expect(executed).toEqual(['PublishSessions', 'StopRuntime'])
+      expect((yield* runtime.state.get)._tag).toBe('stopping')
+    }).pipe(Vitest.withTestCtx(test)),
+  )
 })

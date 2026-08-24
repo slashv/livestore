@@ -93,6 +93,71 @@ describe('LeaderSyncMachine', () => {
     expect(expectRunning(admitted.state).localQueue).toHaveLength(1)
   })
 
+  it('releases an existing pagination fence on an empty terminal page', () => {
+    const event = makeEvent(1)
+    const started = expectRunning(
+      transition(Machine.initial(config({ backendEnabled: true }), emptySyncState), { _tag: 'Start' }).state,
+    )
+    if (started.pull._tag !== 'streaming') throw new Error('Expected streaming pull')
+    const batch: Machine.UpstreamBatch = {
+      pullId: started.pull.pullId,
+      batchId: 1,
+      events: [event],
+      pageInfo: SyncBackend.pageInfoMoreKnown(1),
+    }
+    const received = expectRunning(transition(started, { _tag: 'UpstreamBatchReceived', batch }).state)
+    if (received.work._tag !== 'planning-upstream') throw new Error('Expected planning-upstream')
+    const proposedSyncState = new SyncState.SyncState({
+      pending: [],
+      upstreamHead: event.seqNum,
+      localHead: event.seqNum,
+    })
+    const planned = expectRunning(
+      transition(received, {
+        _tag: 'UpstreamPlanned',
+        operationId: received.work.operationId,
+        plan: {
+          batch,
+          proposedSyncState,
+          mergeTag: 'advance',
+          events: [event],
+          rollbackEvents: [],
+          confirmedEvents: [],
+        },
+      }).state,
+    )
+    if (planned.work._tag !== 'committing-upstream') throw new Error('Expected committing-upstream')
+    const queuedLocal = expectRunning(
+      transition(planned, { _tag: 'LocalPushRequested', requestId: 1, events: [makeEvent(1)] }).state,
+    )
+    const committed = expectRunning(
+      transition(queuedLocal, {
+        _tag: 'UpstreamCommitSucceeded',
+        operationId: planned.work.operationId,
+        receipt: {
+          _tag: 'upstream-commit',
+          committedEvents: [event],
+          rolledBackEventNums: [],
+          stateHead: event.seqNum,
+          backendHead: event.seqNum,
+        },
+      }).state,
+    )
+    expect(committed.work._tag).toBe('idle')
+    if (committed.pull._tag !== 'streaming') throw new Error('Expected streaming pull')
+
+    const terminal = transition(committed, {
+      _tag: 'UpstreamBatchReceived',
+      batch: {
+        pullId: committed.pull.pullId,
+        batchId: 2,
+        events: [],
+        pageInfo: SyncBackend.pageInfoNoMore,
+      },
+    })
+    expect(terminal.commands.map((command) => command._tag)).toEqual(['CompletePullBatch', 'PlanLocal'])
+  })
+
   it('correlates backend reset completion and rejects late identities', () => {
     const started = transition(Machine.initial(config(), emptySyncState), { _tag: 'Start' }).state
     expectRunning(started)
@@ -139,6 +204,14 @@ describe('LeaderSyncMachine', () => {
     const quiescing = transition(withProviderPush, { _tag: 'PushFailed', operationId: 42, error: mismatch })
     expect(quiescing.state._tag).toBe('quiescing')
     expect(quiescing.commands.some((command) => command._tag === 'ResetDatabases')).toBe(false)
+
+    const failedCommit = transition(quiescing.state, {
+      _tag: 'LocalCommitDefected',
+      operationId: committing.work.operationId,
+      cause: new Error('commit rolled back'),
+    })
+    expect(failedCommit.state._tag).toBe('resetting')
+    expect(failedCommit.commands.map((command) => command._tag)).toEqual(['ResetDatabases'])
 
     const completed = transition(quiescing.state, {
       _tag: 'LocalCommitSucceeded',
