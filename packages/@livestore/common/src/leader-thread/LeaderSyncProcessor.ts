@@ -4,6 +4,7 @@ import {
   type Latch,
   type Scope,
   type Tracer,
+  Cause,
   Context,
   Deferred,
   Duration,
@@ -587,14 +588,16 @@ const runProviderPull = ({
       onSuccess: () => Effect.void,
     }),
     Effect.catchCause((cause) =>
-      send({
-        _tag: 'PullFailed',
-        pullId: command.pullId,
-        error: UnknownError.make({ cause, note: 'Sync backend pull defected' }),
-      }),
+      Cause.hasInterruptsOnly(cause) === true
+        ? Effect.failCause(cause)
+        : send({
+            _tag: 'PullFailed',
+            pullId: command.pullId,
+            error: UnknownError.make({ cause, note: 'Sync backend pull defected' }),
+          }),
     ),
-    // Stream interruption is not a typed provider failure. Completion still releases pagination priority; a typed
-    // failure event, when present, is processed first and can replace this with retry or terminal handling.
+    // Interruption is completion, not a provider failure. It still releases pagination priority when this pull remains
+    // current; machine-initiated interruption is stale by correlation after the state has already moved on.
     Effect.ensuring(send({ _tag: 'PullCompleted', pullId: command.pullId })),
     Effect.interruptible,
   )

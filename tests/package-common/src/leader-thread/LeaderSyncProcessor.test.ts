@@ -368,9 +368,11 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       const rows = (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query)
       expect(rows.map((row) => row.id).toSorted()).toEqual(['backend-1', 'local-after-pull-interrupt'])
+      expect(yield* Deferred.isDone(testContext.shutdownDeferred)).toBe(false)
     }).pipe(
       withTestCtx({
-        syncOptions: { livePull: false, onSyncError: 'ignore' },
+        syncOptions: { livePull: false, onSyncError: 'shutdown' },
+        captureShutdown: true,
         mockBackendOptions: { nonLiveChunkSize: 1 },
         seedMockBackend: seedPaginatedBackendTodos,
         mockBackendOverride: (mockBackend) => () =>
