@@ -9,6 +9,7 @@ import {
   Duration,
   Effect,
   FiberHandle,
+  FiberSet,
   Layer,
   Option,
   Queue,
@@ -122,6 +123,7 @@ export const make = Effect.fnUntraced(function* ({
   const nextPullBatchId = yield* Ref.make(1)
   const localRequests = yield* Ref.make(new Map<Machine.LocalRequestId, LocalRequest>())
   const pullBatches = yield* Ref.make(new Map<Machine.PullBatchId, Deferred.Deferred<void>>())
+  const bootStarted = yield* Ref.make(false)
 
   const isClientOnlyEvent = (event: LiveStoreEvent.Client.EncodedWithMeta) =>
     schema.eventsDefsMap.get(event.name)?.options.clientOnly ?? false
@@ -145,8 +147,11 @@ export const make = Effect.fnUntraced(function* ({
     )
 
   const boot: Service['boot'] = Effect.gen(function* () {
+    const shouldStart = yield* Ref.modify(bootStarted, (started) => [started === false, true])
+    if (shouldStart === false) return { initialLeaderHead: yield* Deferred.await(bootDeferred) }
     const pushHandle = yield* FiberHandle.make<void, never>()
     const pullHandle = yield* FiberHandle.make<void, never>()
+    const commandFibers = yield* FiberSet.make<void, never>()
     const machine = yield* MachineRuntime.make({
       initialState: Machine.initial(
         {
@@ -177,6 +182,7 @@ export const make = Effect.fnUntraced(function* ({
         stoppedDeferred,
         pushHandle,
         pullHandle,
+        commandFibers,
         shutdownChannel,
         initialBlockingSyncContext,
         testing,
@@ -187,7 +193,9 @@ export const make = Effect.fnUntraced(function* ({
     yield* machine.run.pipe(Effect.forkScoped)
     yield* machine.send({ _tag: 'Start' })
     yield* Effect.addFinalizer(() =>
-      machine.send({ _tag: 'ShutdownRequested', reason: 'scope-closed' }).pipe(Effect.ignore),
+      machine
+        .send({ _tag: 'ShutdownRequested', reason: 'scope-closed' })
+        .pipe(Effect.ignore, Effect.andThen(Deferred.await(stoppedDeferred))),
     )
     return { initialLeaderHead: yield* Deferred.await(bootDeferred) }
   }).pipe(Effect.withSpanScoped('@livestore/common:LeaderSyncProcessor:boot'))
@@ -247,6 +255,7 @@ const makeCommandExecutor = ({
   stoppedDeferred,
   pushHandle,
   pullHandle,
+  commandFibers,
   shutdownChannel,
   initialBlockingSyncContext,
   testing,
@@ -267,12 +276,13 @@ const makeCommandExecutor = ({
   stoppedDeferred: Deferred.Deferred<void>
   pushHandle: FiberHandle.FiberHandle<void, never>
   pullHandle: FiberHandle.FiberHandle<void, never>
+  commandFibers: FiberSet.FiberSet<void, never>
   shutdownChannel: Shutdown.ShutdownChannel
   initialBlockingSyncContext: InitialBlockingSyncContext
   testing: Options['testing']
   isClientOnlyEvent: (event: LiveStoreEvent.Client.EncodedWithMeta) => boolean
 }) => {
-  const fork = (effect: Effect.Effect<void>) => effect.pipe(Effect.forkScoped, Effect.asVoid)
+  const fork = (effect: Effect.Effect<void>) => FiberSet.run(commandFibers, effect).pipe(Effect.asVoid)
 
   const execute = (
     command: Machine.Command,
@@ -298,6 +308,9 @@ const makeCommandExecutor = ({
               onFailure: (error) => send({ _tag: 'LocalCommitFailed', operationId: command.operationId, error }),
               onSuccess: (receipt) => send({ _tag: 'LocalCommitSucceeded', operationId: command.operationId, receipt }),
             }),
+            Effect.catchCause((cause) =>
+              send({ _tag: 'LocalCommitDefected', operationId: command.operationId, cause }),
+            ),
           ),
         )
       case 'PlanUpstream':
@@ -318,6 +331,9 @@ const makeCommandExecutor = ({
                 onSuccess: (receipt) =>
                   send({ _tag: 'UpstreamCommitSucceeded', operationId: command.operationId, receipt }),
               }),
+              Effect.catchCause((cause) =>
+                send({ _tag: 'UpstreamCommitDefected', operationId: command.operationId, cause }),
+              ),
             ),
         )
       case 'PublishSessions':
@@ -385,10 +401,15 @@ const makeCommandExecutor = ({
               : UnknownError.make({ cause: command.error, note: 'Leader sync machine failed' }),
           )
           .pipe(Effect.orDie)
+      case 'CancelProviderOperations':
+        return Effect.all([FiberHandle.clear(pushHandle), FiberHandle.clear(pullHandle)]).pipe(Effect.asVoid)
       case 'StopRuntime':
         return Effect.all([
           FiberHandle.clear(pushHandle),
           FiberHandle.clear(pullHandle),
+          FiberSet.clear(commandFibers),
+          interruptAllLocalRequests(localRequests),
+          interruptAllPullBatches(pullBatches),
           Deferred.succeed(stoppedDeferred, void 0),
         ]).pipe(Effect.asVoid)
       default:
@@ -611,6 +632,18 @@ const interruptLocalRequests = (
       return next
     })
     yield* Effect.forEach(deferreds, Deferred.interrupt, { discard: true })
+  })
+
+const interruptAllLocalRequests = (requestsRef: Ref.Ref<Map<Machine.LocalRequestId, LocalRequest>>) =>
+  Effect.gen(function* () {
+    const requests = yield* Ref.getAndSet(requestsRef, new Map())
+    yield* Effect.forEach(requests.values(), ({ deferred }) => Deferred.interrupt(deferred), { discard: true })
+  })
+
+const interruptAllPullBatches = (batchesRef: Ref.Ref<Map<Machine.PullBatchId, Deferred.Deferred<void>>>) =>
+  Effect.gen(function* () {
+    const batches = yield* Ref.getAndSet(batchesRef, new Map())
+    yield* Effect.forEach(batches.values(), Deferred.interrupt, { discard: true })
   })
 
 const completePullBatch = (

@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from '@livestore/utils/effect'
+import { Context, Effect, Layer, Option } from '@livestore/utils/effect'
 
 import { MaterializeError, SqliteError, type SqliteDb } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
@@ -214,13 +214,18 @@ const cloneEvent = (
 ) =>
   new LiveStoreEvent.Client.EncodedWithMeta({
     ...event,
-    meta: { ...event.meta, ...metaPatch },
+    args: structuredClone(event.args),
+    seqNum: EventSequenceNumber.Client.Composite.make({ ...event.seqNum }),
+    parentSeqNum: EventSequenceNumber.Client.Composite.make({ ...event.parentSeqNum }),
+    meta: {
+      syncMetadata: Option.map(event.meta.syncMetadata, structuredClone),
+      materializerHashLeader: Option.map(event.meta.materializerHashLeader, (hash) => hash),
+      materializerHashSession: Option.map(event.meta.materializerHashSession, (hash) => hash),
+      ...metaPatch,
+    },
   })
 
-const freezeEvent = (event: LiveStoreEvent.Client.EncodedWithMeta) => {
-  Object.freeze(event.meta)
-  return Object.freeze(event)
-}
+const freezeEvent = (event: LiveStoreEvent.Client.EncodedWithMeta) => deepFreeze(event)
 
 const freezeSeqNum = (seqNum: EventSequenceNumber.Client.Composite) =>
   Object.freeze(EventSequenceNumber.Client.Composite.make({ ...seqNum }))
@@ -228,3 +233,9 @@ const freezeSeqNum = (seqNum: EventSequenceNumber.Client.Composite) =>
 const freezeArray = <A>(items: ReadonlyArray<A>): ReadonlyArray<A> => Object.freeze([...items])
 
 const freezeReceipt = <A extends object>(receipt: A): Readonly<A> => Object.freeze(receipt)
+
+const deepFreeze = <A>(value: A): A => {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value) === true) return value
+  for (const nested of Object.values(value)) deepFreeze(nested)
+  return Object.freeze(value)
+}

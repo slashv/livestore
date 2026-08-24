@@ -135,6 +135,11 @@ export type State =
     }
   | RunningState
   | {
+      readonly _tag: 'quiescing'
+      readonly running: RunningState
+      readonly intent: TerminalIntent
+    }
+  | {
       readonly _tag: 'resetting'
       readonly syncState: SyncState.SyncState
       readonly operationId: OperationId
@@ -153,9 +158,24 @@ export type State =
     }
 
 export interface Failure {
-  readonly _tag: string
+  readonly _tag:
+    | 'LocalPlanningFailed'
+    | 'UpstreamPlanningFailed'
+    | 'LocalCommitFailed'
+    | 'UpstreamCommitFailed'
+    | 'CommitReceiptMismatch'
+    | 'ProviderPullFailed'
+    | 'ProviderPushFailed'
+    | 'BackendResetFailed'
+    | 'CommandDefected'
+    | 'IntentionalShutdownCause'
   readonly cause: unknown
 }
+
+export type TerminalIntent =
+  | { readonly _tag: 'shutdown'; readonly reason: string }
+  | { readonly _tag: 'reset'; readonly error: BackendIdMismatchError }
+  | { readonly _tag: 'fail'; readonly failure: Failure; readonly sendShutdown: boolean }
 
 export type ProviderPushError = IsOfflineError | BackendIdMismatchError | UnknownError | ServerAheadError
 export type ProviderPullError = IsOfflineError | BackendIdMismatchError | UnknownError
@@ -182,6 +202,7 @@ export type Event =
       readonly receipt: LeaderSyncCommitter.LocalCommitReceipt
     }
   | { readonly _tag: 'LocalCommitFailed'; readonly operationId: OperationId; readonly error: CommitError }
+  | { readonly _tag: 'LocalCommitDefected'; readonly operationId: OperationId; readonly cause: unknown }
   | { readonly _tag: 'UpstreamBatchReceived'; readonly batch: UpstreamBatch }
   | { readonly _tag: 'UpstreamPlanned'; readonly operationId: OperationId; readonly plan: UpstreamCommitPlan }
   | { readonly _tag: 'UpstreamPlanningFailed'; readonly operationId: OperationId; readonly cause: unknown }
@@ -191,6 +212,7 @@ export type Event =
       readonly receipt: LeaderSyncCommitter.UpstreamCommitReceipt
     }
   | { readonly _tag: 'UpstreamCommitFailed'; readonly operationId: OperationId; readonly error: CommitError }
+  | { readonly _tag: 'UpstreamCommitDefected'; readonly operationId: OperationId; readonly cause: unknown }
   | { readonly _tag: 'PullCompleted'; readonly pullId: OperationId }
   | { readonly _tag: 'PullFailed'; readonly pullId: OperationId; readonly error: ProviderPullError }
   | { readonly _tag: 'PullRetryElapsed'; readonly retryId: OperationId }
@@ -201,6 +223,7 @@ export type Event =
   | { readonly _tag: 'BackendResetSucceeded'; readonly operationId: OperationId }
   | { readonly _tag: 'BackendResetFailed'; readonly operationId: OperationId; readonly cause: unknown }
   | { readonly _tag: 'ShutdownRequested'; readonly reason: string }
+  | { readonly _tag: 'CommandDefected'; readonly commandTag: Command['_tag']; readonly cause: unknown }
 
 export type Command =
   | { readonly _tag: 'CompleteBoot'; readonly initialLeaderHead: EventSequenceNumber.Client.Composite }
@@ -250,6 +273,7 @@ export type Command =
   | { readonly _tag: 'SchedulePushRetry'; readonly retryId: OperationId; readonly delayMs: number }
   | { readonly _tag: 'ResetDatabases'; readonly operationId: OperationId; readonly error: BackendIdMismatchError }
   | { readonly _tag: 'SendShutdown'; readonly error: unknown }
+  | { readonly _tag: 'CancelProviderOperations' }
   | { readonly _tag: 'StopRuntime'; readonly reason: string }
 
 export interface TransitionResult {
@@ -275,6 +299,8 @@ export const makeTransition = ({
         return transitionStarting(state, event, isClientOnlyEvent)
       case 'running':
         return transitionRunning(state, event, isClientOnlyEvent)
+      case 'quiescing':
+        return transitionQuiescing(state, event, isClientOnlyEvent)
       case 'resetting':
         return transitionResetting(state, event)
       case 'stopping':
@@ -348,14 +374,7 @@ const transitionRunning = (
   isClientOnlyEvent: (event: LiveStoreEvent.Client.EncodedWithMeta) => boolean,
 ): TransitionResult => {
   if (event._tag === 'ShutdownRequested') {
-    const requestIds = [...new Set(state.reservations.map((item) => item.requestId))]
-    return {
-      state: { _tag: 'stopping', syncState: state.syncState, reason: event.reason },
-      commands: [
-        { _tag: 'InterruptLocalRequests', requestIds },
-        { _tag: 'StopRuntime', reason: event.reason },
-      ],
-    }
+    return beginTerminalIntent(state, { _tag: 'shutdown', reason: event.reason })
   }
 
   switch (event._tag) {
@@ -372,7 +391,9 @@ const transitionRunning = (
     case 'LocalCommitSucceeded':
       return onLocalCommitSucceeded(state, event, isClientOnlyEvent)
     case 'LocalCommitFailed':
-      return failOperation(state, event.operationId, { _tag: event.error._tag, cause: event.error })
+      return failOperation(state, event.operationId, { _tag: 'LocalCommitFailed', cause: event.error })
+    case 'LocalCommitDefected':
+      return failOperation(state, event.operationId, { _tag: 'LocalCommitFailed', cause: event.cause })
     case 'UpstreamBatchReceived':
       return onUpstreamBatchReceived(state, event)
     case 'UpstreamPlanned':
@@ -382,7 +403,9 @@ const transitionRunning = (
     case 'UpstreamCommitSucceeded':
       return onUpstreamCommitSucceeded(state, event, isClientOnlyEvent)
     case 'UpstreamCommitFailed':
-      return failOperation(state, event.operationId, { _tag: event.error._tag, cause: event.error })
+      return failOperation(state, event.operationId, { _tag: 'UpstreamCommitFailed', cause: event.error })
+    case 'UpstreamCommitDefected':
+      return failOperation(state, event.operationId, { _tag: 'UpstreamCommitFailed', cause: event.cause })
     case 'PullCompleted':
       return onPullCompleted(state, event)
     case 'PullFailed':
@@ -400,6 +423,12 @@ const transitionRunning = (
     case 'BackendResetSucceeded':
     case 'BackendResetFailed':
       return { state, commands: [] }
+    case 'CommandDefected':
+      return beginTerminalIntent(state, {
+        _tag: 'fail',
+        failure: { _tag: 'CommandDefected', cause: { commandTag: event.commandTag, cause: event.cause } },
+        sendShutdown: true,
+      })
     case 'Start':
       return { state, commands: [] }
     default:
@@ -476,6 +505,14 @@ const onLocalCommitSucceeded = (
 ): TransitionResult => {
   if (state.work._tag !== 'committing-local' || state.work.operationId !== event.operationId)
     return { state, commands: [] }
+  if (
+    EventSequenceNumber.Client.isEqual(event.receipt.stateHead, state.work.plan.proposedSyncState.localHead) === false
+  ) {
+    return finishFailedOperation(state, {
+      _tag: 'CommitReceiptMismatch',
+      cause: { expectedStateHead: state.work.plan.proposedSyncState.localHead, receipt: event.receipt },
+    })
+  }
   const committedSyncState = replacePendingEvents(state.work.plan.proposedSyncState, event.receipt.committedEvents)
   const completedKeys = new Set(state.work.plan.items.map(localItemKey))
   let next: RunningState = {
@@ -511,12 +548,12 @@ const onUpstreamBatchReceived = (
   if (state.pull._tag !== 'streaming' || state.pull.pullId !== event.batch.pullId) {
     return { state, commands: [{ _tag: 'CompletePullBatch', batch: event.batch }] }
   }
+  if (event.batch.events.length === 0) {
+    return scheduleNextWork(state, [{ _tag: 'CompletePullBatch', batch: event.batch }])
+  }
   const pull: PullState = {
     ...state.pull,
     pagination: event.batch.pageInfo._tag === 'NoMore' ? 'between-pages' : 'more-expected',
-  }
-  if (event.batch.events.length === 0) {
-    return scheduleNextWork({ ...state, pull }, [{ _tag: 'CompletePullBatch', batch: event.batch }])
   }
   return scheduleNextWork({ ...state, pull, upstreamQueue: [...state.upstreamQueue, event.batch] })
 }
@@ -541,6 +578,21 @@ const onUpstreamCommitSucceeded = (
   if (state.work._tag !== 'committing-upstream' || state.work.operationId !== event.operationId)
     return { state, commands: [] }
   const plan = state.work.plan
+  const expectedBackendHead = plan.batch.events.at(-1)?.seqNum
+  if (
+    EventSequenceNumber.Client.isEqual(event.receipt.stateHead, plan.proposedSyncState.localHead) === false ||
+    expectedBackendHead === undefined ||
+    EventSequenceNumber.Client.isEqual(event.receipt.backendHead, expectedBackendHead) === false
+  ) {
+    return finishFailedOperation(state, {
+      _tag: 'CommitReceiptMismatch',
+      cause: {
+        expectedStateHead: plan.proposedSyncState.localHead,
+        expectedBackendHead,
+        receipt: event.receipt,
+      },
+    })
+  }
   const committedSyncState = replacePendingEvents(plan.proposedSyncState, event.receipt.committedEvents)
   const payload =
     plan.mergeTag === 'rebase'
@@ -585,12 +637,16 @@ const onPullFailed = (state: RunningState, event: Extract<Event, { _tag: 'PullFa
         pull: { _tag: 'retry-wait', retryId, attempt: state.pull.attempt + 1 },
         nextOperationId: retryId + 1,
       },
-      [{ _tag: 'SchedulePullRetry', retryId, delayMs: 0 }],
+      [{ _tag: 'SchedulePullRetry', retryId, delayMs: pushRetryDelay(state.pull.attempt + 1) }],
     )
   }
-  if (event.error._tag === 'BackendIdMismatchError') return handleBackendIdMismatch(state, event.error)
+  if (event.error._tag === 'BackendIdMismatchError') return handleBackendIdMismatch(state, event.error, 'pull')
   return state.config.onError === 'shutdown'
-    ? failMachine(state, { _tag: event.error._tag, cause: event.error }, true)
+    ? beginTerminalIntent(state, {
+        _tag: 'fail',
+        failure: { _tag: 'ProviderPullFailed', cause: event.error },
+        sendShutdown: true,
+      })
     : scheduleNextWork({ ...state, pull: { _tag: 'completed' } })
 }
 
@@ -635,7 +691,7 @@ const onPushFailed = (state: RunningState, event: Extract<Event, { _tag: 'PushFa
       commands: [],
     }
   }
-  if (event.error._tag === 'BackendIdMismatchError') return handleBackendIdMismatch(state, event.error)
+  if (event.error._tag === 'BackendIdMismatchError') return handleBackendIdMismatch(state, event.error, 'push')
   const retryId = state.nextOperationId
   const attempt = state.push.attempt + 1
   return {
@@ -686,19 +742,24 @@ const onPushCancelled = (state: RunningState, event: Extract<Event, { _tag: 'Pus
   })
 }
 
-const handleBackendIdMismatch = (state: RunningState, error: BackendIdMismatchError): TransitionResult => {
+const handleBackendIdMismatch = (
+  state: RunningState,
+  error: BackendIdMismatchError,
+  direction: 'pull' | 'push',
+): TransitionResult => {
   switch (state.config.onBackendIdMismatch) {
     case 'ignore':
-      return { state: { ...state, pull: { _tag: 'completed' }, push: { _tag: 'disabled' } }, commands: [] }
+      return direction === 'pull'
+        ? { state: { ...state, pull: { _tag: 'completed' } }, commands: [] }
+        : { state: { ...state, push: { _tag: 'disabled' } }, commands: [] }
     case 'shutdown':
-      return failMachine(state, { _tag: error._tag, cause: error }, true)
-    case 'reset': {
-      const operationId = state.nextOperationId
-      return {
-        state: { _tag: 'resetting', syncState: state.syncState, operationId, backendMismatch: error },
-        commands: [{ _tag: 'ResetDatabases', operationId, error }],
-      }
-    }
+      return beginTerminalIntent(state, {
+        _tag: 'fail',
+        failure: { _tag: direction === 'pull' ? 'ProviderPullFailed' : 'ProviderPushFailed', cause: error },
+        sendShutdown: true,
+      })
+    case 'reset':
+      return beginTerminalIntent(state, { _tag: 'reset', error })
     default:
       return casesHandled(state.config.onBackendIdMismatch)
   }
@@ -743,19 +804,92 @@ const transitionResetting = (state: Extract<State, { _tag: 'resetting' }>, event
 
 const failOperation = (state: RunningState, operationId: OperationId, failure: Failure): TransitionResult => {
   if (isActiveWorkOperation(state.work, operationId) === false) return { state, commands: [] }
-  return failMachine(state, failure, state.config.onError === 'shutdown')
+  return finishFailedOperation(state, failure)
 }
 
-const failMachine = (state: RunningState, failure: Failure, sendShutdown: boolean): TransitionResult => {
+const finishFailedOperation = (state: RunningState, failure: Failure): TransitionResult => {
   const requestIds = [...new Set(state.reservations.map((item) => item.requestId))]
+  return completeTerminalIntent(
+    state,
+    {
+      _tag: 'fail',
+      failure,
+      sendShutdown: state.config.onError === 'shutdown',
+    },
+    [{ _tag: 'CancelProviderOperations' }, { _tag: 'InterruptLocalRequests', requestIds }],
+  )
+}
+
+const beginTerminalIntent = (state: RunningState, intent: TerminalIntent): TransitionResult => {
+  const requestIds = [...new Set(state.reservations.map((item) => item.requestId))]
+  const commands: Command[] = [{ _tag: 'CancelProviderOperations' }, { _tag: 'InterruptLocalRequests', requestIds }]
+  if (state.work._tag === 'committing-local' || state.work._tag === 'committing-upstream') {
+    return { state: { _tag: 'quiescing', running: state, intent }, commands }
+  }
+  return completeTerminalIntent(state, intent, commands)
+}
+
+const completeTerminalIntent = (
+  state: RunningState,
+  intent: TerminalIntent,
+  commands: ReadonlyArray<Command>,
+): TransitionResult => {
+  if (intent._tag === 'shutdown') {
+    return {
+      state: { _tag: 'stopping', syncState: state.syncState, reason: intent.reason },
+      commands: [...commands, { _tag: 'StopRuntime', reason: intent.reason }],
+    }
+  }
+  if (intent._tag === 'reset') {
+    const operationId = state.nextOperationId
+    return {
+      state: { _tag: 'resetting', syncState: state.syncState, operationId, backendMismatch: intent.error },
+      commands: [...commands, { _tag: 'ResetDatabases', operationId, error: intent.error }],
+    }
+  }
   return {
-    state: { _tag: 'failed', syncState: state.syncState, failure, shutdownSent: sendShutdown },
+    state: {
+      _tag: 'failed',
+      syncState: state.syncState,
+      failure: intent.failure,
+      shutdownSent: intent.sendShutdown,
+    },
     commands: [
-      { _tag: 'InterruptLocalRequests', requestIds },
-      ...(sendShutdown === true ? [{ _tag: 'SendShutdown', error: failure.cause } as const] : []),
-      { _tag: 'StopRuntime', reason: failure._tag },
+      ...commands,
+      ...(intent.sendShutdown === true ? [{ _tag: 'SendShutdown', error: intent.failure.cause } as const] : []),
+      { _tag: 'StopRuntime', reason: intent.failure._tag },
     ],
   }
+}
+
+const transitionQuiescing = (
+  state: Extract<State, { _tag: 'quiescing' }>,
+  event: Event,
+  isClientOnlyEvent: (event: LiveStoreEvent.Client.EncodedWithMeta) => boolean,
+): TransitionResult => {
+  if (event._tag === 'LocalPushRequested') {
+    return { state, commands: [{ _tag: 'InterruptLocalRequests', requestIds: [event.requestId] }] }
+  }
+  const running = {
+    ...state.running,
+    localQueue: [],
+    upstreamQueue: [],
+    localWorkEnabled: false,
+    pull: { _tag: 'disabled' } as const,
+    push: { _tag: 'disabled' } as const,
+  }
+  const result =
+    event._tag === 'LocalCommitSucceeded' ||
+    event._tag === 'LocalCommitFailed' ||
+    event._tag === 'LocalCommitDefected' ||
+    event._tag === 'UpstreamCommitSucceeded' ||
+    event._tag === 'UpstreamCommitFailed' ||
+    event._tag === 'UpstreamCommitDefected'
+      ? transitionRunning(running, event, isClientOnlyEvent)
+      : undefined
+  if (result === undefined) return { state, commands: [] }
+  if (result.state._tag !== 'running') return result
+  return completeTerminalIntent(result.state, state.intent, result.commands)
 }
 
 const transitionTerminal = (state: Extract<State, { _tag: 'stopping' | 'failed' }>, event: Event): TransitionResult =>

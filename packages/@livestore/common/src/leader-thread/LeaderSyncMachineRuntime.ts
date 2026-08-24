@@ -4,7 +4,7 @@ import type * as Machine from './LeaderSyncMachine.ts'
 
 export interface Runtime {
   readonly send: (event: Machine.Event) => Effect.Effect<void>
-  readonly run: Effect.Effect<never, never, Scope.Scope>
+  readonly run: Effect.Effect<void, never, Scope.Scope>
   readonly state: Subscribable.Subscribable<Machine.State>
 }
 
@@ -26,17 +26,25 @@ export const make = ({
     const stateRef = yield* SubscriptionRef.make(initialState)
     const send: Runtime['send'] = (event) => Queue.offer(mailbox, event)
 
-    const run: Runtime['run'] = Effect.forever(
-      Effect.gen(function* () {
+    const run: Runtime['run'] = Effect.gen(function* () {
+      let running = true
+      while (running === true) {
         const event = yield* Queue.take(mailbox)
         const current = yield* SubscriptionRef.get(stateRef)
         const result = transition(current, event)
         yield* SubscriptionRef.set(stateRef, result.state)
         for (const command of result.commands) {
-          yield* execute(command, send)
+          yield* execute(command, send).pipe(
+            Effect.catchCause((cause) => send({ _tag: 'CommandDefected', commandTag: command._tag, cause })),
+          )
+          if (command._tag === 'StopRuntime') {
+            running = false
+            break
+          }
         }
-      }),
-    )
+      }
+      yield* Queue.shutdown(mailbox)
+    })
 
     return {
       send,

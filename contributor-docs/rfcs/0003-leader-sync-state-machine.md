@@ -43,7 +43,10 @@ but no single model described which operation owned synchronization state or how
 8. Provider retries and cancellations are explicit machine states rather than hidden recursive effects.
 9. `LeaderSyncCommitter` is the only normal-path owner of state/eventlog transitions.
 10. State and eventlog databases use independent SQLite connections. The machine does not claim crash-atomic commits
-    across both databases.
+    across both databases. A crash or eventlog `COMMIT` failure after the state commit may leave state ahead of
+    eventlog truth and requires external recovery.
+11. Reset and shutdown enter a quiescing phase when durable work is active. The matching commit outcome is published
+    or failed before database reset or runtime termination begins.
 
 ## Proposed Solution
 
@@ -53,7 +56,11 @@ The implementation uses a small hierarchy:
 stateDiagram-v2
   [*] --> Starting
   Starting --> Running: Start
-  Running --> Stopping: ShutdownRequested
+  Running --> Quiescing: stop/reset while committing
+  Quiescing --> Stopping: commit drained + stop
+  Quiescing --> Resetting: commit drained + reset
+  Resetting --> Failed: reset complete + intentional shutdown
+  Running --> Stopping: stop while idle
   Running --> Failed: terminal failure
   Stopping --> [*]: cancellation complete
 
@@ -61,13 +68,15 @@ stateDiagram-v2
     [*] --> WorkIdle
     WorkIdle --> PlanningLocal: admitted local work
     PlanningLocal --> CommittingLocal: plan accepted
-    CommittingLocal --> WorkIdle: durable success/failure
+    CommittingLocal --> WorkIdle: durable success
+    CommittingLocal --> Failed: durable failure
     WorkIdle --> PlanningUpstream: upstream page
     PlanningUpstream --> CommittingUpstream: merge planned
-    CommittingUpstream --> WorkIdle: durable success/failure
+    CommittingUpstream --> WorkIdle: durable success
+    CommittingUpstream --> Failed: durable failure
 
     state "Pull relationship" as Pull {
-      PullStarting --> PullStreaming
+      [*] --> PullStreaming
       PullStreaming --> PullRetryWaiting: offline
       PullRetryWaiting --> PullStreaming: retry elapsed
     }
@@ -85,7 +94,8 @@ stateDiagram-v2
 
 The transition kernel is pure: `(state, event) -> { state, commands }`. Effects run behind command executors and return
 their outcomes to the same mailbox with correlation identities. Immediate planning, publication, and acknowledgement
-commands run serially. Provider calls, durable commits, retry timers, and test-only work gates run as scoped fibers.
+commands run serially. Provider calls, durable commits, retry timers, and test-only work gates run in supervised fibers.
+The mailbox converts command defects into machine events and terminates after the explicit `StopRuntime` command.
 
 ```mermaid
 flowchart LR

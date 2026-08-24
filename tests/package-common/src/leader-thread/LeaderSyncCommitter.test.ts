@@ -37,6 +37,9 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
       expect(Object.isFrozen(receipt)).toBe(true)
       expect(Object.isFrozen(receipt.committedEvents)).toBe(true)
       expect(Object.isFrozen(receipt.committedEvents[0])).toBe(true)
+      expect(receipt.committedEvents[0]!.args).not.toBe(event.args)
+      expect(Object.isFrozen(receipt.committedEvents[0]!.args)).toBe(true)
+      expect(Object.isFrozen(receipt.committedEvents[0]!.seqNum)).toBe(true)
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test)),
   )
 
