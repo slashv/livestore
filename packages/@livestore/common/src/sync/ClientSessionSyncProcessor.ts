@@ -59,7 +59,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   schema: LiveStoreSchema
   clientSession: ClientSession
   materializeEvent: (
-    eventEncoded: LiveStoreEvent.Client.EncodedWithMeta,
+    eventEncoded: LiveStoreEvent.Client.Encoded,
     options: { materializerHashLeader: Option.Option<number> },
   ) => Effect.Effect<
     {
@@ -105,11 +105,11 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
 
   /** Only used for debugging / observability / testing, it's not relied upon for correctness of the sync processor. */
   const syncStateUpdateQueue = yield* Queue.unbounded<SyncState.SyncState>()
-  const isClientOnlyEvent = (eventEncoded: LiveStoreEvent.Client.EncodedWithMeta) =>
+  const isClientOnlyEvent = (eventEncoded: LiveStoreEvent.Client.Encoded) =>
     schema.eventsDefsMap.get(eventEncoded.name)?.options.clientOnly ?? false
 
   /** We're queuing push requests to reduce the number of messages sent to the leader by batching them */
-  const leaderPushQueue = yield* TxQueue.unbounded<LiveStoreEvent.Client.EncodedWithMeta, Cause.Done>()
+  const leaderPushQueue = yield* TxQueue.unbounded<LiveStoreEvent.Client.Encoded, Cause.Done>()
   /**
    * Prevents pull reconciliation, push-rejection handling, and shutdown from running concurrently.
    * These transitions inspect or update the pending events, leader push queue, and rejection state,
@@ -127,7 +127,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   let unresolvedRejection:
     | {
         readonly error: Error
-        readonly events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+        readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
       }
     | undefined
   let leaderPushingFiberHandle: FiberHandle.FiberHandle<void, never> | undefined
@@ -231,7 +231,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       Stream.tap(() =>
         clientSession.devtools.enabled === true ? clientSession.devtools.pullLatch.await : Effect.void,
       ),
-      Stream.tap(({ payload, globalHead }) =>
+      Stream.tap(({ payload, globalHead, materializerHashes }) =>
         Effect.gen(function* () {
           // yield* Effect.logDebug('ClientSessionSyncProcessor:pull', payload)
 
@@ -275,7 +275,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
               yield* Effect.logDebug(
                 'merge:pull:rebase: rollback',
                 mergeResult.rollbackEvents.length,
-                ...mergeResult.rollbackEvents.slice(0, 10).map((_) => _.toJSON()),
+                ...mergeResult.rollbackEvents.slice(0, 10).map(LiveStoreEvent.Client.toJSON),
               )
             }
 
@@ -341,13 +341,14 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
           if (mergeResult.newEvents.length > 0) {
             const writeTables = new Set<string>()
             for (const event of mergeResult.newEvents) {
-              const { writeTables: newWriteTables, materializerHash } = yield* materializeEvent(event, {
-                materializerHashLeader: event.meta.materializerHashLeader,
+              const { writeTables: newWriteTables } = yield* materializeEvent(event, {
+                materializerHashLeader:
+                  materializerHashes.find(({ eventNum }) => EventSequenceNumber.Client.isEqual(eventNum, event.seqNum))
+                    ?.hash ?? Option.none(),
               })
               for (const table of newWriteTables) {
                 writeTables.add(table)
               }
-              event.meta.materializerHashSession = materializerHash
             }
 
             refreshTables(writeTables)
@@ -438,7 +439,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
           clientId: clientSession.clientId,
           sessionId: clientSession.sessionId,
         }).pipe(Effect.orDie)
-        return new LiveStoreEvent.Client.EncodedWithMeta(encoded)
+        return LiveStoreEvent.Client.Encoded.make(encoded)
       }),
     )
   })
@@ -448,13 +449,12 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   )(function* (events) {
     const writeTables = new Set<string>()
     for (const event of events) {
-      const { writeTables: newWriteTables, materializerHash } = yield* materializeEvent(event, {
+      const { writeTables: newWriteTables } = yield* materializeEvent(event, {
         materializerHashLeader: Option.none(),
       })
       for (const table of newWriteTables) {
         writeTables.add(table)
       }
-      event.meta.materializerHashSession = materializerHash
     }
     return { writeTables }
   })
@@ -522,10 +522,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
           console.log('syncState', syncStateRef.current)
           const pushQueueItems = yield* snapshotTxQueue(leaderPushQueue)
           console.log('pushQueueSize', pushQueueItems.length)
-          console.log(
-            'pushQueueItems',
-            pushQueueItems.map((_) => _.toJSON()),
-          )
+          console.log('pushQueueItems', pushQueueItems.map(LiveStoreEvent.Client.toJSON))
         }).pipe(Effect.runSync),
       debugInfo: () => debugInfo,
     },
@@ -544,8 +541,8 @@ const snapshotTxQueue = <A, E>(queue: TxQueue.TxQueue<A, E>): Effect.Effect<Read
   )
 
 const isRejectedBatchRecovered = (
-  rejectedEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>,
-  pendingEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>,
+  rejectedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
+  pendingEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
 ): boolean =>
   rejectedEvents.every(
     (rejectedEvent) =>
@@ -557,10 +554,10 @@ export interface ClientSessionSyncProcessor {
   shutdown: (exit: Exit.Exit<unknown, unknown>) => Effect.Effect<void>
   encodeEvents: (
     events: ReadonlyArray<LiveStoreEvent.Input.Decoded>,
-  ) => Effect.Effect<ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>>
-  push: (events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void>
+  ) => Effect.Effect<ReadonlyArray<LiveStoreEvent.Client.Encoded>>
+  push: (events: ReadonlyArray<LiveStoreEvent.Client.Encoded>) => Effect.Effect<void>
   materializeEvents: (
-    events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>,
+    events: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
   ) => Effect.Effect<
     { writeTables: Set<string> },
     MaterializeError | MaterializationJournal.MaterializationJournalError

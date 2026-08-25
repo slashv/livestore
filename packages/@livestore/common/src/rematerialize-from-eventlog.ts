@@ -35,7 +35,7 @@ export const rematerializeFromEventlog = Effect.fn('@livestore/common:rematerial
     row: SystemTables.EventlogMetaRow,
   ) {
     const args = jsonParse(row.argsJson)
-    const eventEncoded = LiveStoreEvent.Client.EncodedWithMeta.make({
+    const eventEncoded = LiveStoreEvent.Client.Encoded.make({
       name: row.name,
       args,
       seqNum: {

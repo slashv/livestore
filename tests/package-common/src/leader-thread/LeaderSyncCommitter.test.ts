@@ -33,9 +33,11 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
       expect(yield* stateHead.get).toEqual(event.seqNum)
 
       expect(receipt.committedEvents[0]).not.toBe(event)
-      expect(event.meta.materializerHashLeader).toEqual(Option.none())
+      expect(event).not.toHaveProperty('meta')
       expect(Object.isFrozen(receipt)).toBe(true)
       expect(Object.isFrozen(receipt.committedEvents)).toBe(true)
+      expect(Object.isFrozen(receipt.materializerHashes)).toBe(true)
+      expect(Object.isFrozen(receipt.materializerHashes[0])).toBe(true)
       expect(Object.isFrozen(receipt.committedEvents[0])).toBe(true)
       expect(receipt.committedEvents[0]!.args).not.toBe(event.args)
       expect(Object.isFrozen(receipt.committedEvents[0]!.args)).toBe(true)
@@ -51,7 +53,7 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
 
       const error = yield* committer
         .commitUpstream({
-          pulledEvents: [first, duplicate],
+          pulledEvents: [pulled(first), pulled(duplicate)],
           events: [first, duplicate],
           rollbackEvents: [],
           confirmedEvents: [],
@@ -82,7 +84,7 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
 
       const error = yield* committer
         .commitUpstream({
-          pulledEvents: [event],
+          pulledEvents: [pulled(event)],
           events: [event],
           rollbackEvents: [],
           confirmedEvents: [],
@@ -109,11 +111,10 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
         rebaseGeneration: 1,
         id: 'replacement',
         text: 'Replacement',
-        syncMetadata: Option.some({ cursor: 'upstream-1' }),
       })
 
       const receipt = yield* committer.commitUpstream({
-        pulledEvents: [replacement],
+        pulledEvents: [pulled(replacement, Option.some({ cursor: 'upstream-1' }))],
         events: [replacement],
         rollbackEvents: [original],
         confirmedEvents: [],
@@ -135,20 +136,25 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
   Vitest.live('persists confirmation metadata with the matching backend head', (test) =>
     Effect.gen(function* () {
       const { committer, dbEventlog, dbState } = yield* setup
-      const pending = makeTodoEvent({ global: 1, id: 'confirmed', text: 'Confirmed' })
+      const pending = makeTodoEvent({
+        global: 1,
+        rebaseGeneration: 2,
+        id: 'confirmed',
+        text: 'Confirmed',
+      })
       yield* committer.commitLocal({ events: [pending] })
+      const upstream = makeTodoEvent({ global: 1, id: 'confirmed', text: 'Confirmed' })
 
-      const confirmed = cloneEvent(pending, { syncMetadata: Option.some({ cursor: 'confirmed-1' }) })
       yield* committer.commitUpstream({
-        pulledEvents: [confirmed],
+        pulledEvents: [pulled(upstream, Option.some({ cursor: 'confirmed-1' }))],
         events: [],
         rollbackEvents: [],
         confirmedEvents: [pending],
-        backendHead: confirmed.seqNum,
+        backendHead: upstream.seqNum,
       })
 
       const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, {
-        remoteHead: confirmed.seqNum.global,
+        remoteHead: upstream.seqNum.global,
       })
       expect(Option.getOrThrow(cursorInfo)).toEqual({
         eventSequenceNumber: 1,
@@ -190,30 +196,23 @@ const makeTodoEvent = ({
   parentSeqNum = EventSequenceNumber.Client.ROOT,
   id,
   text,
-  syncMetadata = Option.none(),
 }: {
   global: number
   rebaseGeneration?: number
   parentSeqNum?: EventSequenceNumber.Client.Composite
   id: string
   text: string
-  syncMetadata?: Option.Option<{ cursor: string }>
 }) =>
-  new LiveStoreEvent.Client.EncodedWithMeta({
+  LiveStoreEvent.Client.Encoded.make({
     name: events.todoCreated.name,
     args: { id, text },
     seqNum: EventSequenceNumber.Client.Composite.make({ global, client: 0, rebaseGeneration }),
     parentSeqNum,
     clientId: 'test-client',
     sessionId: 'test-session',
-    meta: {
-      syncMetadata,
-      materializerHashLeader: Option.none(),
-      materializerHashSession: Option.none(),
-    },
   })
 
-const cloneEvent = (
-  event: LiveStoreEvent.Client.EncodedWithMeta,
-  metaPatch: Partial<LiveStoreEvent.Client.EncodedWithMeta['meta']>,
-) => new LiveStoreEvent.Client.EncodedWithMeta({ ...event, meta: { ...event.meta, ...metaPatch } })
+const pulled = (
+  event: LiveStoreEvent.Client.Encoded,
+  syncMetadata: Option.Option<{ cursor: string }> = Option.none(),
+): LeaderSyncCommitter.PulledEvent => ({ event, syncMetadata })

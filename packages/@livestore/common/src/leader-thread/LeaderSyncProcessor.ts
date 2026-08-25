@@ -22,7 +22,7 @@ export interface Service {
     cursor: EventSequenceNumber.Client.Composite
   }) => Effect.Effect<Queue.Queue<typeof PullItem.Type>, never, Scope.Scope>
   /** Resolves only after durable commit, publication, and backend propagation scheduling. */
-  readonly push: (batch: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void, RejectedPushError>
+  readonly push: (batch: ReadonlyArray<LiveStoreEvent.Client.Encoded>) => Effect.Effect<void, RejectedPushError>
   readonly pushPartial: (args: {
     event: LiveStoreEvent.Input.Encoded
     clientId: string
@@ -47,7 +47,7 @@ export const make = Effect.fnUntraced(function* (options: LeaderSyncLoop.Options
       })
       if (resolution._tag === 'unknown') return
       yield* loop.push([
-        new LiveStoreEvent.Client.EncodedWithMeta({
+        LiveStoreEvent.Client.Encoded.make({
           name,
           args,
           clientId,

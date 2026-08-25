@@ -1,3 +1,4 @@
+import type { Schema } from '@livestore/utils/effect';
 import { Context, Effect, Layer, Option } from '@livestore/utils/effect'
 
 import { MaterializeError, SqliteError, type SqliteDb, UnknownError } from '../adapter-types.ts'
@@ -15,28 +16,35 @@ export const TypeId = '~@livestore/common/LeaderSyncCommitter' as const
 export type TypeId = typeof TypeId
 
 export interface LocalCommitPlan {
-  readonly events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+}
+
+export interface PulledEvent {
+  readonly event: LiveStoreEvent.Client.Encoded
+  readonly syncMetadata: Option.Option<Schema.Json>
 }
 
 export interface UpstreamCommitPlan {
   /** The events received in the backend chunk, including metadata used to confirm pending events. */
-  readonly pulledEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly pulledEvents: ReadonlyArray<PulledEvent>
   /** The merged events to materialize, including any locally rebased pending suffix. */
-  readonly events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
-  readonly rollbackEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
-  readonly confirmedEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+  readonly rollbackEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+  readonly confirmedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
   readonly backendHead: EventSequenceNumber.Client.Composite
 }
 
 export interface LocalCommitReceipt {
   readonly _tag: 'local-commit'
-  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+  readonly materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
   readonly stateHead: EventSequenceNumber.Client.Composite
 }
 
 export interface UpstreamCommitReceipt {
   readonly _tag: 'upstream-commit'
-  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+  readonly materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
   readonly rolledBackEventNums: ReadonlyArray<EventSequenceNumber.Client.Composite>
   readonly stateHead: EventSequenceNumber.Client.Composite
   readonly backendHead: EventSequenceNumber.Client.Composite
@@ -63,12 +71,27 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
     const materializationJournal = yield* MaterializationJournal.MaterializationJournal
     const stateHead = yield* StateHead.StateHead
 
-    const materializeEvents = (events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) =>
+    const materializeEvents = (
+      events: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
+      pulledEvents: ReadonlyArray<PulledEvent> = [],
+    ) =>
       Effect.forEach(events, (event) =>
         Effect.gen(function* () {
           const eventToMaterialize = cloneEvent(event)
-          const { hash } = yield* materializeEvent(eventToMaterialize)
-          return freezeEvent(cloneEvent(eventToMaterialize, { materializerHashLeader: hash }))
+          const syncMetadata =
+            pulledEvents.find(({ event: pulledEvent }) =>
+              EventSequenceNumber.Client.isEqual(event.seqNum, pulledEvent.seqNum),
+            )?.syncMetadata ?? Option.none()
+          const { hash } = yield* materializeEvent(eventToMaterialize, { syncMetadata })
+          return {
+            event: freezeEvent(eventToMaterialize),
+            materializerHash: deepFreeze(
+              LiveStoreEvent.Client.MaterializerHash.make({
+                eventNum: freezeSeqNum(eventToMaterialize.seqNum),
+                hash,
+              }),
+            ),
+          }
         }),
       )
 
@@ -76,14 +99,15 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
       withCoordinatedTransactions(
         { dbState, dbEventlog },
         Effect.gen(function* () {
-          const committedEvents = yield* materializeEvents(events)
+          const materialized = yield* materializeEvents(events)
           const persistedStateHead = yield* stateHead.get.pipe(
             Effect.mapError((cause) => MaterializeError.make({ cause })),
           )
 
           return freezeReceipt({
             _tag: 'local-commit' as const,
-            committedEvents: freezeArray(committedEvents),
+            committedEvents: freezeArray(materialized.map(({ event }) => event)),
+            materializerHashes: freezeArray(materialized.map(({ materializerHash }) => materializerHash)),
             stateHead: freezeSeqNum(persistedStateHead),
           })
         }),
@@ -108,13 +132,11 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
             )
           }
 
-          const committedEvents = yield* materializeEvents(plan.events)
+          const materialized = yield* materializeEvents(plan.events, plan.pulledEvents)
 
           if (plan.confirmedEvents.length > 0) {
-            const confirmedPulledEvents = plan.pulledEvents.filter((event) =>
-              plan.confirmedEvents.some((confirmedEvent) =>
-                EventSequenceNumber.Client.isEqual(event.seqNum, confirmedEvent.seqNum),
-              ),
+            const confirmedPulledEvents = plan.pulledEvents.filter(({ event }) =>
+              plan.confirmedEvents.some((confirmedEvent) => isSameEventPosition(event.seqNum, confirmedEvent.seqNum)),
             )
             yield* Eventlog.updateSyncMetadataForDb(dbEventlog, confirmedPulledEvents).pipe(
               Effect.mapError((cause) => MaterializeError.make({ cause })),
@@ -132,7 +154,8 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
 
           return freezeReceipt({
             _tag: 'upstream-commit' as const,
-            committedEvents: freezeArray(committedEvents),
+            committedEvents: freezeArray(materialized.map(({ event }) => event)),
+            materializerHashes: freezeArray(materialized.map(({ materializerHash }) => materializerHash)),
             rolledBackEventNums: freezeArray(rollbackEventNums.map(freezeSeqNum)),
             stateHead: freezeSeqNum(persistedStateHead),
             backendHead: freezeSeqNum(plan.backendHead),
@@ -223,24 +246,15 @@ const updateBackendHead = (dbEventlog: SqliteDb, head: EventSequenceNumber.Clien
       }),
   })
 
-const cloneEvent = (
-  event: LiveStoreEvent.Client.EncodedWithMeta,
-  metaPatch?: Partial<LiveStoreEvent.Client.EncodedWithMeta['meta']>,
-) =>
-  new LiveStoreEvent.Client.EncodedWithMeta({
+const cloneEvent = (event: LiveStoreEvent.Client.Encoded) =>
+  LiveStoreEvent.Client.Encoded.make({
     ...event,
     args: structuredClone(event.args),
     seqNum: EventSequenceNumber.Client.Composite.make({ ...event.seqNum }),
     parentSeqNum: EventSequenceNumber.Client.Composite.make({ ...event.parentSeqNum }),
-    meta: {
-      syncMetadata: Option.map(event.meta.syncMetadata, structuredClone),
-      materializerHashLeader: Option.map(event.meta.materializerHashLeader, (hash) => hash),
-      materializerHashSession: Option.map(event.meta.materializerHashSession, (hash) => hash),
-      ...metaPatch,
-    },
   })
 
-const freezeEvent = (event: LiveStoreEvent.Client.EncodedWithMeta) => deepFreeze(event)
+const freezeEvent = (event: LiveStoreEvent.Client.Encoded) => deepFreeze(event)
 
 const freezeSeqNum = (seqNum: EventSequenceNumber.Client.Composite) =>
   Object.freeze(EventSequenceNumber.Client.Composite.make({ ...seqNum }))
@@ -248,6 +262,9 @@ const freezeSeqNum = (seqNum: EventSequenceNumber.Client.Composite) =>
 const freezeArray = <A>(items: ReadonlyArray<A>): ReadonlyArray<A> => Object.freeze([...items])
 
 const freezeReceipt = <A extends object>(receipt: A): Readonly<A> => Object.freeze(receipt)
+
+const isSameEventPosition = (left: EventSequenceNumber.Client.Composite, right: EventSequenceNumber.Client.Composite) =>
+  left.global === right.global && left.client === right.client
 
 const deepFreeze = <A>(value: A): A => {
   if (typeof value !== 'object' || value === null || Object.isFrozen(value) === true) return value

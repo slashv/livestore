@@ -72,7 +72,7 @@ export interface MakeLeaderThreadLayerParams {
         localPushProcessing?: Effect.Effect<void>
       }
       hooks?: {
-        localPushAdmitted?: (events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void>
+        localPushAdmitted?: (events: ReadonlyArray<LiveStoreEvent.Client.Encoded>) => Effect.Effect<void>
       }
     }
   }

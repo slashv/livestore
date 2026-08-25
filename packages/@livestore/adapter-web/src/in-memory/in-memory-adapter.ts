@@ -290,7 +290,7 @@ const makeLeaderThread = ({
       const leaderThread = ClientSessionLeaderThreadProxy.of({
         events: {
           pull: ({ cursor }) => syncProcessor.pull({ cursor }),
-          push: (batch) => syncProcessor.push(batch.map((item) => new LiveStoreEvent.Client.EncodedWithMeta(item))),
+          push: syncProcessor.push,
           stream: (options) =>
             streamEventsWithSyncState({
               dbEventlog,

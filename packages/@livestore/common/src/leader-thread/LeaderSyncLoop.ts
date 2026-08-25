@@ -11,7 +11,6 @@ import {
   Exit,
   FiberHandle,
   FiberSet,
-  Option,
   Queue,
   ReadonlyArray,
   Ref,
@@ -25,10 +24,8 @@ import { type SqliteDb, UnknownError } from '../adapter-types.ts'
 import { PullItem } from '../ClientSessionLeaderThreadProxy.ts'
 import { IntentionalShutdownCause } from '../errors.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
-import { makeMaterializerHash } from '../materializer-helper.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
-import * as StateSqliteDb from '../StateSqliteDb.ts'
 import type { BackendIdMismatchError, IsOfflineError, ServerAheadError } from '../sync/errors.ts'
 import type * as SyncBackend from '../sync/sync-backend.ts'
 import * as SyncState from '../sync/syncstate.ts'
@@ -56,7 +53,7 @@ export interface Options {
   readonly testing: {
     readonly delays?: { readonly localPushProcessing?: Effect.Effect<void> }
     readonly hooks?: {
-      readonly localPushAdmitted?: (events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void>
+      readonly localPushAdmitted?: (events: ReadonlyArray<LiveStoreEvent.Client.Encoded>) => Effect.Effect<void>
     }
   }
 }
@@ -74,7 +71,7 @@ export interface LeaderSyncLoop {
     never,
     Scope.Scope | HttpClient.HttpClient
   >
-  readonly push: (batch: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void, RejectedPushError>
+  readonly push: (batch: ReadonlyArray<LiveStoreEvent.Client.Encoded>) => Effect.Effect<void, RejectedPushError>
   readonly pull: (args: { cursor: EventSequenceNumber.Client.Composite }) => Stream.Stream<typeof PullItem.Type>
   readonly pullQueue: (args: {
     cursor: EventSequenceNumber.Client.Composite
@@ -97,7 +94,6 @@ export const make = Effect.fnUntraced(function* ({
   params,
   testing,
 }: Options) {
-  const dbState = yield* StateSqliteDb.StateSqliteDb
   const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
   const syncCommitter = yield* LeaderSyncCommitter.LeaderSyncCommitter
   const { devtoolsLatch, shutdownChannel, span, syncBackend } = runtime
@@ -126,7 +122,7 @@ export const make = Effect.fnUntraced(function* ({
     onBackendIdMismatch,
     localWorkInitiallyBlocked: testing.delays?.localPushProcessing !== undefined,
   }
-  const isClientOnlyEvent = (event: LiveStoreEvent.Client.EncodedWithMeta) =>
+  const isClientOnlyEvent = (event: LiveStoreEvent.Client.Encoded) =>
     schema.eventsDefsMap.get(event.name)?.options.clientOnly ?? false
   let model = initialModel(config, initialSyncState, isClientOnlyEvent)
 
@@ -206,8 +202,6 @@ export const make = Effect.fnUntraced(function* ({
           live: config.livePull,
           syncBackend,
           devtoolsLatch,
-          schema,
-          dbState,
           dbEventlog,
           pullBatches,
           nextPullBatchId,
@@ -217,7 +211,7 @@ export const make = Effect.fnUntraced(function* ({
       ).pipe(Effect.asVoid)
     })
 
-  const replacePushPlan = (replacement: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) =>
+  const replacePushPlan = (replacement: ReadonlyArray<LiveStoreEvent.Client.Encoded>) =>
     Effect.gen(function* () {
       if (model.push._tag === 'disabled') return
       const inFlight = model.push._tag === 'in-flight'
@@ -226,7 +220,11 @@ export const make = Effect.fnUntraced(function* ({
       yield* startProviderPush()
     })
 
-  const publish = (args: { syncState: SyncState.SyncState; payload: typeof SyncState.PayloadUpstream.Type }) =>
+  const publish = (args: {
+    syncState: SyncState.SyncState
+    payload: typeof SyncState.PayloadUpstream.Type
+    materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
+  }) =>
     Effect.gen(function* () {
       model = { ...model, syncState: args.syncState }
       yield* SubscriptionRef.set(syncStateRef, args.syncState)
@@ -234,6 +232,7 @@ export const make = Effect.fnUntraced(function* ({
         payload: args.payload,
         globalHead: args.syncState.upstreamHead,
         leaderHead: args.syncState.localHead,
+        materializerHashes: args.materializerHashes,
       })
     })
 
@@ -300,6 +299,7 @@ export const make = Effect.fnUntraced(function* ({
       yield* publish({
         syncState: committedSyncState,
         payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents }),
+        materializerHashes: receipt.materializerHashes,
       })
       model = enqueuePushEvents(
         model,
@@ -330,7 +330,7 @@ export const make = Effect.fnUntraced(function* ({
       if (backendHead === undefined) return yield* stopForSyncFailure(new Error('Upstream batch has no head'))
       const commitExit = yield* syncCommitter
         .commitUpstream({
-          pulledEvents: batch.events,
+          pulledEvents: batch.pulledEvents,
           events: merge.newEvents,
           rollbackEvents,
           confirmedEvents,
@@ -356,7 +356,7 @@ export const make = Effect.fnUntraced(function* ({
         merge._tag === 'rebase'
           ? SyncState.PayloadUpstreamRebase.make({ rollbackEvents, newEvents: receipt.committedEvents })
           : SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents })
-      yield* publish({ syncState: committedSyncState, payload })
+      yield* publish({ syncState: committedSyncState, payload, materializerHashes: receipt.materializerHashes })
       yield* completePullBatch(pullBatches, batch.batchId)
       yield* replacePushPlan(committedSyncState.pending.filter((event) => !isClientOnlyEvent(event)))
       yield* send({ _tag: 'ContinueWork' })
@@ -708,13 +708,14 @@ interface Config {
 interface LocalItem {
   readonly requestId: LocalRequestId
   readonly index: number
-  readonly event: LiveStoreEvent.Client.EncodedWithMeta
+  readonly event: LiveStoreEvent.Client.Encoded
 }
 
 interface UpstreamBatch {
   readonly pullId: OperationId
   readonly batchId: PullBatchId
-  readonly events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+  readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+  readonly pulledEvents: ReadonlyArray<LeaderSyncCommitter.PulledEvent>
   readonly pageInfo: SyncBackend.PullResPageInfo
 }
 
@@ -727,7 +728,7 @@ type Event =
   | {
       readonly _tag: 'LocalPushRequested'
       readonly requestId: LocalRequestId
-      readonly events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+      readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
     }
   | { readonly _tag: 'UpstreamBatchReceived'; readonly batch: UpstreamBatch }
   | { readonly _tag: 'PullCompleted'; readonly pullId: OperationId }
@@ -768,7 +769,7 @@ type PushState =
     }
   | { readonly _tag: 'awaiting-pull'; readonly queued: EventBatch }
 
-type EventBatch = ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>
+type EventBatch = ReadonlyArray<LiveStoreEvent.Client.Encoded>
 
 interface Model {
   readonly lifecycle: 'starting' | 'running' | 'stopping' | 'failed'
@@ -794,7 +795,7 @@ type LocalRequestRegistry =
 const initialModel = (
   config: Config,
   initialSyncState: SyncState.SyncState,
-  isClientOnlyEvent: (event: LiveStoreEvent.Client.EncodedWithMeta) => boolean,
+  isClientOnlyEvent: (event: LiveStoreEvent.Client.Encoded) => boolean,
 ): Model => ({
   lifecycle: 'starting',
   syncState: initialSyncState,
@@ -824,7 +825,7 @@ const runProviderPush = (
   Effect.gen(function* () {
     yield* SubscriptionRef.waitUntil(syncBackend.isConnected, (connected) => connected === true)
     if (devtoolsLatch !== undefined) yield* devtoolsLatch.await
-    yield* syncBackend.push(operation.batch.map((event) => event.toGlobal()))
+    yield* syncBackend.push(operation.batch.map(LiveStoreEvent.Client.toGlobal))
   }).pipe(
     Effect.matchEffect({
       onFailure: (error) => send({ _tag: 'PushFailed', operationId: operation.operationId, error }),
@@ -846,8 +847,6 @@ const runProviderPull = ({
   live,
   syncBackend,
   devtoolsLatch,
-  schema,
-  dbState,
   dbEventlog,
   pullBatches,
   nextPullBatchId,
@@ -859,8 +858,6 @@ const runProviderPull = ({
   live: boolean
   syncBackend: SyncBackend.SyncBackend
   devtoolsLatch: Latch.Latch | undefined
-  schema: LiveStoreSchema
-  dbState: SqliteDb
   dbEventlog: SqliteDb
   pullBatches: Ref.Ref<Map<PullBatchId, Deferred.Deferred<void>>>
   nextPullBatchId: Ref.Ref<number>
@@ -869,7 +866,6 @@ const runProviderPull = ({
 }) =>
   Effect.gen(function* () {
     const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: cursor.global })
-    const hashMaterializer = makeMaterializerHash({ schema, dbState })
     yield* syncBackend.pull(cursorInfo, { live }).pipe(
       Stream.runForEach(({ batch, pageInfo }) =>
         Effect.gen(function* () {
@@ -878,14 +874,14 @@ const runProviderPull = ({
           const batchId = yield* Ref.modify(nextPullBatchId, (id) => [id, id + 1])
           const completion = yield* Deferred.make<void>()
           yield* Ref.update(pullBatches, (batches) => new Map(batches).set(batchId, completion))
-          const events = batch.map((item) =>
-            LiveStoreEvent.Client.EncodedWithMeta.fromGlobal(item.eventEncoded, {
-              syncMetadata: item.metadata,
-              materializerHashLeader: hashMaterializer(LiveStoreEvent.Global.toClientEncoded(item.eventEncoded)),
-              materializerHashSession: Option.none(),
-            }),
-          )
-          yield* send({ _tag: 'UpstreamBatchReceived', batch: { pullId, batchId, events, pageInfo } })
+          const pulledEvents = batch.map((item) => ({
+            event: LiveStoreEvent.Client.fromGlobal(item.eventEncoded),
+            syncMetadata: item.metadata,
+          }))
+          yield* send({
+            _tag: 'UpstreamBatchReceived',
+            batch: { pullId, batchId, events: pulledEvents.map(({ event }) => event), pulledEvents, pageInfo },
+          })
           yield* Deferred.await(completion)
           yield* initialBlockingSyncContext.update({ processed: batch.length, pageInfo })
           yield* Effect.yieldNow
@@ -909,7 +905,7 @@ const runProviderPull = ({
 const validatePushBatch = (
   batch: EventBatch,
   pushHead: EventSequenceNumber.Client.Composite,
-  isClientOnlyEvent: (event: LiveStoreEvent.Client.EncodedWithMeta) => boolean,
+  isClientOnlyEvent: (event: LiveStoreEvent.Client.Encoded) => boolean,
 ): RejectedPushError | undefined => {
   for (let i = 1; i < batch.length; i++) {
     if (EventSequenceNumber.Client.isGreaterThanOrEqual(batch[i - 1]!.seqNum, batch[i]!.seqNum) === true) {
@@ -1071,6 +1067,7 @@ interface PullQueueSet {
     payload: typeof SyncState.PayloadUpstream.Type
     globalHead: EventSequenceNumber.Client.Composite
     leaderHead: EventSequenceNumber.Client.Composite
+    materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
   }) => Effect.Effect<void>
 }
 
@@ -1097,6 +1094,9 @@ const makePullQueueSet = Effect.gen(function* () {
           item.payload._tag === 'upstream-advance'
             ? PullItem.make({
                 globalHead: item.globalHead,
+                materializerHashes: item.materializerHashes.filter(({ eventNum }) =>
+                  EventSequenceNumber.Client.isGreaterThan(eventNum, cursor),
+                ),
                 payload: {
                   _tag: 'upstream-advance',
                   newEvents: ReadonlyArray.dropWhile(item.payload.newEvents, (event) =>
@@ -1113,7 +1113,11 @@ const makePullQueueSet = Effect.gen(function* () {
   const offer: PullQueueSet['offer'] = (item) =>
     Effect.gen(function* () {
       const key = EventSequenceNumber.Client.toString(item.leaderHead)
-      const pullItem = PullItem.make({ payload: item.payload, globalHead: item.globalHead })
+      const pullItem = PullItem.make({
+        payload: item.payload,
+        globalHead: item.globalHead,
+        materializerHashes: item.materializerHashes,
+      })
       const cached = cachedPullItems.get(key)
       if (cached === undefined) cachedPullItems.set(key, [pullItem])
       else cached.push(pullItem)

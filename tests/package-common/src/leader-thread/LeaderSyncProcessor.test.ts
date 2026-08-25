@@ -133,14 +133,14 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
     }).pipe(withTestCtx()(test)),
   )
 
-  Vitest.live('retains leader materialization metadata for pending local events', (test) =>
+  Vitest.live('publishes leader materializer hashes beside pending local events', (test) =>
     Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx
       const testContext = yield* TestContext
 
       yield* testContext.mockSyncBackend.disconnect
 
-      const localEvent = new LiveStoreEvent.Client.EncodedWithMeta({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({ id: 'local', text: 'local', completed: false }),
         ),
@@ -154,8 +154,10 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       const retainedEvent = (yield* leaderThreadCtx.syncProcessor.syncState.get).pending[0]!
       const publishedEvent = downstreamItem.payload.newEvents[0]!
 
-      expect(retainedEvent.meta.materializerHashLeader._tag).toEqual('Some')
-      expect(retainedEvent.meta.materializerHashLeader).toEqual(publishedEvent.meta.materializerHashLeader)
+      expect(retainedEvent).toEqual(publishedEvent)
+      expect(downstreamItem.materializerHashes).toEqual([
+        expect.objectContaining({ eventNum: retainedEvent.seqNum, hash: expect.objectContaining({ _tag: 'Some' }) }),
+      ])
 
       const journalChangeset = (yield* StateSqliteDb.StateSqliteDb).select<{
         changeset: Uint8Array<ArrayBuffer> | null
@@ -238,7 +240,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({ id: 'local-after-pull', text: 'local', completed: false }),
         ),
@@ -287,7 +289,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({
             id: 'local-after-pull-failure',
@@ -352,7 +354,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({
             id: 'local-after-pull-interrupt',
@@ -476,7 +478,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       })
 
       // push waits on the deferred, so we observe the rejection path.
-      const staleEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const staleEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(baseEvent),
         seqNum: staleSeq,
         parentSeqNum: staleParent,
@@ -796,7 +798,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
         rebaseGeneration: 1,
       })
-      const rebasedRetry = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const rebasedRetry = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(retryBase),
         ...retryPair,
         clientId: 'shared-client',
@@ -881,7 +883,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         rebaseGeneration: syncStateBefore.localHead.rebaseGeneration + 1,
       })
 
-      const rebasedClientEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const rebasedClientEvent = LiveStoreEvent.Client.Encoded.make({
         name: 'app_configSet',
         args: { id: 'session-a', value: { theme: 'dark' } },
         seqNum: nextPair.seqNum,
@@ -1211,13 +1213,13 @@ const LeaderThreadCtxLive = ({
         client: EventFactory.clientIdentity(leaderThreadCtx.clientId, 'static-session-id'),
       })
 
-      const toEncodedWithMeta = (event: LiveStoreEvent.Global.Encoded) =>
-        new LiveStoreEvent.Client.EncodedWithMeta({
+      const toEncoded = (event: LiveStoreEvent.Global.Encoded) =>
+        LiveStoreEvent.Client.Encoded.make({
           ...LiveStoreEvent.Global.toClientEncoded(event),
         })
 
       const pushEncoded = (...events: ReadonlyArray<LiveStoreEvent.Global.Encoded>) =>
-        leaderThreadCtx.syncProcessor.push(events.map((event) => toEncodedWithMeta(event)))
+        leaderThreadCtx.syncProcessor.push(events.map((event) => toEncoded(event)))
 
       const pullQueue = yield* leaderThreadCtx.syncProcessor.pullQueue({
         cursor: EventSequenceNumber.Client.ROOT,
