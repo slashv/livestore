@@ -1,3 +1,14 @@
+/**
+ * Serialized orchestration core for leader synchronization.
+ *
+ * A single mailbox is the sole owner of the in-memory model. Local pushes, provider batches, retries, failures, and
+ * shutdown requests all enter that mailbox and run to completion one at a time. Each accepted transition awaits
+ * `LeaderSyncCommitter`; only a successful durable receipt may advance observable sync state, publish events, schedule
+ * backend propagation, or resolve a push acknowledgement.
+ *
+ * This module owns lifecycle, queues, provider fibers, retry policy, publication, and acknowledgements. It does not own
+ * rollback, materialization, journal maintenance, or durable head/metadata updates; those belong to the committer.
+ */
 import { casesHandled, TRACE_VERBOSE } from '@livestore/utils'
 import {
   type HttpClient,
@@ -79,10 +90,6 @@ export interface LeaderSyncLoop {
   readonly syncState: Subscribable.Subscribable<SyncState.SyncState>
 }
 
-/**
- * Owns leader-sync orchestration. The mailbox awaits each durable transition, so planning, committing, publication,
- * and acknowledgement remain one readable run-to-completion operation instead of a command/result protocol.
- */
 export const make = Effect.fnUntraced(function* ({
   schema,
   runtime,

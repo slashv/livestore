@@ -1,4 +1,16 @@
-import type { Schema } from '@livestore/utils/effect';
+/**
+ * Durable SQLite boundary for leader-sync transitions.
+ *
+ * `commitLocal` and `commitUpstream` own the complete persistent transition: rollback/equalization, event
+ * materialization, MaterializationJournal maintenance, eventlog inserts, state/backend heads, sync metadata, and
+ * coordinated commits of the state and eventlog databases. Inputs remain unchanged and success returns an immutable
+ * receipt that the loop can safely publish.
+ *
+ * This service does not own provider/session queues, retries, publication, acknowledgements, or in-memory sync state.
+ * SQLite cannot make two independent database files crash-atomic; the implementation commits state first so a failed
+ * state commit cannot leave an eventlog head claiming that an unapplied state transition is durable.
+ */
+import type { Schema } from '@livestore/utils/effect'
 import { Context, Effect, Layer, Option } from '@livestore/utils/effect'
 
 import { MaterializeError, SqliteError, type SqliteDb, UnknownError } from '../adapter-types.ts'
@@ -59,7 +71,6 @@ export interface Service {
   readonly resetLocalDatabases: Effect.Effect<void, UnknownError>
 }
 
-/** Owns the durable state/eventlog boundary for leader sync transitions. */
 export class LeaderSyncCommitter extends Context.Service<LeaderSyncCommitter, Service>()(
   '@livestore/common/LeaderSyncCommitter',
 ) {}

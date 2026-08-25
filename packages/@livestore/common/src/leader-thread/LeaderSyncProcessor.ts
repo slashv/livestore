@@ -1,3 +1,17 @@
+/**
+ * Public facade and entry point for leader synchronization.
+ *
+ * Callers use this service to boot synchronization, push local events, pull committed updates, and observe sync state.
+ * The implementation deliberately keeps the architecture shallow:
+ *
+ * - `LeaderSyncProcessor` exposes the public API and turns partial pushes into fully sequenced events.
+ * - `LeaderSyncLoop` owns all serialized orchestration, including lifecycle, queues, retries, provider work,
+ *   publication, and push acknowledgement.
+ * - `LeaderSyncCommitter` owns the durable SQLite transition and returns only after durable truth is established.
+ *
+ * The required ordering is commit first, then update observable state, publish to sessions, schedule backend work, and
+ * acknowledge the originating push. Neither this facade nor callers may bypass the loop to perform those steps.
+ */
 import type { Queue, Stream } from '@livestore/utils/effect'
 import { type HttpClient, type Scope, Context, Effect, Layer, type Subscribable } from '@livestore/utils/effect'
 
