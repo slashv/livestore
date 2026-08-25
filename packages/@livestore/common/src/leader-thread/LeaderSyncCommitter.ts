@@ -1,11 +1,13 @@
 import { Context, Effect, Layer, Option } from '@livestore/utils/effect'
 
-import { MaterializeError, SqliteError, type SqliteDb } from '../adapter-types.ts'
+import { MaterializeError, SqliteError, type SqliteDb, UnknownError } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import * as MaterializationJournal from '../MaterializationJournal.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
+import { EVENTLOG_META_TABLE, SYNC_STATUS_TABLE } from '../schema/state/sqlite/system-tables/eventlog-tables.ts'
 import * as StateHead from '../StateHead.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
+import { sql } from '../util.ts'
 import * as Eventlog from './eventlog.ts'
 import type { MaterializeEvent } from './types.ts'
 
@@ -46,6 +48,7 @@ export interface Service {
   readonly [TypeId]: TypeId
   readonly commitLocal: (plan: LocalCommitPlan) => Effect.Effect<LocalCommitReceipt, CommitError>
   readonly commitUpstream: (plan: UpstreamCommitPlan) => Effect.Effect<UpstreamCommitReceipt, CommitError>
+  readonly resetLocalDatabases: Effect.Effect<void, UnknownError>
 }
 
 /** Owns the durable state/eventlog boundary for leader sync transitions. */
@@ -145,7 +148,19 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         }),
       )
 
-    return LeaderSyncCommitter.of({ [TypeId]: TypeId, commitLocal, commitUpstream })
+    const resetLocalDatabases = Effect.try({
+      try: () => {
+        dbEventlog.execute(sql`DELETE FROM ${EVENTLOG_META_TABLE}`)
+        dbEventlog.execute(sql`DELETE FROM ${SYNC_STATUS_TABLE}`)
+        const tables = dbState.select<{ name: string }>(
+          sql`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+        )
+        for (const { name } of tables) dbState.execute(`DROP TABLE IF EXISTS "${name}"`)
+      },
+      catch: (cause) => UnknownError.make({ cause, note: 'Failed to reset local databases after backend mismatch' }),
+    })
+
+    return LeaderSyncCommitter.of({ [TypeId]: TypeId, commitLocal, commitUpstream, resetLocalDatabases })
   })
 
 export const layer = (options: { materializeEvent: MaterializeEvent }) =>
