@@ -293,7 +293,7 @@ const makeProviderPushMachine = (dependencies: Dependencies) =>
                   .providerPush(state.batch)
                   .pipe(
                     Effect.tapError((error) =>
-                      error._tag === 'BackendIdMismatchError'
+                      error._tag === 'BackendIdMismatchError' || error._tag === 'ServerAheadError'
                         ? parent.send(LeaderSyncEvents.ProviderPushFailed({ error })).pipe(Effect.ignore)
                         : Effect.void,
                     ),
@@ -522,6 +522,19 @@ const makeLeaderSyncMachine = (dependencies: Dependencies) => {
           ),
         ProviderPushFailed: (to) =>
           to.local.update(({ current, event, owner }, enqueue) => {
+            if (event.error._tag === 'ServerAheadError') {
+              const pulledThroughRequiredHead =
+                current.syncState.upstreamHead.global >= event.error.minimumExpectedNum - 1
+              if (pulledThroughRequiredHead === true) {
+                enqueue.sendTo(
+                  ProviderPush,
+                  ProviderPushEvents.ReplacePlan({
+                    events: current.syncState.pending.filter((item) => !dependencies.isClientOnlyEvent(item)),
+                  }),
+                )
+              }
+              return owner.from(current)
+            }
             const termination = terminationFor(dependencies.config, event.error, 'push')
             if (termination === undefined) enqueue.sendTo(ProviderPush, ProviderPushEvents.Disable())
             return owner.from({ ...current, termination })

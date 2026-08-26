@@ -1,138 +1,202 @@
-# Leader Sync Serialized Loop
+# Sync Processor Effect Machines
 
 > **Status:** Draft local architectural proposal. This document records the implementation experiment and does not
 > replace accepted product intent.
 
 ## Context
 
-The leader synchronizes client-session events with an optional upstream provider. Durable state and eventlog changes
-are owned by `LeaderSyncCommitter`, while provider streams, session publication, retry timing, and acknowledgements
-remain orchestration concerns.
+LiveStore has two cooperating synchronization coordinators:
 
-The original processor coordinated those concerns through a local transaction queue, two semaphores, a restartable push
-fiber, a long-lived pull stream, and mutable admission reservations. A subsequent pure state-machine experiment made
-ordering explicit, but represented each operation twice: once as machine commands/results and once as Effect executors.
-The serialized loop keeps the explicit ownership and correlation rules without that command protocol.
+- `LeaderSyncProcessor` owns durable ordering between client sessions, the eventlog, state materialization, and an
+  optional upstream provider.
+- `ClientSessionSyncProcessor` owns one session's optimistic state, its leader push/pull relationships, rebase
+  materialization, and orderly shutdown.
 
-## Behavior Inventory
+The previous implementations expressed their lifecycles through queues, semaphores, replaceable fibers, and mutable
+flags. Those primitives were locally understandable, but the set of valid states and the ownership of cancellation were
+distributed across the implementation. This experiment adopts `@typeonce/effect-machine` for both coordinators while
+retaining Effect for work, resources, streams, and failure values.
 
-- `boot` publishes the persisted sync state, rehydrates pending upstream propagation, then starts local, push, and pull
-  background work.
-- local pushes reserve their complete sequence-number range before waiting for durable processing. Concurrent or stale
-  batches are rejected against that reservation fence.
-- local batches are materialized before sync state changes, session publication, provider scheduling, or acknowledgement.
-- upstream pagination has priority over queued local work from the first non-empty page until `NoMore`, failure, or
-  interruption.
-- an upstream advance may confirm pending events, append new events, or rebase divergent pending history. The durable
-  commit completes before the new state is published.
-- an upstream commit replaces the provider push plan with the newly committed pending suffix.
-- provider pushes wait for connectivity. Offline and unknown failures retry with exponential backoff capped at 30
-  seconds. `ServerAheadError` waits for pull reconciliation.
-- backend identity mismatch follows the configured reset, shutdown, or ignore policy.
-- session pull queues retain committed payloads by head so later subscribers can catch up from a cursor.
+## Design Goals
 
-## Invariants
+1. Make every asynchronous lifecycle and cancellation boundary visible in a statechart.
+2. Keep durable operations and synchronous optimistic admission close to their existing domain owners.
+3. Preserve ordering, acknowledgement, retry, rebase, and shutdown behavior.
+4. Avoid a Cartesian product of independent provider push and pull states.
+5. Use the machine topology as the primary explanation of the code, without introducing a command/result protocol for
+   every Effect.
 
-1. One mailbox loop is the sole owner of orchestration state.
-2. At most one local or upstream durable operation is active.
-3. A non-empty upstream pagination sequence prevents new local durable work between pages.
-4. Every admitted local event remains reserved until it is committed or explicitly rejected.
-5. Observable sync state, session publication, provider propagation, and local acknowledgement occur only after the
-   matching durable commit succeeds.
-6. Concurrent provider and timer outcomes are accepted at most once and only when their operation identities match.
-7. The observable local head equals the last durably committed local head. The upstream head never moves backwards.
-8. Provider retries and cancellations are explicit loop states rather than hidden recursive effects.
-9. `LeaderSyncCommitter` is the only normal-path owner of state/eventlog transitions.
-10. State and eventlog databases use independent SQLite connections. The loop does not claim crash-atomic commits
-    across both databases. A crash or eventlog `COMMIT` failure after the state commit may leave state ahead of
-    eventlog truth and requires external recovery.
-11. Durable work is awaited by the mailbox handler. Reset or shutdown arriving during a commit remains queued until the
-    committed result has been published or failed; this is the loop's draining behavior.
-12. A handler defect terminates the loop before another mailbox event is accepted, so publication or propagation
-    failures cannot be followed by acknowledgement from the same transition.
-13. Runtime termination atomically closes local-push admission before draining acknowledgement and pull-page
-    registries. A push racing shutdown is interrupted instead of being left unresolved.
+## Leader Machine
 
-## Proposed Solution
-
-The implementation uses a compact lifecycle with nested provider relationships. Durable work is not a separate state:
-the mailbox itself is the single serialized durable-work owner.
+The leader root is the single owner of durable scheduling. Its `Running` value contains observable sync state, admitted
+local requests, reservation fences, durable work queues, pagination status, and any terminal request. Nested states
+select exactly one durable turn at a time:
 
 ```mermaid
 stateDiagram-v2
   [*] --> Starting
-  Starting --> Running: boot
-  Running --> Stopping: shutdown/reset
-  Running --> Failed: terminal failure
-  Stopping --> [*]: resources drained
+  Starting --> Running: Boot
+  Running --> Stopping: shutdown, reset, or fatal failure
+  Stopping --> Stopped: cleanup complete
 
   state Running {
-    state "Pull relationship" as Pull {
-      [*] --> PullStreaming
-      PullStreaming --> PullRetryWaiting: offline
-      PullRetryWaiting --> PullStreaming: retry elapsed
-      PullStreaming --> PullCompleted: stream complete
-    }
-
-    state "Push relationship" as Push {
-      PushIdle --> PushInFlight: committed pending events
-      PushInFlight --> PushRetryWaiting: transient failure
-      PushRetryWaiting --> PushInFlight: retry elapsed
-      PushInFlight --> PushAwaitingPull: server ahead
-      PushInFlight --> PushIdle: upstream plan replaces push
-    }
+    [*] --> Ready
+    Ready --> Admitting
+    Admitting --> ApplyingAdmission: admitted request
+    Admitting --> SelectingUpstream: no admission
+    ApplyingAdmission --> Ready
+    SelectingUpstream --> CommittingUpstream: queued pull page
+    SelectingUpstream --> SelectingLocal: no upstream page
+    CommittingUpstream --> Ready
+    SelectingLocal --> CommittingLocal: eligible local batch
+    SelectingLocal --> Waiting: no durable work
+    CommittingLocal --> Ready
+    Waiting --> Ready: work becomes eligible
   }
 ```
 
-Each mailbox turn handles one admitted event. Local and upstream durable turns perform merge, commit, receipt validation,
-publication, propagation scheduling, and acknowledgement in one function. Provider calls and retry timers run in
-supervised fibers because they are genuinely concurrent; their correlated outcomes return to the mailbox. A lightweight
-`ContinueWork` event provides fairness between durable batches without exposing an internal command vocabulary.
+Provider push and pull are child machines owned for the complete `Running` lifetime. This keeps their independent
+network, retry, and cancellation states explicit without multiplying them into the durable scheduler's topology.
 
 ```mermaid
-flowchart LR
-  API[Client/provider adapter] -->|Loop event| Mailbox
-  Mailbox --> Handler[Effectful run-to-completion handler]
-  Handler --> Committer[LeaderSyncCommitter]
-  Handler --> Sessions[Session pull queues]
-  Handler --> Acks[Push acknowledgements]
-  Handler --> Provider[Supervised provider fibers]
-  Provider -->|Correlated completion event| Mailbox
+stateDiagram-v2
+  state "Provider push child" as Push {
+    [*] --> Idle
+    Idle --> InFlight: pending plan
+    InFlight --> Idle: accepted
+    InFlight --> RetryWaiting: transient failure
+    RetryWaiting --> InFlight: backoff elapsed
+    InFlight --> AwaitingPull: server ahead
+    AwaitingPull --> Idle: reconciled plan
+  }
+
+  state "Provider pull child" as Pull {
+    [*] --> Streaming
+    Streaming --> RetryWaiting: transient failure
+    RetryWaiting --> Streaming: backoff elapsed
+    Streaming --> Completed: finite pull exhausted
+  }
 ```
 
-## Effect Ownership
+`LeaderSyncCommitter` remains the durable boundary. The machine asks it to commit local or upstream work, validates the
+receipt, and only then updates the machine's sync state, publishes to sessions, schedules provider propagation, and
+settles correlated callers. Pull pagination retains priority between pages, matching the existing fairness contract.
+
+`ServerAheadError` has an explicit reconciliation handshake. If provider push fails before the required pull is
+applied, the push child waits for the next upstream replacement plan. If the pull won the race and was already applied,
+the root detects that its upstream head covers the server's required head and replays the current plan. This prevents a
+lost wakeup between the independently scheduled provider children.
+
+## Client Session Machine
+
+Synchronous optimistic admission deliberately remains in the processor adapter. A UI commit must merge into
+`syncStateRef` and publish its local state before returning; routing that operation through an asynchronous mailbox
+would weaken that contract. The machine owns everything asynchronous after admission.
 
 ```mermaid
-flowchart TB
-  LeaderLayer[makeLeaderThreadLayer] --> StateDb[StateSqliteDb]
-  LeaderLayer --> EventlogDb[EventlogSqliteDb]
-  StateDb --> Journal[MaterializationJournal]
-  StateDb --> StateHead[StateHead]
-  Journal --> Committer[LeaderSyncCommitter]
-  StateHead --> Committer
-  EventlogDb --> Committer
-  Committer --> Processor[LeaderSyncProcessor]
-  LeaderLayer --> Processor
-  Processor --> Provider[SyncBackend adapter]
-  Processor --> SessionQueues[Session publication adapter]
-  Processor --> Shutdown[ShutdownChannel]
+stateDiagram-v2
+  [*] --> Starting
+  Starting --> Running: Boot
+  Running --> Failed: pull, push, or materialization failure
+  Failed --> Stopping: host shutdown callback
+  Running --> Stopping: immediate shutdown
+  Stopping --> Stopped: cleanup complete
+
+  state Running {
+    [*] --> Active
+    Active --> ApplyingPull: pull item
+    ApplyingPull --> Active: reconciled
+    Active --> Draining: orderly shutdown
+    ApplyingPull --> Draining: queued shutdown after reconciliation
+    Draining --> Stopping: push queue drained
+  }
 ```
+
+The root owns two child machines:
+
+- the pull child owns the leader pull stream and correlates each item with completion of its root-machine turn;
+- the push child owns batching, the active leader call, rejection waiting, suspension, plan replacement, and drain
+  reporting.
+
+During a rebase, `ApplyingPull` asks the push child to suspend. The child's state-owned in-flight Effect is interrupted
+by leaving `InFlight`; only after suspension is confirmed does the root roll back materialization and publish the merged
+state. It then replaces the complete push plan from the live pending suffix. Re-reading that suffix at the reconciliation
+barrier preserves commits synchronously admitted while rollback was in progress.
+
+Orderly shutdown is a mailbox event. If it arrives during `ApplyingPull`, the `Running` value records the request without
+exiting the state or interrupting reconciliation. Completion first installs the rebased push plan, then raises shutdown
+and drains it. Failed shutdown remains immediate and interrupts owned work.
+
+## Interaction Between the Machines
+
+```mermaid
+sequenceDiagram
+  participant UI
+  participant Client as Client session machine
+  participant Leader as Leader machine
+  participant Backend as Sync backend
+
+  UI->>Client: synchronous local admission
+  Client->>Leader: push child sends batch
+  Leader->>Leader: durable local commit
+  Leader-->>Client: acknowledge leader push
+  Leader->>Backend: provider push child sends plan
+  Backend-->>Leader: pull child receives upstream page
+  Leader->>Leader: durable upstream commit/rebase
+  Leader-->>Client: session pull item
+  Client->>Client: suspend push, rollback, materialize, replace plan
+```
+
+The two machines do not share mutable orchestration state. Their typed leader proxy is the protocol seam. Correlated
+deferred registries exist only where an external stream or caller must wait for a particular machine turn; the machine
+state remains the owner of when those correlations complete or are interrupted.
+
+## Invariants
+
+1. At most one leader durable operation is active.
+2. A non-empty upstream pagination sequence prevents leader local durable work between pages.
+3. Every admitted leader event remains reserved until durably committed or explicitly rejected.
+4. Leader publication and acknowledgement happen only after a validated durable commit receipt.
+5. `LeaderSyncCommitter` remains the only normal-path owner of state/eventlog transitions.
+6. Provider push and pull work is owned and cancelled by the child state in which it is active.
+7. A provider push waiting for pull reconciliation cannot miss an already-applied replacement plan.
+8. Client optimistic admission updates the live pending suffix synchronously.
+9. Client pull reconciliation interrupts an in-flight leader push before rollback and reconstructs propagation from the
+   latest live pending suffix.
+10. Client rejection recovery replaces, rather than appends to, the complete push plan.
+11. Orderly client shutdown waits for active reconciliation and drains the reconstructed plan; failed shutdown
+    interrupts owned work.
+12. Runtime failure completes correlation registries and notifies the wider session exactly once.
+13. State and eventlog databases still use independent SQLite connections; this experiment does not claim crash-atomic
+    commits across both databases.
+
+## Effect Machine Usage
+
+Machines contain topology and deterministic transition choices. Invoked Effects perform SQLite work, stream
+consumption, network calls, timers, publication, and lifecycle callbacks. Independent relationships are child machines;
+nested states are used when a lifecycle is truly subordinate to its parent.
+
+The implementation keeps state/event schemas and machine construction together. Larger transition bodies delegate
+domain calculations to existing processor helpers. The resulting indentation mirrors ownership: root lifecycle,
+compound state, leaf state, then its event or invocation. Flattening that structure would make the code shorter but
+would hide the hierarchy that provides cancellation and transition semantics.
 
 ## Alternatives Considered
 
-- **Keep semaphore/fiber orchestration and add state labels.** This leaves multiple state owners and cannot reject stale
-  asynchronous completions consistently.
-- **Use a pure event/command state machine.** The experiment made all transitions testable but created a shallow seam:
-  one local commit required separate plan commands, plan-result events, commit commands, and completion events even
-  though only one executor existed. Awaiting durable work in the serialized loop preserves ordering with better locality.
-- **Adopt a general state-machine framework.** The compact loop makes lifecycle and provider states visible without
-  framework-specific interpretation.
-- **Move provider/session orchestration into `LeaderSyncCommitter`.** This would mix durable truth with retry and
-  publication policy and make future hierarchy changes harder.
+- **Keep queue/semaphore orchestration and add state labels.** This still leaves lifecycle ownership distributed across
+  mutable fields and fibers.
+- **Use a pure reducer plus command/result protocol.** This maximizes transition purity but represents each Effect twice
+  and separates a durable operation from the invariant it completes.
+- **Use one combined statechart for durable, push, and pull state.** This creates a Cartesian topology and obscures which
+  relationships are actually independent.
+- **Move client optimistic admission into the machine.** An asynchronous mailbox cannot preserve the synchronous UI
+  visibility contract without another mutable seam, so the adapter is the clearer boundary.
+- **Move orchestration into `LeaderSyncCommitter`.** This mixes durable truth with retries, network lifecycle, session
+  publication, and shutdown policy.
 
 ## Open Questions
 
+- Whether the child-machine protocols should become reusable internal abstractions after more production experience.
+- Whether machine-level trace visualization would be useful enough to expose through devtools.
 - Whether a future storage format should use one attached SQLite transaction or a recovery protocol for cross-database
   crash consistency.
-- Whether deterministic materialization failures under `onSyncError: "ignore"` should become a public typed push error
-  rather than stopping synchronization without shutting down the host.
