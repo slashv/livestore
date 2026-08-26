@@ -111,11 +111,11 @@ flowchart TB
   Journal --> Committer[LeaderSyncCommitter]
   StateHead --> Committer
   EventlogDb --> Committer
-  Committer --> Loop[LeaderSyncLoop]
-  Processor[LeaderSyncProcessor] --> Loop
-  Loop --> Provider[SyncBackend adapter]
-  Loop --> SessionQueues[Session publication adapter]
-  Loop --> Shutdown[ShutdownChannel]
+  Committer --> Processor[LeaderSyncProcessor]
+  LeaderLayer --> Processor
+  Processor --> Provider[SyncBackend adapter]
+  Processor --> SessionQueues[Session publication adapter]
+  Processor --> Shutdown[ShutdownChannel]
 ```
 
 ## Alternatives Considered

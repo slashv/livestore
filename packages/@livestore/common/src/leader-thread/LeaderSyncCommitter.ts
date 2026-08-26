@@ -1,15 +1,3 @@
-/**
- * Durable SQLite boundary for leader-sync transitions.
- *
- * `commitLocal` and `commitUpstream` own the complete persistent transition: rollback/equalization, event
- * materialization, MaterializationJournal maintenance, eventlog inserts, state/backend heads, sync metadata, and
- * coordinated commits of the state and eventlog databases. Inputs remain unchanged and success returns an immutable
- * receipt that the loop can safely publish.
- *
- * This service does not own provider/session queues, retries, publication, acknowledgements, or in-memory sync state.
- * SQLite cannot make two independent database files crash-atomic; the implementation commits state first so a failed
- * state commit cannot leave an eventlog head claiming that an unapplied state transition is durable.
- */
 import type { Schema } from '@livestore/utils/effect'
 import { Context, Effect, Layer, Option } from '@livestore/utils/effect'
 
@@ -71,6 +59,17 @@ export interface Service {
   readonly resetLocalDatabases: Effect.Effect<void, UnknownError>
 }
 
+/**
+ * Durable SQLite boundary for leader-sync transitions.
+ *
+ * `commitLocal` and `commitUpstream` handle rollback, materialization, journal maintenance, eventlog writes, and head
+ * updates. They return immutable receipts so the processor publishes exactly what was committed, without changing the
+ * caller's plan in place.
+ *
+ * Provider and session queues, retries, publication, acknowledgements, and in-memory sync state stay in
+ * `LeaderSyncProcessor`. The two SQLite databases cannot be crash-atomic together; state is committed first so the
+ * eventlog never claims that a state transition was durable when the state commit itself failed.
+ */
 export class LeaderSyncCommitter extends Context.Service<LeaderSyncCommitter, Service>()(
   '@livestore/common/LeaderSyncCommitter',
 ) {}
@@ -88,6 +87,8 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
     ) =>
       Effect.forEach(events, (event) =>
         Effect.gen(function* () {
+          // Materialization may enrich the event, so work on a copy and return that committed version in the receipt.
+          // This keeps the caller's plan immutable and makes publication use the exact durable value.
           const eventToMaterialize = cloneEvent(event)
           const syncMetadata =
             pulledEvents.find(({ event: pulledEvent }) =>
@@ -135,6 +136,8 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
           const rollbackEventNums = plan.rollbackEvents.map((event) => event.seqNum)
 
           if (rollbackEventNums.length > 0) {
+            // A rebase first restores the old materialized state, then removes the events that no longer belong
+            // in the eventlog. The replacement events can then be applied from the restored head.
             const headAfterRollback = plan.rollbackEvents[0]!.parentSeqNum
             yield* materializationJournal.rollback(rollbackEventNums)
             yield* stateHead.set(headAfterRollback).pipe(Effect.mapError((cause) => MaterializeError.make({ cause })))
@@ -146,6 +149,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
           const materialized = yield* materializeEvents(plan.events, plan.pulledEvents)
 
           if (plan.confirmedEvents.length > 0) {
+            // Confirmed local events are already materialized. We only add the metadata learned from the backend.
             const confirmedPulledEvents = plan.pulledEvents.filter(({ event }) =>
               plan.confirmedEvents.some((confirmedEvent) => isSameEventPosition(event.seqNum, confirmedEvent.seqNum)),
             )
@@ -154,6 +158,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
             )
           }
 
+          // Once the backend has reached this head, journal entries before it are no longer needed for a future rebase.
           yield* materializationJournal.discardUpTo(plan.backendHead)
 
           // The backend head and the corresponding event inserts share this eventlog transaction.
@@ -184,6 +189,8 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
 
     const resetLocalDatabases = Effect.try({
       try: () => {
+        // A backend identity change means none of the local materialized state can be trusted. Clearing both
+        // databases lets the normal boot path rebuild them from the new backend.
         dbEventlog.execute(sql`DELETE FROM ${EVENTLOG_META_TABLE}`)
         dbEventlog.execute(sql`DELETE FROM ${SYNC_STATUS_TABLE}`)
         const tables = dbState.select<{ name: string }>(
@@ -204,6 +211,7 @@ const withCoordinatedTransactions = <A, E, R>(
   { dbState, dbEventlog }: { dbState: SqliteDb; dbEventlog: SqliteDb },
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | MaterializeError, R> => {
+  // These flags let cleanup roll back whichever transaction was actually opened or left behind by a failed commit.
   let stateTransactionOpen = false
   let eventlogTransactionOpen = false
 
@@ -234,7 +242,11 @@ const withCoordinatedTransactions = <A, E, R>(
     eventlogTransactionOpen = false
 
     return result
-  }).pipe(Effect.ensuring(rollbackOpenTransactions), Effect.uninterruptible)
+  }).pipe(
+    Effect.ensuring(rollbackOpenTransactions),
+    // Do not allow cancellation between the two commits and the cleanup that follows a failure.
+    Effect.uninterruptible,
+  )
 }
 
 const executeTransactionStatement = (db: SqliteDb, statement: 'BEGIN TRANSACTION' | 'COMMIT' | 'ROLLBACK') =>
