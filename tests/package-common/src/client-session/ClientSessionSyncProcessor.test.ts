@@ -819,11 +819,8 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
     return SyncState.PayloadUpstreamAdvance.make({ newEvents: [remoteEvent] })
   })
 
-  // F1 no-loss oracle (Fix for #1465 §3 torn-`syncStateRef` race): a `push` admitted while the pull
-  // fiber is parked mid-rebase — right before the queue reconcile ("discard" step) — must NOT be lost.
-  // The guard is the atomic reconcile re-reading the LIVE `syncStateRef.current.pending`. Reverting the
-  // reconcile to the stale `mergeResult.newSyncState.pending` snapshot makes this test fail (the
-  // concurrently-admitted event is cleared from the queue and never re-offered → never pushed).
+  // F1 no-loss oracle (Fix for #1465 §3 torn-`syncStateRef` race): a `push` admitted while the mailbox
+  // is parked mid-rebase must remain pending, be published, and eventually reach the leader.
   Vitest.it.effect('does not lose a push admitted during the rebase discard window', (test) =>
     Effect.gen(function* () {
       const pullQueue = yield* Queue.unbounded<typeof SyncState.PayloadUpstream.Type>()
@@ -861,12 +858,18 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       yield* Queue.offer(pullQueue, yield* makeConflictingUpstream(processor))
       yield* reconcileBarrier.awaitReached
 
-      // Concurrently admit a new push while the rebase is parked (models a `store.commit()` landing
-      // during a rebase). It appends to `syncStateRef.current.pending` and to the leader push queue.
+      // Concurrently admit a new push while the rebase is parked (models a synchronous `store.commit()`).
       yield* pushIds(['concurrent'])
 
-      // Resume the rebase: the reconcile must re-read the LIVE pending and preserve 'concurrent'.
+      // Discard both synchronous admission notifications. The next change must be the completed pull publication.
+      yield* processor.syncState.changes.pipe(Stream.take(2), Stream.runDrain)
+      const publishedFiber = yield* processor.syncState.changes.pipe(Stream.take(1), Stream.runHead, Effect.forkChild)
+
+      // Resume the rebase: it must re-read the live pending suffix and preserve 'concurrent'.
       yield* reconcileBarrier.release
+      const publishedState = yield* Fiber.join(publishedFiber)
+      assert(Option.isSome(publishedState))
+      expect(publishedState.value.pending.map((event) => event.args.id)).toContain('concurrent')
 
       // Draining via orderly shutdown flushes every queued event to the leader.
       yield* close()
@@ -877,11 +880,8 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
     }).pipe(withTestCtx(test)),
   )
 
-  // F1 no-loss oracle for shutdown↔rebase (guarded by the `pullReconciliationMutex` permit shared by the
-  // pull tap and `runShutdown`): an orderly shutdown that interleaves a rebase at any point of the
-  // discard→re-offer window must still flush the rebased pending event. Removing the permit from
-  // `runShutdown` makes the pre-reconcile cases (points 1/2) fail — the queue is ended and the pull
-  // fiber interrupted before the rebased event is re-offered.
+  // Shutdown enters the same mailbox as pull reconciliation. Even when requested at an async rebase barrier, it must
+  // run after that pull turn and flush the complete rebased suffix.
   for (const barrierPoint of [
     'before_leader_push_fiber_interrupt',
     'before_queue_reconcile',
@@ -921,9 +921,7 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
         yield* Queue.offer(pullQueue, yield* makeConflictingUpstream(processor))
         yield* barrier.awaitReached
 
-        // Start an orderly shutdown while the rebase is parked. The success path takes the
-        // `pullReconciliationMutex` permit still held by the parked pull fiber, so it cannot end the queue
-        // until the rebase releases the permit (i.e. after re-offering the rebased pending event).
+        // Shutdown is queued behind the active pull turn, so it cannot drain until the rebase has rebuilt propagation.
         const closeFiber = yield* close().pipe(Effect.forkChild)
         yield* barrier.release
         yield* Fiber.join(closeFiber)
