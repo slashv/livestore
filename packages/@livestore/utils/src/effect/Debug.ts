@@ -194,16 +194,8 @@ const ensureTracerPatched = (tracer: Tracer.Tracer) => {
   }
 }
 
-interface ScopeImpl extends Scope.Scope {
-  readonly state:
-    | {
-        readonly _tag: 'Open'
-        readonly finalizers: Map<{}, (exit: Exit.Exit<unknown, unknown>) => Effect.Effect<unknown>>
-      }
-    | {
-        readonly _tag: 'Closed'
-        readonly exit: Exit.Exit<unknown, unknown>
-      }
+interface ScopeImpl {
+  readonly state: Scope.Scope['state']
 }
 
 const knownScopes = new Map<

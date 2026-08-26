@@ -77,3 +77,6 @@ enableGlobalVirtualStore: true
 
 # Allow example apps to use published package versions but link to their local matching workspace packages instead of published releases.
 linkWorkspacePackages: true
+
+minimumReleaseAgeExclude:
+  - '@typeonce/effect-machine@0.26.2'

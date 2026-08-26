@@ -57,7 +57,7 @@ export type RebaseBarrierPoint =
   | 'before_queue_reconcile'
   | 'before_leader_push_fiber_run'
 
-const jsonStringify = Schema.encodeSync(Schema.UnknownFromJsonString)
+const jsonStringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 
 /**
  * Coordinates optimistic session commits with the leader.

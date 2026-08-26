@@ -7,7 +7,7 @@ import { Cli } from '@livestore/utils/node'
 
 import { appendGithubSummaryMarkdown, formatMarkdownTable } from '../shared/misc.ts'
 
-class PackageJsonParseError extends Schema.TaggedErrorClass<PackageJsonParseError>()('PackageJsonParseError', {
+class PackageJsonParseError extends Schema.TaggedError<PackageJsonParseError>()('PackageJsonParseError', {
   message: Schema.String,
   cause: Schema.Defect(),
 }) {}

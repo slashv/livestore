@@ -1,5 +1,5 @@
 import { shouldNeverHappen } from '@livestore/utils'
-import { Schema, SchemaAST, SchemaTransformation, Struct } from '@livestore/utils/effect'
+import { Schema, SchemaAST, Struct } from '@livestore/utils/effect'
 
 import { SessionIdSymbol } from '../../../../session-id-symbol.ts'
 import type { SqlValue } from '../../../../util.ts'
@@ -48,7 +48,7 @@ const getJsonArrayElementSchema = (colSchema: Schema.Top): Schema.Top | undefine
 }
 
 const hasJsonStringEncoding = (ast: SchemaAST.AST): boolean =>
-  ast.encoding?.some((link) => link.transformation === SchemaTransformation.fromJsonString) === true
+  ast.encoding?.some((link) => link.to.annotations?.contentMediaType === 'application/json') === true
 
 /**
  * Encodes a JSON array element to the representation returned by SQLite's json_each().

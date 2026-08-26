@@ -93,7 +93,7 @@ export const headOrElse: {
               ? Effect.succeed(Array.headNonEmpty(array))
               : orElse === undefined
                 ? Effect.fail(
-                    new SchemaIssue.InvalidValue(Option.some(array), {
+                    new SchemaIssue.InvalidValue({
                       message: 'Unable to retrieve the first element of an empty array',
                     }),
                   )

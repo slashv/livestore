@@ -10,7 +10,7 @@ import type { PreparedBindValues } from './util.ts'
 import { sql } from './util.ts'
 
 /** Parse JSON string to unknown value */
-const jsonParse = Schema.decodeUnknownSync(Schema.UnknownFromJsonString)
+const jsonParse = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
 export const rematerializeFromEventlog = Effect.fn('@livestore/common:rematerializeFromEventlog')(function* ({
   // TODO re-use this db when bringing back the boot in-memory db implementation

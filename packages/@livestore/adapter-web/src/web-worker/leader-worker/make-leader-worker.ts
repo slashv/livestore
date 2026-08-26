@@ -138,6 +138,8 @@ const makeMessagePortRpcServerProtocol = (port: MessagePort): Layer.Layer<RpcSer
         supportsAck: true,
         supportsTransferables: true,
         supportsSpanPropagation: true,
+        supportsNotifications: true,
+        codecFor: Schema.toCodecJson,
         run: (writeRequest) =>
           Effect.gen(function* () {
             const context = yield* Effect.context<never>()

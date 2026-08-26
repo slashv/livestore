@@ -1,5 +1,5 @@
 import { omitUndefineds } from '@livestore/utils'
-import { type Option, Schema, SchemaAST, SchemaTransformation } from '@livestore/utils/effect'
+import { type Option, Schema, SchemaAST } from '@livestore/utils/effect'
 
 import { hashCode } from '../hash.ts'
 
@@ -93,7 +93,7 @@ const isJsonColumn = (column: Column): boolean => {
 }
 
 const hasJsonStringEncoding = (ast: SchemaAST.AST): boolean => {
-  if (ast.encoding?.some((link) => link.transformation === SchemaTransformation.fromJsonString) === true) {
+  if (ast.encoding?.some((link) => link.to.annotations?.contentMediaType === 'application/json') === true) {
     return true
   }
   return SchemaAST.isUnion(ast) === true && ast.types.some(hasJsonStringEncoding)
