@@ -96,8 +96,8 @@ These values bridge synchronous APIs and external streams. They do not decide wh
 │    ├─ Effect implementations and external correlation registries        │
 │    └─ ClientSessionSyncMachine                                          │
 │         ├─ root: pull reconciliation, failure, drain, shutdown          │
-│         ├─ leader-push child                                             │
-│         └─ leader-pull child                                             │
+│         ├─ leader-push child                                            │
+│         └─ leader-pull child                                            │
 │                          │                                              │
 └──────────────────────────┼──────────────────────────────────────────────┘
                            │ leaderThread.events.push / pull
@@ -105,14 +105,14 @@ These values bridge synchronous APIs and external streams. They do not decide wh
 ┌───────────────────────────── leader thread ─────────────────────────────┐
 │                                                                         │
 │  LeaderSyncProcessor                                                    │
-│    ├─ public service, correlations, and publication read model           │
-│    ├─ private root machine: admission and durable scheduling             │
-│    ├─ local/upstream commit and completion Effects                       │
-│    ├─ LeaderSyncProviderPush child module ───────────► Sync backend      │
-│    ├─ LeaderSyncProviderPull child module ───────────► Sync backend      │
-│    └─ LeaderSyncCommitter                                                │
-│         ├─ state DB                                                      │
-│         └─ eventlog DB                                                   │
+│    ├─ public service, correlations, and publication read model          │
+│    ├─ private root machine: admission and durable scheduling            │
+│    ├─ local/upstream commit and completion Effects                      │
+│    ├─ LeaderSyncProviderPush child module ───────────► Sync backend     │
+│    ├─ LeaderSyncProviderPull child module ───────────► Sync backend     │
+│    └─ LeaderSyncCommitter                                               │
+│         ├─ state DB                                                     │
+│         └─ eventlog DB                                                  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
