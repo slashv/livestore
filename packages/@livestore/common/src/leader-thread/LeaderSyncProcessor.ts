@@ -1,3 +1,5 @@
+import { Machine } from '@typeonce/effect-machine'
+
 import { TRACE_VERBOSE } from '@livestore/utils'
 import {
   type HttpClient,
@@ -9,7 +11,6 @@ import {
   Deferred,
   Effect,
   Layer,
-  Option,
   Queue,
   ReadonlyArray,
   Ref,
@@ -19,17 +20,18 @@ import {
   SubscriptionRef,
 } from '@livestore/utils/effect'
 
-import { type SqliteDb, UnknownError } from '../adapter-types.ts'
+import { UnknownError } from '../adapter-types.ts'
 import { PullItem } from '../ClientSessionLeaderThreadProxy.ts'
 import { IntentionalShutdownCause } from '../errors.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
+import type { BackendIdMismatchError } from '../sync/errors.ts'
 import type * as SyncBackend from '../sync/sync-backend.ts'
 import * as SyncState from '../sync/syncstate.ts'
-import * as Eventlog from './eventlog.ts'
 import * as LeaderSyncCommitter from './LeaderSyncCommitter.ts'
-import * as LeaderSyncMachine from './LeaderSyncMachine.ts'
+import * as ProviderPull from './LeaderSyncProviderPull.ts'
+import * as ProviderPush from './LeaderSyncProviderPush.ts'
 import {
   LeaderAheadError,
   NonContiguousBatchError,
@@ -44,11 +46,11 @@ export const TypeId = '~@livestore/common/LeaderSyncProcessor' as const
 export type TypeId = typeof TypeId
 
 /**
- * Public boundary for the Effect Machine leader-sync coordinator.
+ * Public interface and implementation module for leader sync.
  *
- * The root machine serializes admissions and durable work. Provider pull and push are state-owned child machines, so
- * their retries and cancellation semantics are visible without nesting their Cartesian product into the coordinator.
- * `LeaderSyncCommitter` remains the deep durability seam.
+ * The private root machine below owns admission order, commit order, and the canonical sync state. Provider push and
+ * pull are deep child modules because each owns an independent retrying lifecycle. `LeaderSyncCommitter` remains the
+ * durability interface.
  */
 export class LeaderSyncProcessor extends Context.Service<LeaderSyncProcessor, Service>()(
   '@livestore/common/LeaderSyncProcessor',
@@ -109,36 +111,47 @@ export const make = Effect.fnUntraced(function* ({
   const syncCommitter = yield* LeaderSyncCommitter.LeaderSyncCommitter
   const { devtoolsLatch, shutdownChannel, span, syncBackend } = runtime
 
-  const syncStateRef = yield* SubscriptionRef.make(initialSyncState)
+  // This is a public read model. Scheduling and commits read only the sync state owned by the root machine.
+  const syncStateView = yield* SubscriptionRef.make(initialSyncState)
   const connectedSessions = yield* makePullQueueSet
   const bootDeferred = yield* Deferred.make<EventSequenceNumber.Client.Composite>()
-  const machineRuntime = yield* Deferred.make<LeaderSyncMachine.Runtime>()
+  const machineRuntime = yield* Deferred.make<CoordinatorRuntime>()
   const nextLocalRequestId = yield* Ref.make(1)
-  const nextPullBatchId = yield* Ref.make(1)
   const localRequests = yield* Ref.make<LocalRequestRegistry>({ _tag: 'open', requests: new Map() })
-  const pullBatches = yield* Ref.make(new Map<LeaderSyncMachine.PullBatchId, Deferred.Deferred<void>>())
   const bootStarted = yield* Ref.make(false)
   const stopStarted = yield* Ref.make(false)
 
+  const providerPull = yield* ProviderPull.make({
+    syncBackend,
+    devtoolsLatch,
+    dbEventlog,
+    live: livePull,
+    initialBlockingSyncContext,
+  })
+  const ProviderPushChild = ProviderPush.make({
+    syncBackend,
+    devtoolsLatch,
+    batchSize: params.backendPushBatchSize ?? 50,
+  })
+  const ProviderPullChild = providerPull.child
+
+  const localCommitBatchSize = params.localPushBatchSize ?? 10
+  const localWorkInitiallyBlocked = testing.delays?.localPushProcessing !== undefined
   const isClientOnlyEvent = (event: LiveStoreEvent.Client.Encoded) =>
     schema.eventsDefsMap.get(event.name)?.options.clientOnly ?? false
 
-  const publish = (args: {
-    syncState: SyncState.SyncState
-    payload: typeof SyncState.PayloadUpstream.Type
-    materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
-  }) =>
+  const publish = (publication: Publication) =>
     Effect.gen(function* () {
-      yield* SubscriptionRef.set(syncStateRef, args.syncState)
+      yield* SubscriptionRef.set(syncStateView, publication.syncState)
       yield* connectedSessions.offer({
-        payload: args.payload,
-        globalHead: args.syncState.upstreamHead,
-        leaderHead: args.syncState.localHead,
-        materializerHashes: args.materializerHashes,
+        payload: publication.payload,
+        globalHead: publication.syncState.upstreamHead,
+        leaderHead: publication.syncState.localHead,
+        materializerHashes: publication.materializerHashes,
       })
     })
 
-  const processLocal: LeaderSyncMachine.Dependencies['processLocal'] = (syncState, items) =>
+  const commitLocal = (syncState: SyncState.SyncState, items: ReadonlyArray<LocalItem>) =>
     Effect.gen(function* () {
       const currentGeneration = syncState.localHead.rebaseGeneration
       const staleItems = items.filter((item) => item.event.seqNum.rebaseGeneration < currentGeneration)
@@ -190,24 +203,23 @@ export const make = Effect.fnUntraced(function* ({
       }
 
       const committedSyncState = replacePendingEvents(merge.newSyncState, receipt.committedEvents)
-      yield* publish({
-        syncState: committedSyncState,
-        payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents }),
-        materializerHashes: receipt.materializerHashes,
-      })
       return {
         _tag: 'committed' as const,
         syncState: committedSyncState,
         items,
         pushEvents: receipt.committedEvents.filter((event) => !isClientOnlyEvent(event)),
+        publication: {
+          syncState: committedSyncState,
+          payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents }),
+          materializerHashes: receipt.materializerHashes,
+        },
       }
     })
 
-  const processUpstream: LeaderSyncMachine.Dependencies['processUpstream'] = (syncState, batch) =>
+  const commitUpstream = (syncState: SyncState.SyncState, batch: ProviderPull.UpstreamBatch) =>
     Effect.gen(function* () {
       if (batch.events.length === 0) {
-        yield* completePullBatch(pullBatches, batch.batchId)
-        return { syncState, batch, pushPlan: undefined }
+        return { syncState, batch, pushPlan: undefined, publication: undefined }
       }
       const merge = yield* SyncState.merge({
         syncState,
@@ -246,24 +258,41 @@ export const make = Effect.fnUntraced(function* ({
         merge._tag === 'rebase'
           ? SyncState.PayloadUpstreamRebase.make({ rollbackEvents, newEvents: receipt.committedEvents })
           : SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents })
-      yield* publish({ syncState: committedSyncState, payload, materializerHashes: receipt.materializerHashes })
-      yield* completePullBatch(pullBatches, batch.batchId)
       return {
         syncState: committedSyncState,
         batch,
         pushPlan: committedSyncState.pending.filter((event) => !isClientOnlyEvent(event)),
+        publication: { syncState: committedSyncState, payload, materializerHashes: receipt.materializerHashes },
       }
     })
 
-  const settleLocal: LeaderSyncMachine.Dependencies['settleLocal'] = (result) =>
-    result._tag === 'committed'
-      ? completeLocalItems(localRequests, result.items)
-      : rejectLocalItems(
+  const completeLocal = (result: LocalWorkResult, appendProviderPush: (events: EventBatch) => Effect.Effect<void>) =>
+    result._tag === 'rejected'
+      ? rejectLocalItems(
           localRequests,
           result.items.map((item) => ({ item, error: result.error })),
         )
+      : Effect.gen(function* () {
+          yield* publish(result.publication)
+          if (result.pushEvents.length > 0) {
+            yield* appendProviderPush(result.pushEvents)
+          }
+          yield* completeLocalItems(localRequests, result.items)
+        })
 
-  const stop: LeaderSyncMachine.Dependencies['stop'] = (request) =>
+  const completeUpstream = (
+    result: UpstreamWorkResult,
+    replaceProviderPushPlan: (events: EventBatch) => Effect.Effect<void>,
+  ) =>
+    Effect.gen(function* () {
+      if (result.publication !== undefined) yield* publish(result.publication)
+      if (result.pushPlan !== undefined) {
+        yield* replaceProviderPushPlan(result.pushPlan)
+      }
+      yield* providerPull.complete(result.batch.batchId)
+    })
+
+  const stop = (request: TerminationRequest) =>
     Effect.gen(function* () {
       const shouldStop = yield* Ref.modify(stopStarted, (started) => [started === false, true])
       if (shouldStop === false) return
@@ -291,44 +320,299 @@ export const make = Effect.fnUntraced(function* ({
           .pipe(Effect.exit)
       }
 
-      yield* Effect.all([interruptAllLocalRequests(localRequests), interruptAllPullBatches(pullBatches)])
+      yield* Effect.all([interruptAllLocalRequests(localRequests), providerPull.interruptAll])
     })
 
-  const machineDependencies: LeaderSyncMachine.Dependencies = {
-    initialSyncState,
-    config: {
-      backendEnabled: syncBackend !== undefined,
-      localCommitBatchSize: params.localPushBatchSize ?? 10,
-      backendPushBatchSize: params.backendPushBatchSize ?? 50,
-      localWorkInitiallyBlocked: testing.delays?.localPushProcessing !== undefined,
-      onError,
-      onBackendIdMismatch,
-    },
-    isClientOnlyEvent,
-    validatePushBatch: (batch, pushHead) => validatePushBatch(batch, pushHead, isClientOnlyEvent),
-    processLocal,
-    processUpstream,
-    settleLocal,
-    stop,
-    providerPush: (batch) =>
-      syncBackend === undefined
-        ? Effect.die(new Error('Provider push started without a sync backend'))
-        : providerPush(syncBackend, devtoolsLatch, batch),
-    providerPull: (cursor, parent) =>
-      syncBackend === undefined
-        ? Effect.die(new Error('Provider pull started without a sync backend'))
-        : providerPull({
-            cursor,
-            live: livePull,
-            syncBackend,
-            devtoolsLatch,
-            dbEventlog,
-            pullBatches,
-            nextPullBatchId,
-            initialBlockingSyncContext,
-            parent,
-          }),
-  }
+  const initialRunningData = (): RunningData => ({
+    syncState: initialSyncState,
+    admissions: [],
+    localQueue: [],
+    reservations: [],
+    upstreamQueue: [],
+    localWorkEnabled: localWorkInitiallyBlocked === false,
+    pullPagination: 'between-pages',
+    termination: undefined,
+  })
+
+  const makeMachine = () =>
+    Machine.make({
+      id: 'LeaderSyncProcessor',
+      states: LeaderSyncStates.states,
+      events: LeaderSyncEvents,
+      internalEvents: InternalEvents,
+      initial: (to) => to.Starting(),
+    }).handle({
+      Starting: {
+        on: {
+          Boot: (to) =>
+            to.full
+              .Running()
+              .resolve(({ target }) => target.from(initialRunningData(), (running) => running.Idle.from())),
+          ShutdownRequested: (to) =>
+            to.full.Stopping().resolve(({ target }) => target.from({ request: { _tag: 'shutdown' } })),
+        },
+      },
+      Running: {
+        invoke: (from) => [
+          from
+            .child(ProviderPushChild, {
+              input: ({ state }) => ({
+                queued: state.syncState.pending.filter((event) => !isClientOnlyEvent(event)),
+              }),
+            })
+            .onFailure((to) =>
+              to.none.resolve(({ error }, enqueue) => {
+                enqueue.raise(InternalEvents.ChildFailed({ error }))
+              }),
+            ),
+          from
+            .child(ProviderPullChild, { input: ({ state }) => ({ cursor: state.syncState.upstreamHead }) })
+            .onFailure((to) =>
+              to.none.resolve(({ error }, enqueue) => {
+                enqueue.raise(InternalEvents.ChildFailed({ error }))
+              }),
+            ),
+        ],
+        on: {
+          PushRequested: (to) =>
+            to.local.update(({ current, event, owner }) =>
+              owner.from({ ...current, admissions: [...current.admissions, event] }),
+            ),
+          LocalWorkEnabled: (to) =>
+            to.local.update(({ current, owner }) => owner.from({ ...current, localWorkEnabled: true })),
+          UpstreamBatchReceived: (to) =>
+            to.local.update(({ current, event, owner }) => {
+              const { batch } = event
+              return owner.from({
+                ...current,
+                pullPagination: batch.pageInfo._tag === 'NoMore' ? 'between-pages' : 'more-expected',
+                upstreamQueue: [...current.upstreamQueue, batch],
+              })
+            }),
+          PullCompleted: (to) =>
+            to.local.update(({ current, owner }) => owner.from({ ...current, pullPagination: 'between-pages' })),
+          ProviderPullFailed: (to) =>
+            to.local.update(({ current, event, owner }) =>
+              owner.from({
+                ...current,
+                pullPagination: 'between-pages',
+                termination: terminationFor({ onError, onBackendIdMismatch }, event.error),
+              }),
+            ),
+          ProviderPushFailed: (to) =>
+            to.local.update(({ current, event, owner }, enqueue) => {
+              if (event.error._tag === 'ServerAheadError') {
+                const pulledThroughRequiredHead =
+                  current.syncState.upstreamHead.global >= event.error.minimumExpectedNum - 1
+                if (pulledThroughRequiredHead === true) {
+                  enqueue.sendTo(
+                    ProviderPushChild,
+                    ProviderPush.Events.ReplacePlan({
+                      events: current.syncState.pending.filter((item) => !isClientOnlyEvent(item)),
+                    }),
+                  )
+                }
+                return owner.from(current)
+              }
+              const termination = terminationFor({ onError, onBackendIdMismatch }, event.error)
+              if (termination === undefined) enqueue.sendTo(ProviderPushChild, ProviderPush.Events.Disable())
+              return owner.from({ ...current, termination })
+            }),
+          ChildFailed: (to) =>
+            to.local.update(({ current, event, owner }) =>
+              owner.from({ ...current, termination: { _tag: 'failure', error: event.error, notify: true } }),
+            ),
+          ShutdownRequested: (to) =>
+            to.local.update(({ current, owner }) => owner.from({ ...current, termination: { _tag: 'shutdown' } })),
+        },
+        states: {
+          Idle: {
+            always: (to) =>
+              to
+                .branches({
+                  stop: { target: to.full.Stopping() },
+                  admission: { target: to.local.Admitting() },
+                  upstream: { target: to.local.CommittingUpstream() },
+                  local: { target: to.local.CommittingLocal() },
+                })
+                .resolve(
+                  ({ ancestors, decline, select }) => {
+                    const running = ancestors.Running
+                    if (running.termination !== undefined) return select.stop.from({ request: running.termination })
+                    const admission = running.admissions[0]
+                    if (admission !== undefined) return select.admission.from({ admission })
+                    const upstream = running.upstreamQueue[0]
+                    if (upstream !== undefined) return select.upstream.from({ batch: upstream })
+                    if (
+                      running.pullPagination !== 'more-expected' &&
+                      running.localWorkEnabled === true &&
+                      running.localQueue.length > 0
+                    ) {
+                      return select.local.from({ items: running.localQueue.slice(0, localCommitBatchSize) })
+                    }
+                    return decline()
+                  },
+                  { declinable: true },
+                ),
+          },
+          Admitting: {
+            invoke: (from) =>
+              from
+                .effect('admit-local-push', ({ ancestors, state }) => {
+                  const pushHead =
+                    ancestors.Running.reservations.at(-1)?.event.seqNum ?? ancestors.Running.syncState.localHead
+                  const error = validatePushBatch(state.admission.events, pushHead, isClientOnlyEvent)
+                  const items = state.admission.events.map((event, index) => ({
+                    requestId: state.admission.requestId,
+                    index,
+                    event,
+                  }))
+                  const result: AdmissionResult = { admission: state.admission, items, error }
+                  return error === undefined
+                    ? (testing.hooks?.localPushAdmitted?.(state.admission.events) ?? Effect.void).pipe(
+                        Effect.as(result),
+                      )
+                    : rejectLocalItems(
+                        localRequests,
+                        items.map((item) => ({ item, error })),
+                      ).pipe(Effect.as(result))
+                })
+                .onDone((to) =>
+                  to.local
+                    .Idle()
+                    .updating(to.branch.Running)
+                    .resolve(({ ancestors, output, owner, target }) => {
+                      const current = ancestors.Running
+                      const admissions = current.admissions.filter(
+                        (admission) => admission.requestId !== output.admission.requestId,
+                      )
+                      return target.from().update(
+                        owner.from(
+                          output.error === undefined
+                            ? {
+                                ...current,
+                                admissions,
+                                localQueue: [...current.localQueue, ...output.items],
+                                reservations: [...current.reservations, ...output.items],
+                              }
+                            : { ...current, admissions },
+                        ),
+                      )
+                    }),
+                ),
+          },
+          CommittingLocal: {
+            invoke: (from) =>
+              from
+                .effect('commit-local', ({ ancestors, state }) => commitLocal(ancestors.Running.syncState, state.items))
+                .onDone((to) =>
+                  to.local
+                    .CompletingLocal()
+                    .updating(to.branch.Running)
+                    .resolve(({ ancestors, output, owner, target }) => {
+                      const current = ancestors.Running
+                      if (output._tag === 'rejected') {
+                        const generation = output.items[0]?.event.seqNum.rebaseGeneration
+                        const rejectedItems = current.localQueue.filter(
+                          (item) => item.event.seqNum.rebaseGeneration === generation,
+                        )
+                        const rejectedKeys = new Set(rejectedItems.map(localItemKey))
+                        return target.from({ result: { ...output, items: rejectedItems } }).update(
+                          owner.from({
+                            ...current,
+                            localQueue: current.localQueue.filter((item) => !rejectedKeys.has(localItemKey(item))),
+                            reservations: current.reservations.filter((item) => !rejectedKeys.has(localItemKey(item))),
+                          }),
+                        )
+                      }
+                      const completedKeys = new Set(output.items.map(localItemKey))
+                      return target.from({ result: output }).update(
+                        owner.from({
+                          ...current,
+                          syncState: output.syncState,
+                          localQueue: current.localQueue.filter((item) => !completedKeys.has(localItemKey(item))),
+                          reservations: current.reservations.filter((item) => !completedKeys.has(localItemKey(item))),
+                        }),
+                      )
+                    }),
+                )
+                .onFailure((to) =>
+                  to.local
+                    .Idle()
+                    .updating(to.branch.Running)
+                    .resolve(({ ancestors, error, owner, target }) =>
+                      target.from().update(
+                        owner.from({
+                          ...ancestors.Running,
+                          termination: { _tag: 'failure', error, notify: onError === 'shutdown' },
+                        }),
+                      ),
+                    ),
+                ),
+          },
+          CompletingLocal: {
+            invoke: (from) =>
+              from
+                .effect('complete-local', ({ children, state }) =>
+                  completeLocal(state.result, (events) =>
+                    children.sendTo(ProviderPushChild, ProviderPush.Events.Append({ events })).pipe(Effect.orDie),
+                  ),
+                )
+                .onDone((to) => to.local.Idle()),
+          },
+          CommittingUpstream: {
+            invoke: (from) =>
+              from
+                .effect('commit-upstream', ({ ancestors, state }) =>
+                  commitUpstream(ancestors.Running.syncState, state.batch),
+                )
+                .onDone((to) =>
+                  to.local
+                    .CompletingUpstream()
+                    .updating(to.branch.Running)
+                    .resolve(({ ancestors, output, owner, target }) =>
+                      target.from({ result: output }).update(
+                        owner.from({
+                          ...ancestors.Running,
+                          syncState: output.syncState,
+                          upstreamQueue: ancestors.Running.upstreamQueue.filter(
+                            (batch) => batch.batchId !== output.batch.batchId,
+                          ),
+                        }),
+                      ),
+                    ),
+                )
+                .onFailure((to) =>
+                  to.local
+                    .Idle()
+                    .updating(to.branch.Running)
+                    .resolve(({ ancestors, error, owner, target }) =>
+                      target.from().update(
+                        owner.from({
+                          ...ancestors.Running,
+                          termination: { _tag: 'failure', error, notify: onError === 'shutdown' },
+                        }),
+                      ),
+                    ),
+                ),
+          },
+          CompletingUpstream: {
+            invoke: (from) =>
+              from
+                .effect('complete-upstream', ({ children, state }) =>
+                  completeUpstream(state.result, (events) =>
+                    children.sendTo(ProviderPushChild, ProviderPush.Events.ReplacePlan({ events })).pipe(Effect.orDie),
+                  ),
+                )
+                .onDone((to) => to.local.Idle()),
+          },
+        },
+      },
+      Stopping: {
+        invoke: (from) => from.effect('stop', ({ state }) => stop(state.request)).onDone((to) => to.full.Stopped()),
+      },
+      Stopped: {},
+    })
 
   const push: Service['push'] = (events) =>
     Effect.gen(function* () {
@@ -347,7 +631,7 @@ export const make = Effect.fnUntraced(function* ({
       })
       if (admitted === false) return yield* Effect.interrupt
       const machine = yield* Deferred.await(machineRuntime)
-      yield* machine.send(LeaderSyncMachine.LeaderSyncEvents.PushRequested({ requestId, events }))
+      yield* machine.send(LeaderSyncEvents.PushRequested({ requestId, events }))
       yield* Deferred.await(deferred)
     }).pipe(
       Effect.withSpan('@livestore/common:LeaderSyncProcessor:push', {
@@ -360,24 +644,28 @@ export const make = Effect.fnUntraced(function* ({
     const shouldStart = yield* Ref.modify(bootStarted, (started) => [started === false, true])
     if (shouldStart === false) return { initialLeaderHead: yield* Deferred.await(bootDeferred) }
 
-    const machine = yield* LeaderSyncMachine.start(machineDependencies, (emission) =>
-      emission._tag === 'LocalPushAdmitted'
-        ? (testing.hooks?.localPushAdmitted?.(emission.events) ?? Effect.void)
-        : Effect.void,
+    const ref = yield* Machine.start(makeMachine()).pipe(Effect.orDie)
+    const stopped = yield* Deferred.make<void>()
+    yield* ref.join.pipe(
+      Effect.catchCause((cause) => stop({ _tag: 'failure', error: cause, notify: true })),
+      Effect.ensuring(Deferred.succeed(stopped, undefined)),
+      Effect.forkScoped,
     )
+    const machine: CoordinatorRuntime = {
+      send: (event) => ref.send(event).pipe(Effect.ignore),
+      join: Deferred.await(stopped),
+    }
     yield* Deferred.succeed(machineRuntime, machine)
-    yield* machine.send(LeaderSyncMachine.LeaderSyncEvents.Boot())
+    yield* machine.send(LeaderSyncEvents.Boot())
     if (testing.delays?.localPushProcessing !== undefined) {
       yield* testing.delays.localPushProcessing.pipe(
-        Effect.andThen(machine.send(LeaderSyncMachine.LeaderSyncEvents.LocalWorkEnabled())),
+        Effect.andThen(machine.send(LeaderSyncEvents.LocalWorkEnabled())),
         Effect.forkScoped,
       )
     }
     yield* Deferred.succeed(bootDeferred, initialSyncState.localHead)
     yield* Effect.addFinalizer(() =>
-      machine
-        .send(LeaderSyncMachine.LeaderSyncEvents.ShutdownRequested())
-        .pipe(Effect.andThen(machine.join), Effect.ignore),
+      machine.send(LeaderSyncEvents.ShutdownRequested()).pipe(Effect.andThen(machine.join), Effect.ignore),
     )
     return { initialLeaderHead: initialSyncState.localHead }
   }).pipe(Effect.withSpanScoped('@livestore/common:LeaderSyncProcessor:boot'), Effect.uninterruptible)
@@ -393,13 +681,83 @@ export const make = Effect.fnUntraced(function* ({
       }).pipe(Stream.unwrap),
     pullQueue: ({ cursor }) => connectedSessions.makeQueue(cursor),
     syncState: Subscribable.make({
-      get: SubscriptionRef.get(syncStateRef),
-      changes: SubscriptionRef.changes(syncStateRef),
+      get: SubscriptionRef.get(syncStateView),
+      changes: SubscriptionRef.changes(syncStateView),
     }),
   })
 })
 
 export const layer = (options: Options) => Layer.effect(LeaderSyncProcessor, make(options))
+
+type LocalRequestId = number
+type EventBatch = ReadonlyArray<LiveStoreEvent.Client.Encoded>
+
+interface LocalItem {
+  readonly requestId: LocalRequestId
+  readonly index: number
+  readonly event: LiveStoreEvent.Client.Encoded
+}
+
+interface LocalAdmission {
+  readonly requestId: LocalRequestId
+  readonly events: EventBatch
+}
+
+type TerminationRequest =
+  | { readonly _tag: 'shutdown' }
+  | { readonly _tag: 'failure'; readonly error: unknown; readonly notify: boolean }
+  | { readonly _tag: 'reset'; readonly error: BackendIdMismatchError }
+
+interface RunningData {
+  readonly syncState: SyncState.SyncState
+  readonly admissions: ReadonlyArray<LocalAdmission>
+  readonly localQueue: ReadonlyArray<LocalItem>
+  readonly reservations: ReadonlyArray<LocalItem>
+  readonly upstreamQueue: ReadonlyArray<ProviderPull.UpstreamBatch>
+  readonly localWorkEnabled: boolean
+  readonly pullPagination: 'between-pages' | 'more-expected'
+  readonly termination: TerminationRequest | undefined
+}
+
+interface Publication {
+  readonly syncState: SyncState.SyncState
+  readonly payload: typeof SyncState.PayloadUpstream.Type
+  readonly materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
+}
+
+type LocalWorkResult =
+  | {
+      readonly _tag: 'committed'
+      readonly syncState: SyncState.SyncState
+      readonly items: ReadonlyArray<LocalItem>
+      readonly pushEvents: EventBatch
+      readonly publication: Publication
+    }
+  | {
+      readonly _tag: 'rejected'
+      readonly error: RejectedPushError
+      readonly items: ReadonlyArray<LocalItem>
+    }
+
+interface UpstreamWorkResult {
+  readonly syncState: SyncState.SyncState
+  readonly batch: ProviderPull.UpstreamBatch
+  readonly pushPlan: EventBatch | undefined
+  readonly publication: Publication | undefined
+}
+
+interface AdmissionResult {
+  readonly admission: LocalAdmission
+  readonly items: ReadonlyArray<LocalItem>
+  readonly error: RejectedPushError | undefined
+}
+
+interface CoordinatorRuntime {
+  readonly send: (event: LeaderSyncEventInput) => Effect.Effect<void>
+  readonly join: Effect.Effect<void>
+}
+
+type LeaderSyncEventInput = Machine.Machine.EventInputOf<Machine.Machine.EventProtocolSchemas<typeof LeaderSyncEvents>>
 
 interface LocalRequest {
   readonly deferred: Deferred.Deferred<void, RejectedPushError>
@@ -407,87 +765,75 @@ interface LocalRequest {
 }
 
 type LocalRequestRegistry =
-  | { readonly _tag: 'open'; readonly requests: Map<LeaderSyncMachine.LocalRequestId, LocalRequest> }
+  | { readonly _tag: 'open'; readonly requests: Map<LocalRequestId, LocalRequest> }
   | { readonly _tag: 'closed' }
 
-const providerPush = (
-  syncBackend: SyncBackend.SyncBackend,
-  devtoolsLatch: Latch.Latch | undefined,
-  batch: LeaderSyncMachine.EventBatch,
-): Effect.Effect<void, LeaderSyncMachine.ProviderPushError> =>
-  Effect.gen(function* () {
-    yield* SubscriptionRef.waitUntil(syncBackend.isConnected, (connected) => connected === true)
-    if (devtoolsLatch !== undefined) yield* devtoolsLatch.await
-    yield* syncBackend.push(batch.map(LiveStoreEvent.Client.toGlobal))
-  }).pipe(mapDefects('Sync backend push defected'), Effect.interruptible)
+const opaque = <A>(identifier: string) =>
+  Schema.declare<A>((value): value is A => value !== undefined, { identifier, expected: identifier })
 
-const providerPull = ({
-  cursor,
-  live,
-  syncBackend,
-  devtoolsLatch,
-  dbEventlog,
-  pullBatches,
-  nextPullBatchId,
-  initialBlockingSyncContext,
-  parent,
-}: {
-  cursor: EventSequenceNumber.Client.Composite
-  live: boolean
-  syncBackend: SyncBackend.SyncBackend
-  devtoolsLatch: Latch.Latch | undefined
-  dbEventlog: SqliteDb
-  pullBatches: Ref.Ref<Map<LeaderSyncMachine.PullBatchId, Deferred.Deferred<void>>>
-  nextPullBatchId: Ref.Ref<number>
-  initialBlockingSyncContext: InitialBlockingSyncContext
-  parent: MachineTarget
-}): Effect.Effect<void, LeaderSyncMachine.ProviderPullError> =>
-  Effect.gen(function* () {
-    const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: cursor.global })
-    yield* syncBackend.pull(cursorInfo, { live }).pipe(
-      Stream.runForEach(({ batch, pageInfo }) =>
-        Effect.gen(function* () {
-          yield* SubscriptionRef.waitUntil(syncBackend.isConnected, (connected) => connected === true)
-          if (devtoolsLatch !== undefined) yield* devtoolsLatch.await
-          const batchId = yield* Ref.modify(nextPullBatchId, (id) => [id, id + 1])
-          const completion = yield* Deferred.make<void>()
-          yield* Ref.update(pullBatches, (batches) => new Map(batches).set(batchId, completion))
-          const pulledEvents = batch.map((item) => ({
-            event: LiveStoreEvent.Client.fromGlobal(item.eventEncoded),
-            syncMetadata: item.metadata,
-          }))
-          yield* parent
-            .send(
-              LeaderSyncMachine.LeaderSyncEvents.UpstreamBatchReceived({
-                batch: { batchId, events: pulledEvents.map(({ event }) => event), pulledEvents, pageInfo },
-              }),
-            )
-            .pipe(Effect.orDie)
-          yield* Deferred.await(completion)
-          yield* initialBlockingSyncContext.update({ processed: batch.length, pageInfo })
-          yield* Effect.yieldNow
-        }),
-      ),
-    )
-  }).pipe(
-    Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) === true ? Effect.void : Effect.failCause(cause))),
-    mapDefects('Sync backend pull defected'),
-    Effect.interruptible,
-  )
+const LocalItemSchema = opaque<LocalItem>('LeaderSyncProcessor.LocalItem')
+const LocalAdmissionSchema = opaque<LocalAdmission>('LeaderSyncProcessor.LocalAdmission')
+const LocalWorkResultSchema = opaque<LocalWorkResult>('LeaderSyncProcessor.LocalWorkResult')
+const UpstreamWorkResultSchema = opaque<UpstreamWorkResult>('LeaderSyncProcessor.UpstreamWorkResult')
+const UpstreamBatchSchema = opaque<ProviderPull.UpstreamBatch>('LeaderSyncProcessor.UpstreamBatch')
+const TerminationRequestSchema = opaque<TerminationRequest>('LeaderSyncProcessor.TerminationRequest')
 
-type MachineTarget = Parameters<LeaderSyncMachine.Dependencies['providerPull']>[1]
+const State = Schema.TaggedUnion({
+  Running: {
+    syncState: SyncState.SyncState,
+    admissions: Schema.Array(LocalAdmissionSchema),
+    localQueue: Schema.Array(LocalItemSchema),
+    reservations: Schema.Array(LocalItemSchema),
+    upstreamQueue: Schema.Array(UpstreamBatchSchema),
+    localWorkEnabled: Schema.Boolean,
+    pullPagination: Schema.Literals(['between-pages', 'more-expected']),
+    termination: Schema.UndefinedOr(TerminationRequestSchema),
+  },
+  Admitting: { admission: LocalAdmissionSchema },
+  CommittingLocal: { items: Schema.Array(LocalItemSchema) },
+  CompletingLocal: { result: LocalWorkResultSchema },
+  CommittingUpstream: { batch: UpstreamBatchSchema },
+  CompletingUpstream: { result: UpstreamWorkResultSchema },
+  Stopping: { request: TerminationRequestSchema },
+})
 
-const mapDefects =
-  (note: string) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | UnknownError, R> =>
-    Effect.catchCause(effect, (cause): Effect.Effect<never, E | UnknownError> => {
-      const error = Cause.findErrorOption(cause)
-      if (Option.isSome(error) === true) return Effect.fail(error.value)
-      return Effect.fail(UnknownError.make({ cause, note }))
-    })
+const LeaderSyncStates = Machine.states({
+  Starting: {},
+  Running: {
+    schema: State.cases.Running,
+    initial: 'Idle',
+    states: {
+      Idle: {},
+      Admitting: State.cases.Admitting,
+      CommittingLocal: State.cases.CommittingLocal,
+      CompletingLocal: State.cases.CompletingLocal,
+      CommittingUpstream: State.cases.CommittingUpstream,
+      CompletingUpstream: State.cases.CompletingUpstream,
+    },
+  },
+  Stopping: State.cases.Stopping,
+  Stopped: { type: 'final' },
+})
+
+const LeaderSyncEvents = Machine.events(
+  Schema.TaggedUnion({
+    Boot: {},
+    PushRequested: { requestId: Schema.Number, events: Schema.Array(LiveStoreEvent.Client.Encoded) },
+    LocalWorkEnabled: {},
+    ShutdownRequested: {},
+  }),
+  ProviderPush.ParentEvents,
+  ProviderPull.ParentEvents,
+)
+
+const InternalEvents = Machine.internalEvents(
+  Schema.TaggedUnion({
+    ChildFailed: { error: Schema.Defect() },
+  }),
+)
 
 const validatePushBatch = (
-  batch: LeaderSyncMachine.EventBatch,
+  batch: EventBatch,
   pushHead: EventSequenceNumber.Client.Composite,
   isClientOnlyEvent: (event: LiveStoreEvent.Client.Encoded) => boolean,
 ): RejectedPushError | undefined => {
@@ -539,10 +885,7 @@ const validatePushBatch = (
   return undefined
 }
 
-const replacePendingEvents = (
-  syncState: SyncState.SyncState,
-  committedEvents: LeaderSyncMachine.EventBatch,
-): SyncState.SyncState =>
+const replacePendingEvents = (syncState: SyncState.SyncState, committedEvents: EventBatch): SyncState.SyncState =>
   new SyncState.SyncState({
     ...syncState,
     pending: syncState.pending.map(
@@ -553,10 +896,7 @@ const replacePendingEvents = (
     ),
   })
 
-const completeLocalItems = (
-  requestsRef: Ref.Ref<LocalRequestRegistry>,
-  items: ReadonlyArray<LeaderSyncMachine.LocalItem>,
-) =>
+const completeLocalItems = (requestsRef: Ref.Ref<LocalRequestRegistry>, items: ReadonlyArray<LocalItem>) =>
   Effect.gen(function* () {
     const counts = countRequestItems(items)
     const completions: Deferred.Deferred<void, RejectedPushError>[] = []
@@ -581,7 +921,7 @@ const completeLocalItems = (
 
 const rejectLocalItems = (
   requestsRef: Ref.Ref<LocalRequestRegistry>,
-  items: ReadonlyArray<{ readonly item: LeaderSyncMachine.LocalItem; readonly error: RejectedPushError }>,
+  items: ReadonlyArray<{ readonly item: LocalItem; readonly error: RejectedPushError }>,
 ) =>
   Effect.gen(function* () {
     const failures: Array<{ deferred: Deferred.Deferred<void, RejectedPushError>; error: RejectedPushError }> = []
@@ -606,29 +946,8 @@ const interruptAllLocalRequests = (requestsRef: Ref.Ref<LocalRequestRegistry>) =
     yield* Effect.forEach(registry.requests.values(), ({ deferred }) => Deferred.interrupt(deferred), { discard: true })
   })
 
-const interruptAllPullBatches = (batchesRef: Ref.Ref<Map<LeaderSyncMachine.PullBatchId, Deferred.Deferred<void>>>) =>
-  Effect.gen(function* () {
-    const batches = yield* Ref.getAndSet(batchesRef, new Map())
-    yield* Effect.forEach(batches.values(), Deferred.interrupt, { discard: true })
-  })
-
-const completePullBatch = (
-  batchesRef: Ref.Ref<Map<LeaderSyncMachine.PullBatchId, Deferred.Deferred<void>>>,
-  batchId: LeaderSyncMachine.PullBatchId,
-) =>
-  Effect.gen(function* () {
-    let completion: Deferred.Deferred<void> | undefined
-    yield* Ref.update(batchesRef, (current) => {
-      const next = new Map(current)
-      completion = next.get(batchId)
-      next.delete(batchId)
-      return next
-    })
-    if (completion !== undefined) yield* Deferred.succeed(completion, undefined)
-  })
-
-const countRequestItems = (items: ReadonlyArray<LeaderSyncMachine.LocalItem>) => {
-  const counts = new Map<LeaderSyncMachine.LocalRequestId, number>()
+const countRequestItems = (items: ReadonlyArray<LocalItem>) => {
+  const counts = new Map<LocalRequestId, number>()
   for (const item of items) counts.set(item.requestId, (counts.get(item.requestId) ?? 0) + 1)
   return counts
 }
@@ -699,6 +1018,25 @@ const makePullQueueSet = Effect.gen(function* () {
     })
   return { makeQueue, offer }
 })
+
+const terminationFor = (
+  config: { readonly onError: 'shutdown' | 'ignore'; readonly onBackendIdMismatch: 'reset' | 'shutdown' | 'ignore' },
+  error: ProviderPull.ProviderPullError | ProviderPush.ProviderPushError,
+): TerminationRequest | undefined => {
+  if (error._tag === 'BackendIdMismatchError') {
+    switch (config.onBackendIdMismatch) {
+      case 'ignore':
+        return undefined
+      case 'shutdown':
+        return { _tag: 'failure', error, notify: true }
+      case 'reset':
+        return { _tag: 'reset', error }
+    }
+  }
+  return config.onError === 'shutdown' ? { _tag: 'failure', error, notify: true } : undefined
+}
+
+const localItemKey = (item: LocalItem) => `${item.requestId}:${item.index}`
 
 const isSameSequencePosition = (
   left: EventSequenceNumber.Client.Composite,

@@ -23,9 +23,11 @@ This proposal models those lifecycles with `@typeonce/effect-machine`. Each proc
 coordination policy and child machines for independently owned push and pull relationships. States own the Effects they
 invoke, so leaving a state also defines when its network call, stream, timer, or reconciliation work is cancelled.
 
-The processors remain Effect service adapters. They construct SQLite and runtime dependencies, implement domain
-operations, expose the existing public API, and translate external calls and streams into typed machine events. The
-machines decide what can happen next and own the asynchronous lifecycle.
+The leader machine is a private implementation detail of `LeaderSyncProcessor`, not a peer module connected through a
+broad dependency object. The root topology and the local/upstream Effects it schedules are colocated. Provider push and
+pull are separate deep modules because each owns a complete independently retrying lifecycle. The client-session
+experiment retains a processor/machine split because it also has a synchronous Store-facing lane; that split remains an
+area to evaluate separately.
 
 This is a framework-driven state machine, but not a pure reducer plus command interpreter. Effect Machine transitions
 select topology and update state, while invoked Effects perform the actual durable, network, publication, and shutdown
@@ -44,14 +46,14 @@ owned by explicit states.
 | `localPushesQueue`                                         | local work waiting to be applied                  | `Running.localQueue`                                                      |
 | `syncBackendPushQueue`                                     | events waiting for backend propagation            | provider-push child `Active.queued`                                       |
 | `localPushBackendPullMutex`                                | exclusion between local and upstream durable work | mutually exclusive `CommittingLocal` and `CommittingUpstream` root states |
-| `pushAdmissionSemaphore`                                   | atomic validation and reservation                 | `Admitting` and `ApplyingAdmission` mailbox turns                         |
+| `pushAdmissionSemaphore`                                   | atomic validation and reservation                 | one `Admitting` state-owned Effect                                        |
 | `reservedLocalPushItems`                                   | admitted events not yet committed or rejected     | `Running.reservations`                                                    |
 | the reservation-aware push-head calculation                | optimistic validation fence                       | the reservation tail, or `Running.syncState.localHead`                    |
 | `pullMutexHeld`                                            | whether pagination blocks local work              | `Running.pullPagination`                                                  |
-| an optionally initialized `SubscriptionRef` shared by work | observable state spanning independent workers     | `Running.syncState` plus an initialized publication adapter               |
-| a long-running local-apply worker                          | local draining, batching, and fairness            | root eventless transitions through selecting and committing states        |
+| an optionally initialized `SubscriptionRef` shared by work | observable state spanning independent workers     | canonical `Running.syncState` plus a write-only public read model          |
+| a long-running local-apply worker                          | local draining, batching, and fairness            | one `Idle` scheduling transition plus semantic commit/completion states    |
 | a restartable backend-push worker                          | push progress and replacement after rebase        | provider-push child topology                                              |
-| `Effect.retry`, schedule state, and retry counters         | when a provider request can run again             | `RetryWaiting` states and state-owned timers                              |
+| `Effect.retry`, schedule state, and retry counters         | when a provider request can run again             | `BackingOff` states and state-owned timers                                |
 | a long-running backend-pull worker                         | stream lifetime, pagination, and failure          | provider-pull child topology                                              |
 | one acknowledgement `Deferred` per queued event            | completion of a caller's batch                    | one request registry entry with a remaining-item count                    |
 
@@ -103,36 +105,49 @@ These values bridge synchronous APIs and external streams. They do not decide wh
 ┌───────────────────────────── leader thread ─────────────────────────────┐
 │                                                                         │
 │  LeaderSyncProcessor                                                    │
-│    ├─ public service and Effect implementations                         │
-│    ├─ external correlation and publication adapters                     │
-│    └─ LeaderSyncMachine                                                 │
-│         ├─ root: admission and serialized durable scheduling            │
-│         ├─ provider-push child                                           │
-│         └─ provider-pull child                                           │
-│                  │                             │                        │
-│                  ▼                             ▼                        │
-│       LeaderSyncCommitter                   Sync backend                │
-│       durable SQLite work                  pull / push                  │
-│          │            │                                                 │
-│          ▼            ▼                                                 │
-│       state DB     eventlog DB                                          │
+│    ├─ public service, correlations, and publication read model           │
+│    ├─ private root machine: admission and durable scheduling             │
+│    ├─ local/upstream commit and completion Effects                       │
+│    ├─ LeaderSyncProviderPush child module ───────────► Sync backend      │
+│    ├─ LeaderSyncProviderPull child module ───────────► Sync backend      │
+│    └─ LeaderSyncCommitter                                                │
+│         ├─ state DB                                                      │
+│         └─ eventlog DB                                                   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 The modules have distinct responsibilities:
 
-| Module                       | Owns                                                                                      | Does not own                                                 |
-| ---------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `ClientSessionSyncProcessor` | Store-facing API, synchronous optimistic state, materialization operations, correlations  | asynchronous lifecycle topology                              |
-| `ClientSessionSyncMachine`   | leader push/pull ownership, reconciliation, rejection recovery, failure, draining         | SQLite or leader-proxy construction                          |
-| `LeaderSyncProcessor`        | public service, commit and provider Effects, publication, correlations, shutdown adapter  | asynchronous lifecycle topology or SQLite transition details |
-| `LeaderSyncMachine`          | admission, durable work ordering, provider child lifecycles, retry and termination policy | construction of databases, streams, or backend clients       |
-| `LeaderSyncCommitter`        | materialization, rollback, journal maintenance, heads, eventlog writes, commit receipts   | queues, retries, publication, acknowledgements, or lifecycle |
+| Module                         | Owns                                                                                     | Does not own                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `ClientSessionSyncProcessor`   | Store-facing API, synchronous optimistic state, materialization operations, correlations | asynchronous lifecycle topology                               |
+| `ClientSessionSyncMachine`     | leader push/pull ownership, reconciliation, rejection recovery, failure, draining        | SQLite or leader-proxy construction                           |
+| `LeaderSyncProcessor`          | public interface, root topology, durable scheduling, domain workflows, publication       | provider retry mechanics or SQLite transition details         |
+| `LeaderSyncProviderPush`       | provider batching, connectivity gating, retries, server-ahead recovery, cancellation     | leader durable scheduling or publication                      |
+| `LeaderSyncProviderPull`       | provider stream, page backpressure, retries, progress, cancellation                      | merging or committing an upstream page                        |
+| `LeaderSyncCommitter`          | materialization, rollback, journal maintenance, heads, eventlog writes, commit receipts  | queues, retries, publication, acknowledgements, or lifecycle  |
 
-The processor and machine responsibilities should remain conceptually separate. They can be reorganized physically if
-review experience favors fewer files, but the machine dependency interface is valuable: it keeps topology independent
-from resource construction and domain operation details.
+### Why the leader processor and root machine share one module
+
+A processor/machine split is useful only when the interface between them is substantially smaller and more stable than
+either implementation. That was not true for the leader coordinator. The machine needed the initial `SyncState`, policy
+configuration, validation, both durable workflows, request settlement, shutdown, and both provider Effects. Following
+one local commit meant repeatedly crossing a wide dependency interface, while the processor and machine each remained
+large.
+
+The proposed implementation removes that shallow seam. `LeaderSyncProcessor.ts` contains the public Effect service,
+the private root topology, and the local/upstream workflows selected by that topology. Their conceptual roles remain
+distinct, but their code is local and there is no exported machine protocol to learn. The separate files are the deep
+modules:
+
+- `LeaderSyncProviderPush.ts` exposes a small command and parent-event protocol while hiding its complete lifecycle.
+- `LeaderSyncProviderPull.ts` exposes the pulled-page protocol and acknowledgement operation while hiding its stream,
+  cursor, retry, progress, and backpressure machinery.
+- `LeaderSyncCommitter.ts` exposes durable commit operations while hiding the multi-database transition procedure.
+
+This is the intended test for future extractions: a new module should hide meaningful implementation depth behind a
+small interface, not merely move part of one workflow to another file.
 
 ## The Effect Machine Pattern
 
@@ -174,18 +189,13 @@ genuinely concurrent child work and therefore remain independently cancellable.
 ### Leader root
 
 ```text
-Starting
-  └─ Boot
-      ▼
-Running
-  Ready
+Starting ── Boot ──► Running
+  Idle
   Admitting
-  ApplyingAdmission
-  SelectingUpstream
-  CommittingUpstream
-  SelectingLocal
   CommittingLocal
-  Waiting
+  CompletingLocal
+  CommittingUpstream
+  CompletingUpstream
       │
       └─ shutdown / reset / fatal failure
           ▼
@@ -193,8 +203,18 @@ Stopping ──► Stopped
 ```
 
 `Running` owns the current `SyncState`, pending admissions, local queue, reservations, upstream pages, pagination mode,
-and any terminal request. Eventless transitions repeatedly select the next eligible turn. Upstream pages are chosen
-before local durable work, and `more-expected` pagination keeps local work blocked between pages.
+and any terminal request. One eventless transition in `Idle` selects the next eligible turn in priority order: stop,
+admission, upstream commit, then local commit. Upstream pages are chosen before local durable work, and `more-expected`
+pagination keeps local work blocked between pages.
+
+`Starting` is the bootstrap fence: provider children do not begin pulling until `boot` has installed the runtime and
+accepted the `Boot` event. This preserves the public startup ordering without using an adapter flag.
+
+Commit and completion are separate semantic states. `CommittingLocal` or `CommittingUpstream` establishes durable truth.
+Its transition atomically installs the new canonical `Running.syncState`; only then does the corresponding `Completing`
+state publish the read model, update provider propagation, release pull-page backpressure, or resolve callers. Scheduling
+therefore never reads the public `SubscriptionRef`, and publication cannot become the coordinator's second source of
+truth.
 
 ### Leader provider children
 
@@ -203,17 +223,17 @@ provider push:
   Disabled
   Active
     Idle
-    InFlight
-    HandlingFailure
-    RetryWaiting
-    RestoringAwaitingPull
+    Pushing
+    ClassifyingFailure
+    BackingOff
+    RestoringPlan
     AwaitingPull
     Failed
 
 provider pull:
   Disabled
   Streaming
-  RetryWaiting
+  BackingOff
   Completed
   Failed
 ```
@@ -287,23 +307,25 @@ Store.commit
                       └─ LeaderSyncProcessor.push
                            ├─ register request acknowledgement
                            └─ machine.send(PushRequested)
-                                ├─ Admitting → ApplyingAdmission
+                                ├─ Idle → Admitting
                                 │    └─ validate and reserve complete batch
-                                └─ SelectingLocal → CommittingLocal
-                                     └─ processLocal
+                                └─ Idle → CommittingLocal → CompletingLocal
+                                     ├─ commitLocal
                                           ├─ SyncState.merge
                                           ├─ LeaderSyncCommitter.commitLocal
                                           │    ├─ materialize into state DB
                                           │    ├─ update journal and heads
                                           │    └─ coordinate SQLite commits
+                                     ├─ atomically install canonical Running.syncState
+                                     └─ completeLocal
                                           ├─ publish committed receipt to sessions
                                           ├─ provider-push child.send(Append)
                                           └─ resolve request acknowledgement
 
-provider-push child: Idle → InFlight
+provider-push child: Idle → Pushing
   └─ syncBackend.push
        ├─ success → Idle
-       └─ failure → HandlingFailure
+       └─ failure → ClassifyingFailure
 ```
 
 The leader acknowledgement means the batch is durable, published, and scheduled for backend propagation. It does not
@@ -315,14 +337,16 @@ mean the backend has already accepted it.
 provider-pull child: Streaming
   └─ syncBackend.pull
        └─ parent.send(UpstreamBatchReceived { batchId })
-            └─ leader root: SelectingUpstream → CommittingUpstream
-                 └─ processUpstream
+            └─ leader root: Idle → CommittingUpstream → CompletingUpstream
+                 ├─ commitUpstream
                       ├─ SyncState.merge
                       ├─ LeaderSyncCommitter.commitUpstream
                       │    ├─ rollback divergent pending state when needed
                       │    ├─ materialize replacement history
                       │    ├─ update journal, eventlog, and heads
                       │    └─ coordinate SQLite commits
+                 ├─ atomically install canonical Running.syncState
+                 └─ completeUpstream
                       ├─ publish committed receipt to session pull queues
                       ├─ provider-push child.send(ReplacePlan)
                       └─ release this provider page
@@ -344,21 +368,21 @@ session reconciliation for the current page.
 ### 3. A provider push fails and retries
 
 ```text
-provider-push child: InFlight
+provider-push child: Pushing
   └─ syncBackend.push fails
-       └─ HandlingFailure
+       └─ ClassifyingFailure
             ├─ offline / unknown failure
-            │    └─ RetryWaiting
-            │         └─ state-owned timer → InFlight
+            │    └─ BackingOff
+            │         └─ state-owned timer → Pushing
             ├─ server ahead
-            │    └─ RestoringAwaitingPull → AwaitingPull
-            │         └─ ReplacePlan → Idle → InFlight
+            │    └─ RestoringPlan → AwaitingPull
+            │         └─ ReplacePlan → Idle → Pushing
             └─ backend identity mismatch
                  └─ Failed
                       └─ parent applies reset / shutdown / ignore policy
 ```
 
-There are no manually correlated retry fibers. Exiting `RetryWaiting` cancels its timer; replacing the push plan exits
+There are no manually correlated retry fibers. Exiting `BackingOff` cancels its timer; replacing the push plan exits
 the active branch and cancels any superseded provider call.
 
 ### 4. The leader rejects a session push
@@ -405,7 +429,7 @@ A maintainer can answer the main coordination questions from the machines:
 - **What inputs can change it?** Read the declared event schemas for that state and its ancestors.
 - **What work is running?** Inspect the invocation, stream, or timer owned by the active state.
 - **What cancels that work?** Follow the transition that exits its owner.
-- **What makes a leader transition durable?** Follow `processLocal` or `processUpstream` into `LeaderSyncCommitter`.
+- **What makes a leader transition durable?** Follow `commitLocal` or `commitUpstream` into `LeaderSyncCommitter`.
 - **Can stale work update a replacement lifecycle?** No; invocation outcomes belong to the state instance that started
   them.
 - **Can publication or acknowledgement precede durability?** No; they follow a validated commit receipt.
@@ -413,8 +437,10 @@ A maintainer can answer the main coordination questions from the machines:
   parent protocols.
 
 The machines do contain framework-specific nesting. That indentation expresses root, compound, and leaf ownership; it
-is not incidental syntax. Domain calculations and resource construction stay in processor helpers so transition bodies
-remain focused on topology and ordering.
+is not incidental syntax. The leader root deliberately avoids topology that only translates a loop: its single `Idle`
+choice exposes scheduling priority, while the remaining states name work with a real lifetime. Domain calculations sit
+beside that topology in the same implementation module, so a reviewer can follow a commit without crossing a broad
+processor/machine seam.
 
 ## Guarantees and Deliberate Limits
 
@@ -446,8 +472,9 @@ still leave state ahead of eventlog truth and requires a separate recovery strat
 - The declarative machine specifications are deeply nested where the topology is deeply nested. This is more verbose
   than a loop for simple cases, though it keeps lifecycle ownership visible.
 - Machine schemas repeat some TypeScript domain shapes at runtime boundaries.
-- The implementation is split between machine policy and processor operations. This improves dependency direction but
-  can require navigation between two files when following a complete Effect.
+- `LeaderSyncProcessor.ts` remains a substantial implementation module. Its size is the cost of keeping root scheduling
+  and the durable workflows it selects local; independent provider and durability lifecycles are extracted only where
+  they form deep modules with small interfaces.
 - The Effect cohort must move to the version required by Effect Machine. This proposal upgrades the workspace to Effect
   `4.0.0-rc.112` and adds `@typeonce/effect-machine` `0.26.2`.
 - Effect Machine becomes critical synchronization infrastructure and must be evaluated for API stability, diagnostics,
@@ -456,9 +483,8 @@ still leave state ahead of eventlog truth and requires a separate recovery strat
 ## Compatibility and Validation
 
 This is an internal refactor. The Store-facing and leader-thread sync APIs remain unchanged. The experiment retains the
-existing SQLite-backed behavior suites and adds deterministic coverage for admission races, pagination priority,
-rejection recovery, rebase/push suspension, shutdown interleavings, provider failure policy, and durable commit receipt
-validation.
+existing SQLite-backed behavior suites covering sync-state merging, leader-thread construction, backend behavior, and
+the higher-level Store workflows that exercise admission, pagination, rejection recovery, rebase, and shutdown.
 
 The implementation experiment passes the repository unit suite, TypeScript build, formatting and lint checks, Markdown
 checks, and dependency-cycle checks.
@@ -483,8 +509,7 @@ checks, and dependency-cycle checks.
 
 - Does the framework-specific topology make common maintenance tasks faster enough to justify the dependency and
   learning cost?
-- Should machine specifications and processor operations remain separate files, or live in small feature directories
-  that make their relationship more obvious?
+- Should the client-session processor/machine split also be deepened or collapsed after evaluating the leader result?
 - Should statechart snapshots or transition traces be exposed through LiveStore devtools?
 - Should the provider and leader child protocols become reusable internal abstractions after production experience?
 - What stability and upgrade policy should LiveStore require from Effect Machine before adopting it outside this
@@ -496,10 +521,11 @@ checks, and dependency-cycle checks.
 
 For code review or an architecture walkthrough, read the implementation in this order:
 
-1. `ClientSessionSyncMachine.ts`: session root topology and its leader push/pull children.
-2. `ClientSessionSyncProcessor.ts`: synchronous Store lane and the Effects supplied to the machine.
-3. `LeaderSyncMachine.ts`: admission, durable scheduling, and provider child topologies.
-4. `LeaderSyncProcessor.ts`: public service, domain operations, provider adapters, publication, and correlations.
-5. `LeaderSyncCommitter.ts`: durable state/eventlog transition implementation.
-6. `ClientSessionSyncProcessor.test.ts`, `LeaderSyncProcessor.test.ts`, and `LeaderSyncCommitter.test.ts`: race,
+1. `LeaderSyncProcessor.ts`: public interface, private root topology, local/upstream workflows, and completion order.
+2. `LeaderSyncProviderPush.ts`: provider batching, retry, and server-ahead recovery lifecycle.
+3. `LeaderSyncProviderPull.ts`: provider stream, page backpressure, retry, and progress lifecycle.
+4. `LeaderSyncCommitter.ts`: durable state/eventlog transition implementation.
+5. `ClientSessionSyncMachine.ts`: session root topology and its leader push/pull children.
+6. `ClientSessionSyncProcessor.ts`: synchronous Store lane and the Effects supplied to the machine.
+7. `make-leader-thread-layer.test.ts`, `syncstate.test.ts`, and the repository Store suites: construction, merge,
    lifecycle, and SQLite-backed behavior evidence.
