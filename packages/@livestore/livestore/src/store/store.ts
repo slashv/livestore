@@ -897,22 +897,7 @@ export class Store<TSchema extends LiveStoreSchema = LiveStoreSchema.Any, TConte
 
       if (events.length === 0) return
 
-      const localServices = yield* Effect.context()
-
-      const encodedEvents = yield* this[StoreInternalsSymbol].syncProcessor.encodeEvents(events)
-
-      const { writeTables } = yield* Effect.try({
-        try: () => {
-          const materialize = () =>
-            this[StoreInternalsSymbol].syncProcessor
-              .materializeEvents(encodedEvents)
-              .pipe(Effect.runSyncWith(localServices))
-          return events.length > 1 ? this[StoreInternalsSymbol].sqliteDbWrapper.txn(materialize) : materialize()
-        },
-        catch: (cause) => UnknownError.make({ cause }),
-      })
-
-      yield* this[StoreInternalsSymbol].syncProcessor.push(encodedEvents)
+      const { writeTables } = yield* this[StoreInternalsSymbol].syncProcessor.commit(events)
 
       const tablesToUpdate: [Ref<null, ReactivityGraphContext, RefreshReason>, null][] = []
       for (const tableName of writeTables) {

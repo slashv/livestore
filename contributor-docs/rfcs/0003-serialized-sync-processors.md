@@ -1,5 +1,9 @@
 # Serialized Sync Processors
 
+> This document describes the fixed split-owner baseline at `4ead601cd`. This experimental branch now tests
+> [a single session owner with yielding reconciliation](./0003-session-single-owner-experiment.md); read that companion
+> for the branch's changed session interface and ownership. The leader architecture below is unchanged.
+
 > **Status:** Draft local architectural proposal. This describes the current experiment and does not replace accepted
 > product intent.
 

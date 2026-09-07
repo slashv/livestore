@@ -3,6 +3,7 @@ import { expect } from 'vitest'
 import {
   type ClientSession,
   ClientSessionLeaderThreadProxy,
+  LeaderAheadError,
   MATERIALIZATION_JOURNAL_META_TABLE,
   STATE_HEAD_META_TABLE,
 } from '@livestore/common'
@@ -37,6 +38,88 @@ import { makeTestAdapter } from '../test-adapter.ts'
 const environment = Layer.mergeAll(PlatformNode.NodeFileSystem.layer, FetchHttpClient.layer)
 
 Vitest.describe('Client session reconciliation through Store', () => {
+  Vitest.live('rolls back the whole local batch before installing state or scheduling propagation', (test) =>
+    Effect.gen(function* () {
+      const propagated: LiveStoreEvent.Client.Encoded[] = []
+      const { store } = yield* makeStoreHarness((batch) =>
+        Effect.sync(() => {
+          propagated.push(...batch)
+        }),
+      )
+      const processor = store[StoreInternalsSymbol].syncProcessor
+      const before = yield* processor.syncState.get
+      const exit = yield* processor
+        .commit([
+          events.todoCreated({ id: 'duplicate', text: 'first' }),
+          events.todoCreated({ id: 'duplicate', text: 'second' }),
+        ])
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(store.query(tables.todos)).toEqual([])
+      expect(readHead(store)).toEqual(before.localHead)
+      expect(journalCount(store)).toBe(0)
+      expect(yield* processor.syncState.get).toEqual(before)
+      yield* processor.shutdown(Exit.void)
+      expect(propagated).toEqual([])
+    }).pipe(Effect.provide(environment), Vitest.withTestCtx(test)),
+  )
+
+  Vitest.live('aborts remaining pull steps when the active push fails after a coherent prefix', (test) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const failPush = yield* Deferred.make<void>()
+      const { store, deliver, failed } = yield* makeStoreHarness(() =>
+        Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(failPush)),
+          Effect.andThen(Effect.die(new Error('fatal push during reconciliation'))),
+        ),
+      )
+      store.commit(events.todoCreated({ id: 'local', text: 'local' }))
+      yield* Deferred.await(started)
+      const local = (yield* store[StoreInternalsSymbol].syncProcessor.syncState.get).pending[0]!
+      const observed: number[] = []
+      const unsubscribe = store.subscribe(tables.todos, (rows) => {
+        observed.push(rows.length)
+        if (rows.length === 32) Effect.runSync(Deferred.succeed(failPush, undefined))
+      })
+      // Confirm the in-flight local event so the pull can advance without cancelling that push first.
+      yield* deliver([local, ...Array.from({ length: 63 }, (_, i) => remoteCreated(i + 2))])
+      expect(Exit.isFailure(yield* Deferred.await(failed))).toBe(true)
+      expect(observed).toEqual([1, 32])
+      expect(readHead(store).global).toBe(32)
+      expect(store.query(tables.todos)).toHaveLength(32)
+      expect(journalCount(store)).toBe(32)
+      expect((yield* store[StoreInternalsSymbol].syncProcessor.syncState.get).localHead).toEqual(readHead(store))
+      unsubscribe()
+    }).pipe(Effect.provide(environment), Vitest.withTestCtx(test)),
+  )
+
+  Vitest.live('starts propagation only with the final encodings of edits committed between pull steps', (test) =>
+    Effect.gen(function* () {
+      const propagated: LiveStoreEvent.Client.Encoded[] = []
+      const { store, deliver } = yield* makeStoreHarness((batch) =>
+        Effect.sync(() => {
+          propagated.push(...batch)
+        }),
+      )
+      const committedAt = new Set<number>()
+      const unsubscribe = store.subscribe(tables.todos, () => {
+        const head = Effect.runSync(store[StoreInternalsSymbol].syncProcessor.syncState).upstreamHead.global
+        if ((head === 32 || head === 64) && committedAt.has(head) === false) {
+          committedAt.add(head)
+          store.commit(events.todoCreated({ id: `local-${head}`, text: 'local' }))
+          expect(propagated).toEqual([])
+        }
+      })
+      yield* yield* deliver(Array.from({ length: 96 }, (_, i) => remoteCreated(i + 1)))
+      yield* store[StoreInternalsSymbol].syncProcessor.shutdown(Exit.void)
+      expect(propagated.map((event) => event.seqNum.global)).toEqual([97, 98])
+      expect(propagated.map((event) => event.args.id)).toEqual(['local-32', 'local-64'])
+      expect(readHead(store).global).toBe(98)
+      unsubscribe()
+    }).pipe(Effect.provide(environment), Vitest.withTestCtx(test)),
+  )
+
   for (const updateSameRow of [false, true]) {
     Vitest.live(`preserves rows and durable head during cancellation (same row: ${updateSameRow})`, (test) =>
       Effect.gen(function* () {

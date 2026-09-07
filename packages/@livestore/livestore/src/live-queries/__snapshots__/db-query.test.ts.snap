@@ -56,6 +56,12 @@ exports[`otel > QueryBuilder subscription - async iterator 1`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -82,6 +88,12 @@ exports[`otel > QueryBuilder subscription - async iterator 1`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -158,66 +170,7 @@ exports[`otel > QueryBuilder subscription - async iterator 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -225,6 +178,67 @@ exports[`otel > QueryBuilder subscription - async iterator 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -296,6 +310,12 @@ exports[`otel > QueryBuilder subscription - async iterator with skipInitialRun 1
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -322,6 +342,12 @@ exports[`otel > QueryBuilder subscription - async iterator with skipInitialRun 1
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -398,66 +424,7 @@ exports[`otel > QueryBuilder subscription - async iterator with skipInitialRun 2
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -465,6 +432,67 @@ exports[`otel > QueryBuilder subscription - async iterator with skipInitialRun 2
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -527,6 +555,12 @@ exports[`otel > QueryBuilder subscription - basic functionality 1`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -553,6 +587,12 @@ exports[`otel > QueryBuilder subscription - basic functionality 1`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -629,66 +669,7 @@ exports[`otel > QueryBuilder subscription - basic functionality 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -696,6 +677,67 @@ exports[`otel > QueryBuilder subscription - basic functionality 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -758,6 +800,12 @@ exports[`otel > QueryBuilder subscription - direct table subscription 1`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -784,6 +832,12 @@ exports[`otel > QueryBuilder subscription - direct table subscription 1`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -860,66 +914,7 @@ exports[`otel > QueryBuilder subscription - direct table subscription 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -927,6 +922,67 @@ exports[`otel > QueryBuilder subscription - direct table subscription 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -989,6 +1045,12 @@ exports[`otel > QueryBuilder subscription - skipInitialRun 1`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -1015,6 +1077,12 @@ exports[`otel > QueryBuilder subscription - skipInitialRun 1`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -1091,66 +1159,7 @@ exports[`otel > QueryBuilder subscription - skipInitialRun 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -1158,6 +1167,67 @@ exports[`otel > QueryBuilder subscription - skipInitialRun 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -1220,55 +1290,6 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 1`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
-        "sql.query": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
-        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
-      },
-    },
-    {
-      "_name": "livestore.in-memory-db:execute",
-      "attributes": {
         "sql.query": "SAVEPOINT livestore_savepoint_<id>",
       },
     },
@@ -1301,6 +1322,79 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 1`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -1403,66 +1497,7 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -1470,6 +1505,67 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -1483,66 +1579,7 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 2`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -1550,6 +1587,67 @@ exports[`otel > QueryBuilder subscription - unsubscribe functionality 2`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -1612,6 +1710,12 @@ exports[`otel > otel 3`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -1638,6 +1742,12 @@ exports[`otel > otel 3`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -1704,66 +1814,7 @@ exports[`otel > otel 4`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -1771,6 +1822,67 @@ exports[`otel > otel 4`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -2005,6 +2117,12 @@ exports[`otel > with thunks 7`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -2031,6 +2149,12 @@ exports[`otel > with thunks 7`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -2103,66 +2227,7 @@ exports[`otel > with thunks 8`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -2170,6 +2235,67 @@ exports[`otel > with thunks 8`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },
@@ -2232,6 +2358,12 @@ exports[`otel > with thunks with query builder and without labels 3`] = `
     {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
+        "sql.query": "SAVEPOINT livestore_savepoint_<id>",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
         "sql.query": "DELETE FROM __livestore_materialization_journal
                             WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
       },
@@ -2258,6 +2390,12 @@ exports[`otel > with thunks with query builder and without labels 3`] = `
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+      },
+    },
+    {
+      "_name": "livestore.in-memory-db:execute",
+      "attributes": {
+        "sql.query": "RELEASE SAVEPOINT livestore_savepoint_<id>",
       },
     },
     {
@@ -2330,66 +2468,7 @@ exports[`otel > with thunks with query builder and without labels 4`] = `
     },
     "children": [
       {
-        "_name": "client-session-sync-processor:encode-events",
-      },
-      {
-        "_name": "client-session-sync-processor:materialize-events",
-        "children": [
-          {
-            "_name": "client-session-sync-processor:materialize-event",
-            "children": [
-              {
-                "_name": "livestore.in-memory-db:execute",
-                "attributes": {
-                  "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "0",
-  "1",
-  "2"
-]",
-                  "span.label": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                  "sql": "DELETE FROM __livestore_materialization_journal
-                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSqlPrepared",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration",
-  "$changeset"
-]",
-                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
-                },
-              },
-              {
-                "_name": "@livestore/common:execSql",
-                "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
-                  "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                  "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
-                },
-              },
-            ],
-          },
-        ],
-      },
-      {
-        "_name": "client-session-sync-processor:push",
+        "_name": "client-session-sync-processor:commit",
         "attributes": {
           "batchSize": 1,
           "eventCounts": "{
@@ -2397,6 +2476,67 @@ exports[`otel > with thunks with query builder and without labels 4`] = `
 }",
           "mergeResultTag": "advance",
         },
+        "children": [
+          {
+            "_name": "client-session-sync-processor:encode-events",
+          },
+          {
+            "_name": "client-session-sync-processor:materialize-events",
+            "children": [
+              {
+                "_name": "client-session-sync-processor:materialize-event",
+                "children": [
+                  {
+                    "_name": "livestore.in-memory-db:execute",
+                    "attributes": {
+                      "sql.query": "INSERT INTO 'todos' ("id", "text", "completed") VALUES (?, ?, ?)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "0",
+  "1",
+  "2"
+]",
+                      "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                      "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSqlPrepared",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration",
+  "$changeset"
+]",
+                      "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                      "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                    },
+                  },
+                  {
+                    "_name": "@livestore/common:execSql",
+                    "attributes": {
+                      "bindValueKeys": "[
+  "$id",
+  "$seqNumGlobal",
+  "$seqNumClient",
+  "$seqNumRebaseGeneration"
+]",
+                      "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                      "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
       },
     ],
   },

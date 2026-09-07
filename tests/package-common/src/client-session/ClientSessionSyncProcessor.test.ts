@@ -186,11 +186,8 @@ const makeClientProcessorHarness = Effect.fn(function* ({
   yield* processor.boot.pipe(Scope.provide(scope))
 
   const pushIds = Effect.fn(function* (ids: ReadonlyArray<string>) {
-    const encoded = yield* processor.encodeEvents(
-      ids.map((id) => events.todoCreated({ id, text: id, completed: false })),
-    )
-    yield* processor.push(encoded)
-    return encoded
+    yield* processor.commit(ids.map((id) => events.todoCreated({ id, text: id, completed: false })))
+    return (yield* processor.syncState.get).pending.filter((event) => ids.includes(event.args.id as string))
   })
 
   const close = (exit: Exit.Exit<unknown, unknown> = Exit.void) =>
@@ -201,6 +198,63 @@ const makeClientProcessorHarness = Effect.fn(function* ({
 
 // TODO use property tests for simulation params
 Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
+  Vitest.it.effect('recovers a rejection received between prefixes that confirm the same pending batch', (test) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const rejectNow = yield* Deferred.make<void>()
+      const pullQueue = yield* Queue.unbounded<typeof SyncState.PayloadUpstream.Type>()
+      const accepted: LiveStoreEvent.Client.Encoded[] = []
+      let first = true
+      const { processor, pushIds, close } = yield* makeClientProcessorHarness({
+        leaderPushBatchSize: 64,
+        pull: () =>
+          Stream.fromQueue(pullQueue).pipe(
+            Stream.map((payload) =>
+              ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }),
+            ),
+          ),
+        push: (batch) => {
+          if (first === false)
+            return Effect.sync(() => {
+              accepted.push(...batch)
+            })
+          first = false
+          return Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(rejectNow)),
+            Effect.andThen(
+              Effect.fail(
+                new LeaderAheadError({
+                  minimumExpectedNum: EventSequenceNumber.Client.ROOT,
+                  providedNum: EventSequenceNumber.Client.ROOT,
+                  sessionId: 'session-test',
+                }),
+              ),
+            ),
+          )
+        },
+      })
+      const batch = yield* pushIds(Array.from({ length: 64 }, (_, i) => `local-${i}`))
+      yield* Deferred.await(started)
+      const observer = yield* processor.syncState.changes.pipe(
+        Stream.filter((state) => state.upstreamHead.global >= 32),
+        Stream.tap((state) =>
+          state.upstreamHead.global === 32 ? Deferred.succeed(rejectNow, undefined) : Effect.void,
+        ),
+        Stream.takeUntil((state) => state.upstreamHead.global === 64),
+        Stream.runDrain,
+        Effect.forkChild,
+      )
+      yield* Queue.offer(pullQueue, SyncState.PayloadUpstreamAdvance.make({ newEvents: batch }))
+      yield* Fiber.join(observer)
+      yield* processor.debug.awaitRejection
+      // Wait until the next step has confirmed the rest and finalization has released the rejection fence.
+      yield* Effect.yieldNow
+      yield* pushIds(['after'])
+      expect(Exit.isSuccess(yield* close().pipe(Effect.exit))).toBe(true)
+      expect(accepted.map((event) => event.args.id)).toEqual(['after'])
+    }).pipe(withTestCtx(test)),
+  )
+
   Vitest.live('from scratch', (test) =>
     Effect.gen(function* () {
       const { makeStore, mockSyncBackend } = yield* TestContext
@@ -335,13 +389,11 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       const { makeStore } = yield* TestContext
       const store = yield* makeStore()
       const { sqliteDbWrapper, syncProcessor } = store[StoreInternalsSymbol]
-      const encodedEvents = yield* syncProcessor.encodeEvents([
-        events.todoCreated({ id: 'rolled-back', text: 'rolled-back', completed: false }),
-      ])
-
       sqliteDbWrapper.execute(`DROP TABLE ${SystemTables.STATE_HEAD_META_TABLE}`)
 
-      const exit = yield* syncProcessor.materializeEvents(encodedEvents).pipe(Effect.exit)
+      const exit = yield* syncProcessor
+        .commit([events.todoCreated({ id: 'rolled-back', text: 'rolled-back', completed: false })])
+        .pipe(Effect.exit)
 
       expect(exit._tag).toEqual('Failure')
       expect(sqliteDbWrapper.select(tables.todos.asSql().query)).toEqual([])
@@ -624,8 +676,7 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       // Wait for the sync backend to receive the pushed event
       yield* mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain)
 
-      // `syncState.get` advances before rollback and materialization, while `changes` is emitted afterward.
-      // Always consume the queued e2 update so the query below observes the fully rebased state.
+      // Wait for the completed e2 transition, rather than assuming backend receipt means the session rebased.
       yield* store[StoreInternalsSymbol].syncProcessor.syncState.changes.pipe(
         Stream.takeUntil((_) => _.localHead.global === 2),
         Stream.runDrain,
@@ -718,10 +769,9 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       yield* Deferred.await(pullStarted)
       yield* Effect.yieldNow
 
-      const localEvents = yield* processor.encodeEvents([
-        events.todoCreated({ id: 'local', text: 'local', completed: false }),
-      ])
-      const pushExit = yield* Effect.sync(() => Effect.runSyncExit(processor.push(localEvents)))
+      const pushExit = yield* Effect.sync(() =>
+        Effect.runSyncExit(processor.commit([events.todoCreated({ id: 'local', text: 'local', completed: false })])),
+      )
 
       expect(Exit.isSuccess(pushExit)).toBe(true)
       yield* close()
@@ -805,12 +855,10 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
   })
 
   // Builds a leader payload that conflicts with the local pending event, forcing a rebase.
-  const makeConflictingUpstream = Effect.fn(function* (processor: ClientSessionSyncProcessor) {
-    const [remoteBase] = yield* processor.encodeEvents([
-      events.todoCreated({ id: 'remote', text: 'remote', completed: false }),
-    ])
+  const makeConflictingUpstream = Effect.fn(function* (_processor: ClientSessionSyncProcessor) {
     const remoteEvent = LiveStoreEvent.Client.Encoded.make({
-      ...remoteBase!,
+      name: 'todoCreated',
+      args: { id: 'remote', text: 'remote', completed: false },
       seqNum: EventSequenceNumber.Client.Composite.make({ global: 1, client: 0 }),
       parentSeqNum: EventSequenceNumber.Client.ROOT,
       clientId: 'remote-client',
@@ -1323,8 +1371,11 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
         }),
       }
 
+      const sqlite3 = yield* Effect.promise(() => loadSqlite3Wasm())
+      const makeSqliteDb = yield* sqliteDbFactory({ sqlite3 })
+      const sqliteDb = yield* makeSqliteDb({ _tag: 'in-memory' })
       const clientSession: ClientSession = {
-        sqliteDb: {} as any,
+        sqliteDb,
         devtools: { enabled: false },
         clientId: 'client-test',
         sessionId: 'session-test',
@@ -1352,11 +1403,8 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
         confirmUnsavedChanges: false,
       }).pipe(Effect.provide(Layer.mergeAll(materializationLayerTest, StateSqliteDb.layer(clientSession.sqliteDb))))
 
-      const encoded = yield* syncProcessor.encodeEvents([
-        events.todoCreated({ id: 'post-rebase', text: 'after', completed: false }),
-      ])
-      yield* syncProcessor.materializeEvents(encoded)
-      yield* syncProcessor.push(encoded)
+      yield* syncProcessor.boot
+      yield* syncProcessor.commit([events.todoCreated({ id: 'post-rebase', text: 'after', completed: false })])
 
       expect(recordedEvents).toHaveLength(1)
       const event = recordedEvents[0]!
