@@ -121,8 +121,14 @@ Tracing keeps the local encode/materialize spans and event-count metadata. The o
 covering the complete local transition. Eighteen generated query-trace snapshots reflect this and the new outer local
 savepoint; no functional query assertions were removed.
 
-Browser fixture and results: [run instructions](../../tests/perf/session-sync/README.md). Performance conclusions belong
-with the final measured artifacts, not with this architectural hypothesis.
+Browser fixture and results: [run instructions](../../tests/perf/session-sync/README.md),
+[interpretation](../../tests/perf/session-sync/DECISION.md), and [complete table](../../tests/perf/session-sync/RESULTS.md).
+The final 130-sample run passed every checked invariant for both versions, with closely comparable timings. It supports
+preserving responsiveness with single ownership; it does not decide whether that ownership is easier to understand.
+
+The final processor is 640 lines versus the baseline's 600; Store's commit plumbing loses 15 lines. There is no new
+production module. This is a net 25-line production increase, not a deletion-based simplification. Most of the branch
+diff is tests, trace snapshots, the browser fixture and documentation.
 
 ## Experiment checklist
 
@@ -130,7 +136,7 @@ with the final measured artifacts, not with this architectural hypothesis.
 - [x] One synchronous owner; retain small complete reconciliation steps and existing Store behavior.
 - [x] Run baseline regressions and add tests for changed completion ordering.
 - [x] Review, fix justified findings and review the revised implementation.
-- [ ] Compare complete browser runs for input delay, catch-up time and correctness.
+- [x] Compare complete browser runs for input delay, catch-up time and correctness.
 - [ ] Decide with a human code read whether the ownership change earns its additional concepts.
 
 No new accepted context contract or release is proposed. Related existing issue: [#1465](https://github.com/livestorejs/livestore/issues/1465).

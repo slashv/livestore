@@ -3,6 +3,8 @@
 This fixture compares the clean fixed baseline `4ead601cd` with this branch. It retains the workloads and invariants
 from the earlier full-Store browser experiment. It does not include the whole-batch synchronous prototype.
 
+Read [the findings](./DECISION.md), [measurement table](./RESULTS.md), and [raw samples](./results.json).
+
 Both production builds use this same fixture. Vite resolves all LiveStore package exports from the selected checkout;
 mailbox runs on port 4178, owner on 4179. Store has no experiment selector or compatibility bridge. Source maps can
 be inspected to confirm each build uses its intended processor and Store implementation.
