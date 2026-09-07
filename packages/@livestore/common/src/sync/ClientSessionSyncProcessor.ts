@@ -9,6 +9,7 @@ import {
   FiberHandle,
   Option,
   Queue,
+  References,
   Schema,
   type Scope,
   Stream,
@@ -17,12 +18,12 @@ import {
 
 import type { ClientSession } from '../adapter-types.ts'
 import type { PullItem } from '../ClientSessionLeaderThreadProxy.ts'
-import type { MaterializeError } from '../errors.ts'
+import { type MaterializeError, UnknownError } from '../errors.ts'
 import type { RejectedPushError } from '../leader-thread/RejectedPushError.ts'
 import * as MaterializationJournal from '../MaterializationJournal.ts'
 import * as EventSequenceNumber from '../schema/EventSequenceNumber/mod.ts'
 import * as LiveStoreEvent from '../schema/LiveStoreEvent/mod.ts'
-import type { LiveStoreSchema } from '../schema/mod.ts'
+import { type LiveStoreSchema, SystemTables } from '../schema/mod.ts'
 import { resolveSessionIdSymbolInEventArgs } from '../session-id-symbol.ts'
 import * as SqliteDbHelper from '../sqlite-db-helper.ts'
 import * as StateHead from '../StateHead.ts'
@@ -59,11 +60,14 @@ export type RebaseBarrierPoint =
 
 const jsonStringify = Schema.encodeSync(Schema.UnknownFromJsonString)
 
+const PULL_CHUNK_SIZE = 32
+
 /**
  * Coordinates optimistic session commits with the leader.
  *
  * Local commits stay synchronous so UI reads see them immediately. Pulls, propagation results, rejection recovery,
- * and shutdown pass through one mailbox. Conflicting pulls rebase pending events without blocking new local commits.
+ * and shutdown pass through one mailbox. Pulls yield between complete SQLite/model transitions, never inside one.
+ * Local commits during those pauses see a coherent prefix and are included in the next step's rebase.
  * Unlike the leader, this processor also refreshes reactive tables and has no downstream sessions.
  */
 export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncProcessor')(function* ({
@@ -76,6 +80,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
 }: {
   schema: LiveStoreSchema
   clientSession: ClientSession
+  /** Must use synchronous SQLite/materializer effects, as required by the Store.commit runSync path too. */
   materializeEvent: (
     eventEncoded: LiveStoreEvent.Client.Encoded,
     options: { materializerHashLeader: Option.Option<number> },
@@ -185,109 +190,110 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       yield* FiberHandle.run(leaderPushingFiberHandle, runLeaderPush(operationId, batch)).pipe(Effect.asVoid)
     })
 
+  const mergePull = (payload: typeof SyncState.PayloadUpstream.Type) =>
+    SyncState.merge({
+      syncState: syncStateRef.current,
+      payload,
+      isClientOnlyEvent,
+      isEqualEvent: LiveStoreEvent.Client.isEqualEncoded,
+    }).pipe(
+      Effect.filterOrElse(
+        (result) => result._tag !== 'reject',
+        () => Effect.die(new Error('Unexpected reject in client-session-sync-processor')),
+      ),
+    )
+
   const handlePullItem = ({ payload, globalHead, materializerHashes }: typeof PullItem.Type) =>
     Effect.gen(function* () {
+      // Validate the complete payload before committing any prefix. This is not a plan: local commits can still
+      // arrive during cancellation, so each step must merge again from the then-current state.
+      yield* mergePull(payload)
+      // An explicit rebase replaces already-observed upstream history. Its first step must reach the old
+      // upstream head before yielding, rather than expose a backwards cursor or violate merge's head invariant.
+      const minimumEnd =
+        payload._tag === 'upstream-rebase'
+          ? payload.newEvents.findIndex((event) =>
+              EventSequenceNumber.Client.isGreaterThanOrEqual(event.seqNum, syncStateRef.current.upstreamHead),
+            ) + 1
+          : 0
       const rejectionAtPullStart = model.push._tag === 'awaiting-reconciliation' ? model.push : undefined
-      const mergeResult = yield* SyncState.merge({
-        syncState: syncStateRef.current,
-        payload,
-        isClientOnlyEvent,
-        isEqualEvent: LiveStoreEvent.Client.isEqualEncoded,
-      }).pipe(
-        Effect.filterOrElse(
-          (result) => result._tag !== 'reject',
-          () => Effect.die(new Error('Unexpected reject in client-session-sync-processor')),
-        ),
-      )
+      let pushCancelled = false
+      let offset = 0
+      do {
+        const newEvents = payload.newEvents.slice(offset, Math.max(offset + PULL_CHUNK_SIZE, minimumEnd))
+        const last = offset + newEvents.length === payload.newEvents.length
+        const chunk = offset === 0 ? { ...payload, newEvents } : { _tag: 'upstream-advance' as const, newEvents }
+        const applied = yield* Effect.gen(function* () {
+          const result = yield* mergePull(chunk)
+          if (result._tag === 'rebase' && pushCancelled === false) return false
 
-      // Local admission can run during an asynchronous rebase. Install the merged base before the first async step so
-      // a synchronous commit appends to the new pending suffix rather than to the state we are replacing.
-      syncStateRef.current = mergeResult.newSyncState
-
-      const recoveredRejection =
-        rejectionAtPullStart !== undefined &&
-        model.push === rejectionAtPullStart &&
-        isRejectedBatchRecovered(rejectionAtPullStart.rejectedEvents, syncStateRef.current.pending) === true
-      let resumeLeaderPush = false
-
-      if (mergeResult._tag === 'rebase') {
-        yield* Effect.spanEvent('merge:pull:rebase', {
-          payloadTag: payload._tag,
-          ...(TRACE_VERBOSE === true ? { payload: jsonStringify(payload) } : {}),
-          newEventsCount: mergeResult.newEvents.length,
-          rollbackCount: mergeResult.rollbackEvents.length,
-          ...(TRACE_VERBOSE === true ? { res: jsonStringify(mergeResult) } : {}),
-        })
-        debugInfo.rebaseCount++
-
-        yield* rebaseBarrier('before_leader_push_fiber_interrupt')
-        if (leaderPushingFiberHandle !== undefined) yield* FiberHandle.clear(leaderPushingFiberHandle)
-
-        if (LS_DEV === true) {
-          yield* Effect.logDebug(
-            'merge:pull:rebase: rollback',
-            mergeResult.rollbackEvents.length,
-            ...mergeResult.rollbackEvents.slice(0, 10).map(LiveStoreEvent.Client.toJSON),
-          )
-        }
-
-        if (mergeResult.rollbackEvents.length > 0) {
-          const headAfterRollback = mergeResult.rollbackEvents[0]!.parentSeqNum
+          const writeTables = new Set<string>()
           yield* Effect.gen(function* () {
-            yield* materializationJournal.rollback(mergeResult.rollbackEvents.map((event) => event.seqNum))
-            yield* stateHead.set(headAfterRollback)
+            if (result._tag === 'rebase') {
+              yield* materializationJournal.rollback(result.rollbackEvents.map((event) => event.seqNum))
+              // Rollback can touch tables absent from the replacement events. The journal doesn't return table
+              // names, so invalidate conservatively rather than leave cached queries on the removed history.
+              if (result.rollbackEvents.length > 0) {
+                for (const table of schema.state.sqlite.tables.keys()) {
+                  if (SystemTables.isStateSystemTable(table) === false) writeTables.add(table)
+                }
+              }
+            }
+            for (const event of result.newEvents) {
+              const materialized = yield* materializeEvent(event, {
+                // Replayed pending events can temporarily share a key with a later chunk's leader event.
+                // Only actual incoming events carry the leader's materializer hash.
+                materializerHashLeader:
+                  chunk.newEvents.some((incoming) => LiveStoreEvent.Client.isEqualEncoded(incoming, event)) === true
+                    ? (materializerHashes.find(({ eventNum }) =>
+                        EventSequenceNumber.Client.isEqual(eventNum, event.seqNum),
+                      )?.hash ?? Option.none())
+                    : Option.none(),
+              })
+              for (const table of materialized.writeTables) writeTables.add(table)
+            }
+            yield* stateHead.set(result.newSyncState.localHead)
+            // The leader only confirms globalHead after the whole payload. Earlier steps still need their journal.
+            if (last === true) yield* materializationJournal.discardUpTo(globalHead)
           }).pipe(
             SqliteDbHelper.withSavepoint(dbState),
-            Effect.mapError((cause) =>
-              MaterializationJournal.isMaterializationJournalError(cause) === true
-                ? cause
-                : new MaterializationJournal.MaterializationJournalError({ method: 'rollback', cause }),
-            ),
+            Effect.mapError((cause) => (cause._tag === 'SqliteError' ? new UnknownError({ cause }) : cause)),
           )
+
+          syncStateRef.current = result.newSyncState
+          yield* Queue.offer(syncStateUpdateQueue, syncStateRef.current)
+          // Subscribers may synchronously commit here: both SQLite and the model already describe the same state.
+          if (writeTables.size > 0) refreshTables(writeTables)
+          return true
+        }).pipe(
+          // These are synchronous SQLite/materializer effects, just like Store.commit. A savepoint alone is not
+          // exclusion: automatic fiber yields would let another commit use this same connection mid-transaction.
+          Effect.provideService(References.PreventSchedulerYield, true),
+          Effect.uninterruptible,
+        )
+
+        if (applied === false) {
+          yield* rebaseBarrier('before_leader_push_fiber_interrupt')
+          if (leaderPushingFiberHandle !== undefined) yield* FiberHandle.clear(leaderPushingFiberHandle)
+          yield* rebaseBarrier('before_queue_reconcile')
+          pushCancelled = true
+          continue
         }
+        offset += newEvents.length
+        if (last === true) break
+        // Yield only with a complete prefix plus all current optimistic events materialized. Pending replay can
+        // still be expensive; this bounds incoming work per step, not wall-clock time or pending backlog size.
+        yield* Effect.yieldNow
+      } while (offset <= payload.newEvents.length)
 
-        yield* rebaseBarrier('before_queue_reconcile')
-
-        // Re-read the live suffix because synchronous commits may have landed during rollback. Their mailbox events
-        // are still queued, so admission is de-duplicated when those events are handled later.
+      if (pushCancelled === true) debugInfo.rebaseCount++
+      else debugInfo.advanceCount++
+      const recoveredRejection =
+        rejectionAtPullStart !== undefined &&
+        isRejectedBatchRecovered(rejectionAtPullStart.rejectedEvents, syncStateRef.current.pending)
+      if (pushCancelled === true || recoveredRejection === true) {
+        if (pushCancelled === true) yield* rebaseBarrier('before_leader_push_fiber_run')
         model = { ...model, push: { _tag: 'idle', queued: syncStateRef.current.pending } }
-
-        resumeLeaderPush = true
-      } else {
-        yield* Effect.spanEvent('merge:pull:advance', {
-          payloadTag: payload._tag,
-          ...(TRACE_VERBOSE === true ? { payload: jsonStringify(payload) } : {}),
-          newEventsCount: mergeResult.newEvents.length,
-          ...(TRACE_VERBOSE === true ? { res: jsonStringify(mergeResult) } : {}),
-        })
-        debugInfo.advanceCount++
-
-        if (recoveredRejection === true) {
-          model = { ...model, push: { _tag: 'idle', queued: syncStateRef.current.pending } }
-          resumeLeaderPush = true
-        }
-      }
-
-      if (mergeResult.newEvents.length > 0) {
-        const writeTables = new Set<string>()
-        for (const event of mergeResult.newEvents) {
-          const { writeTables: newWriteTables } = yield* materializeEvent(event, {
-            materializerHashLeader:
-              materializerHashes.find(({ eventNum }) => EventSequenceNumber.Client.isEqual(eventNum, event.seqNum))
-                ?.hash ?? Option.none(),
-          })
-          for (const table of newWriteTables) writeTables.add(table)
-        }
-        refreshTables(writeTables)
-      }
-
-      yield* materializationJournal.discardUpTo(globalHead)
-
-      // A synchronous local commit may have extended pending while this pull item was materialized. Publish the live
-      // state rather than the earlier merge snapshot so observers never see that admitted suffix disappear.
-      yield* Queue.offer(syncStateUpdateQueue, syncStateRef.current)
-      if (resumeLeaderPush === true) {
-        if (mergeResult._tag === 'rebase') yield* rebaseBarrier('before_leader_push_fiber_run')
         yield* startLeaderPush()
       }
     })
@@ -328,7 +334,11 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       switch (event._tag) {
         case 'LocalPushAdmitted': {
           if (model.lifecycle !== 'running' || model.push._tag === 'awaiting-reconciliation') return true
-          model = { ...model, push: enqueueUnique(model.push, event.events) }
+          // A pull may have rebased/confirmed these events while their admission waited in the mailbox.
+          const currentEvents = syncStateRef.current.pending.filter((pending) =>
+            event.events.some((admitted) => LiveStoreEvent.Client.isEqualEncoded(pending, admitted)),
+          )
+          model = { ...model, push: enqueueUnique(model.push, currentEvents) }
           yield* startLeaderPush()
           return true
         }
@@ -436,6 +446,8 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   const encodeEvents: ClientSessionSyncProcessor['encodeEvents'] = Effect.fn(
     'client-session-sync-processor:encode-events',
   )(function* (events) {
+    // Store materializes before calling push. Reject here too, before a failed/stopping processor can change SQLite.
+    yield* checkLocalAdmission
     let baseEventSequenceNumber = syncStateRef.current.localHead
     return yield* Effect.forEach(events, ({ name, args }) =>
       Effect.gen(function* () {
@@ -479,11 +491,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
 
   const push: ClientSessionSyncProcessor['push'] = Effect.fn('client-session-sync-processor:push')(
     function* (encodedEvents) {
-      if (shutdownStarted === true || model.lifecycle === 'failed' || model.lifecycle === 'stopped') {
-        return yield* Effect.die(
-          new Error('Cannot push events after the client session sync processor starts shutting down'),
-        )
-      }
+      yield* checkLocalAdmission
 
       const mergeResult = yield* SyncState.merge({
         syncState: syncStateRef.current,
@@ -512,6 +520,12 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     },
   )
 
+  const checkLocalAdmission = Effect.suspend(() =>
+    shutdownStarted === true || model.lifecycle === 'failed' || model.lifecycle === 'stopped'
+      ? Effect.die(new Error('Cannot push events after the client session sync processor starts shutting down'))
+      : Effect.void,
+  )
+
   const debugInfo = { rebaseCount: 0, advanceCount: 0, rejectCount: 0 }
 
   return {
@@ -534,7 +548,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
 })
 
 type OperationId = number
-type ProcessorError = MaterializeError | MaterializationJournal.MaterializationJournalError
+type ProcessorError = MaterializeError | MaterializationJournal.MaterializationJournalError | UnknownError
 type EventBatch = ReadonlyArray<LiveStoreEvent.Client.Encoded>
 
 type Event =

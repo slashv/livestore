@@ -1432,6 +1432,9 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
     Effect.gen(function* () {
       const upstreamQueue = yield* Queue.unbounded<LiveStoreEvent.Client.Encoded>()
       const materializedEvents: LiveStoreEvent.Client.Encoded[] = []
+      const sqlite3 = yield* Effect.promise(() => loadSqlite3Wasm())
+      const makeSqliteDb = yield* sqliteDbFactory({ sqlite3 })
+      const sqliteDb = yield* makeSqliteDb({ _tag: 'in-memory' })
 
       const lockStatus = yield* SubscriptionRef.make<'has-lock' | 'no-lock'>('has-lock')
 
@@ -1456,7 +1459,7 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       )
 
       const clientSession = {
-        sqliteDb: {} as ClientSession['sqliteDb'],
+        sqliteDb,
         devtools: { enabled: false } as ClientSession['devtools'],
         clientId: 'client-test',
         sessionId: 'session-test',

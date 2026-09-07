@@ -214,7 +214,9 @@ export class Store<TSchema extends LiveStoreSchema = LiveStoreSchema.Any, TConte
 
     const reactivityGraph = makeReactivityGraph()
     const sqliteDbWrapper = new SqliteDbWrapper({ otel: otelOptions, db: clientSession.sqliteDb })
-    const stateDbLayer = StateSqliteDb.layer(clientSession.sqliteDb)
+    // Journal rollback must invalidate cached reads too. Both roles use the same connection, with the state
+    // services consuming its cache-aware adapter instead of bypassing it during changeset/savepoint rollback.
+    const stateDbLayer = StateSqliteDb.layer(sqliteDbWrapper)
     const reactiveStateDbLayer = ReactiveStateSqliteDb.layer(sqliteDbWrapper)
     const stateServicesLayer = Layer.mergeAll(MaterializationJournal.layer, StateHead.layer).pipe(
       Layer.provide(stateDbLayer),

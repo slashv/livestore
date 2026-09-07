@@ -187,8 +187,55 @@ push:       idle
 
 The session keeps one intentional exception to mailbox ownership: `Store.commit` must materialize and update local
 state synchronously so a UI read immediately after the commit sees the new value. The resulting propagation request is
-then sent through the mailbox. Pull reconciliation re-reads the live pending suffix because a synchronous commit may
-arrive while an asynchronous rebase is in progress.
+then sent through the mailbox. Pull reconciliation yields only after a complete SQLite/model step, and merges again
+from live pending events when it resumes. It must not install a planned head before the corresponding state exists.
+
+### Safe session reconciliation steps
+
+See [regressions, review and browser measurements](./0003-session-reconciliation-validation.md) for the evidence and limits.
+
+The earlier split let a local commit land inside an unfinished rebase. It repaired the pending propagation queue, but
+an older materialization could still overwrite the newer durable head. Independent inserts hid the corresponding
+row-order problem. The full-Store regression tests now cover both head equality and noncommutative updates.
+
+The session keeps the same mailbox and synchronous local lane, with this rule: **every pause exposes a complete
+upstream prefix plus all current optimistic events, with matching SQLite state, journal, and in-memory head**.
+
+1. Validate the complete incoming payload before applying a prefix.
+2. If a step needs a rebase, cancel the old push while leaving the old committed model intact. New local commits can
+   still finish during this wait. Recompute the merge afterward; the pre-cancellation result is not a durable plan.
+3. Normally apply up to 32 upstream events against the live pending suffix. An explicit leader rebase's first step
+   must replace enough history to reach the old upstream head before yielding. Rollback, incoming materialization, pending replay,
+   and the state head share one savepoint. Suppress automatic Effect scheduler yields during this synchronous work.
+4. After success, install the matching model, publish it, and refresh affected tables. Subscriber callbacks may commit
+   at this point. Yield before the next step so other fibers and browser input can run.
+5. Only the final step discards the journal through the payload's confirmed `globalHead`. Rebuild propagation from the
+   final pending suffix, filtering delayed admission messages that contain obsolete encodings.
+
+This is a scheduling change, not another state-machine layer. `ClientSessionSyncProcessor` retains orchestration;
+the existing SQLite, journal and state-head services retain storage responsibilities. Within Store, those services
+use the cache-aware SQLite adapter so changeset/savepoint rollback cannot leave query results cached from old history.
+Because journal rollback does not return affected table names, a rollback conservatively refreshes all user tables.
+
+The production materializer, journal and head effects must remain synchronous, as required by `Store.commit` too.
+`PreventSchedulerYield` suppresses automatic yielding; it does not make a genuinely asynchronous effect synchronous.
+No network wait, cancellation, timer, or test barrier belongs inside the savepoint/model step.
+
+Consequential behavior and limits:
+
+- Subscribers may observe complete intermediate prefixes instead of only the end of a pull batch. They never need
+  to interpret a planned head whose rows have not been applied yet.
+- If a later step fails, earlier committed prefixes remain. The failing step rolls back and the processor fails.
+  This is step atomicity, not whole-payload atomicity. Cleanup failures still mean the connection cannot be trusted.
+- Admission is checked before encoding/materialization as well as in `push`, so failure/shutdown cleanup cannot
+  reject a local event only after it has changed SQLite.
+- A pending event rebased onto the end of one prefix can be confirmed by a matching event in the next prefix. The
+  tests require confirmation rather than duplicating that event. Arbitrary batch partitions are not guaranteed to
+  produce identical merge outcomes under the old whole-batch algorithm.
+- A step bounds incoming event count, not elapsed time: replaying a large pending suffix, rolling back a large leader
+  rebase, expensive materializers, and subscriber work can still cause a long task. There is no hard frame-time bound.
+- Session SQLite/head consistency is not a promise that an unacknowledged local event survives a crash. Leader
+  acknowledgement and cross-database crash atomicity retain their existing meanings and limits.
 
 ## Representative Call Stacks
 
@@ -250,10 +297,9 @@ provider pull fiber
 session leader-pull fiber
   └─ mailbox: PullItemReceived
        └─ handlePullItem
-            ├─ merge advance or rebase
-            ├─ rollback/materialize session state
-            ├─ refresh affected tables
-            ├─ publish live session SyncState
+            ├─ validate full payload
+            ├─ cancel obsolete push before planning a rebase step
+            ├─ repeat: merge live state → atomic SQLite/model step → publish/refresh → yield
             └─ resume leader propagation when reconciliation is complete
 ```
 
@@ -307,17 +353,19 @@ into plans, commands, and completion types would add more hops without creating 
 
 ## Guarantees and Deliberate Limits
 
-| Guarantee                                                                    | Status                                             |
-| ---------------------------------------------------------------------------- | -------------------------------------------------- |
-| One owner orders asynchronous transitions in each processor                  | guaranteed by the mailbox loop                     |
-| Local leader pushes are validated against committed plus reserved history    | guaranteed                                         |
-| Upstream pagination takes precedence over new local durable work             | guaranteed                                         |
-| Publication and acknowledgement happen only after a successful leader commit | guaranteed                                         |
-| Late provider or leader-push completions cannot advance newer work           | guarded by operation identities                    |
-| A session commit is immediately visible to that session                      | guaranteed by the synchronous local lane           |
-| Backend head and matching event inserts use the same eventlog transaction    | guaranteed                                         |
-| State DB and eventlog DB are crash-atomic together                           | **not guaranteed**                                 |
-| A leader acknowledgement means backend acceptance                            | **not guaranteed**; it means durable and scheduled |
+| Guarantee                                                                    | Status                                                             |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| One owner orders asynchronous transitions in each processor                  | guaranteed by the mailbox loop                                     |
+| Local leader pushes are validated against committed plus reserved history    | guaranteed                                                         |
+| Upstream pagination takes precedence over new local durable work             | guaranteed                                                         |
+| Publication and acknowledgement happen only after a successful leader commit | guaranteed                                                         |
+| Late provider or leader-push completions cannot advance newer work           | guarded by operation identities                                    |
+| A session commit is immediately visible to that session                      | guaranteed by the synchronous local lane                           |
+| Session rows, journal and head agree at reconciliation yield points          | guaranteed for the synchronous SQLite/materializer implementations |
+| A complete session pull payload is applied atomically                        | **not guaranteed**; complete prefixes may be visible               |
+| Backend head and matching event inserts use the same eventlog transaction    | guaranteed                                                         |
+| State DB and eventlog DB are crash-atomic together                           | **not guaranteed**                                                 |
+| A leader acknowledgement means backend acceptance                            | **not guaranteed**; it means durable and scheduled                 |
 
 The state and eventlog databases use separate SQLite connections. The committer coordinates their normal success and
 rollback paths, but it cannot make them atomic across a process crash. State is committed first so the eventlog does not
@@ -333,3 +381,5 @@ For a code review or architecture walkthrough, read the implementation in this o
 3. `LeaderSyncCommitter.ts`: the durable transition implementation.
 4. `ClientSessionSyncProcessor.test.ts`, `LeaderSyncProcessor.test.ts`, and `LeaderSyncCommitter.test.ts`: races,
    transition invariants, and SQLite-backed behaviour.
+5. `ClientSessionReconciliation.test.ts`: real-Store cancellation, ordered replay, durable heads, failure cleanup,
+   intermediate prefixes, rollback cache invalidation, and subscriber commits.
