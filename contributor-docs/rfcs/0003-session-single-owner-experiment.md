@@ -23,11 +23,20 @@ traversal bookkeeping, not a second copy of the session model.
 
 All orchestration is still in [ClientSessionSyncProcessor.ts](../../packages/@livestore/common/src/sync/ClientSessionSyncProcessor.ts).
 
-1. `transition`: the only writer of the model, including SQLite commits, propagation reservations and lifecycle.
-2. `dispatch`: prevents materializer reentrancy and stages notifications until the transition owner is released.
-3. `boot` / `reconcile` / `runCommand`: owns network fibers, waiting, cancellation and yielding. Calls dispatch;
-   does not write domain state. Checks a queued push's identity before starting it.
-4. [Store.commit](../../packages/@livestore/livestore/src/store/store.ts): one processor call, then its existing
+1. `transition`: a short routing switch showing local commit, pull, push completion and shutdown workflows.
+2. `dispatch`: the synchronous ownership guard. Prevents materializer reentrancy and delivers staged notifications
+   only after a successful transition releases the owner.
+3. `commitLocalEvents` / `acceptPull` / `applyPullStep` / `finishPull`: named owner workflows. `applyPullStep` keeps
+   the sequence visible: check identity, merge live state, request cancellation if needed, apply SQLite, install the
+   matching model, then stage publication. `applyPullToSqlite` contains the complete savepoint and journal details.
+4. `completePush` / `reserveNextPush` / `requestShutdown` / `startDrain` / `failSession`: propagation and lifecycle
+   workflows under the same owner. Reserving a push changes the model before its command becomes visible.
+5. `reconcile` / `startLeaderPush` / `runCommand` / `runCommands` / `pull`: asynchronous execution. These functions
+   call dispatch and never write domain state. The reconciliation loop keeps cancellation, retry, refresh and yield
+   together; `startLeaderPush` checks a queued push's identity before starting it.
+6. `boot`: acquires the fiber handles, installs the unload listener, and starts the owner and runners. Its scope still
+   owns all those resources. Defining the lazy execution helpers outside boot does not start them early.
+7. [Store.commit](../../packages/@livestore/livestore/src/store/store.ts): one processor call, then its existing
    tracing, refresh, skipRefresh and error/shutdown behavior.
 
 ```mermaid
@@ -75,11 +84,13 @@ work; it does not define event-log order. Sequence numbers and SyncState.merge s
   the entire local savepoint and matching model installation; Store still owns its local subscriber refresh.
 - Removed delayed `LocalPushAdmitted` and its obsolete-encoding filtering. New local events enter the current
   propagation state within the same transition, and no replacement push starts during reconciliation.
-- Every model assignment is in transition. Waiting and storage state changes are no longer interleaved in a handler.
+- Every model assignment is in transition or its private owner workflows. Waiting and storage state changes are no
+  longer interleaved in a handler.
 - Added an explicit command vocabulary and reconciliation identity, plus notification staging. This is a real cost
   in concepts even though it introduces no additional production module.
-- The large event switch centralizes navigation but may be less pleasant to read than the baseline's focused async
-  functions. Fewer writers do not, by themselves, prove a simpler mental model.
+- The routing switch centralizes navigation while private functions group the owner workflows. Persistence details
+  and asynchronous execution have separate sections in the same file. Fewer writers do not, by themselves, prove a
+  simpler mental model; the named workflows add navigation points and do not remove the notification-stage contract.
 
 Effect Queue and Deferred notifications can resume another fiber inline. Merely suppressing automatic scheduler
 yields is therefore insufficient to prevent reentrant observers. Dispatch collects these notifications, releases
@@ -126,12 +137,22 @@ Browser fixture and results: [run instructions](../../tests/perf/session-sync/RE
 The final 130-sample run passed every checked invariant for both versions, with closely comparable timings. It supports
 preserving responsiveness with single ownership; it does not decide whether that ownership is easier to understand.
 
-The final processor is 640 lines versus the baseline's 600; Store's commit plumbing loses 15 lines. There is no new
-production module. This is a net 25-line production increase, not a deletion-based simplification. Most of the branch
-diff is tests, trace snapshots, the browser fixture and documentation.
+At the original measured checkpoint, the processor was 640 lines versus the baseline's 600; Store's commit plumbing
+lost 15 lines. The subsequent structural refactor adds private workflow functions and explicit helper types, keeping
+all orchestration in this file. Its benefit is readable operation sequences, not fewer lines. No new production
+module or event protocol is introduced.
+
+The September 17, 2026 structural refactor passed the root unit suite (129 passed, 1 skipped), the focused session
+regressions (45 passed), the Common/LiveStore package suites (352 passed, 1 skipped), both TypeScript checks and full
+lint. A fresh browser comparison also passed all 130 samples with zero correctness or trial failures. The original
+measurement artifacts remain unchanged; the rerun validates the refactor without replacing the recorded comparison.
 
 ## Experiment checklist
 
+- [x] Extract pull persistence into one savepoint helper, keeping SQLite-before-model ordering visible.
+- [x] Give owner workflows names and retain one guarded dispatch entrypoint.
+- [x] Separate asynchronous execution from boot resource acquisition and startup.
+- [x] Rerun regression tests, TypeScript, lint and the browser comparison after the structural refactor.
 - [x] Start from the fixed checkpoint in an isolated worktree.
 - [x] One synchronous owner; retain small complete reconciliation steps and existing Store behavior.
 - [x] Run baseline regressions and add tests for changed completion ordering.

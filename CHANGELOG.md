@@ -10,6 +10,12 @@
 
 - **Session sync:** Keep local edits and persisted state heads consistent during concurrent reconciliation by yielding between complete SQLite/model steps. Refresh cached queries after rollback and prevent failed-processor admission from materializing events. Large pull batches can publish complete intermediate prefixes ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 
+### Internal Changes
+
+For maintainers reviewing the isolated single-owner session-sync experiment:
+
+- **Session sync:** Organize the processor into named owner workflows, a pull-persistence helper, and asynchronous execution functions with concise startup wiring. This structural refactor preserves the existing synchronous commit and yielding reconciliation contracts ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
+
 ## 0.4.0 - 2026-06-02
 
 > **Installing v0.4.0:** Make sure all LiveStore packages use the same version:

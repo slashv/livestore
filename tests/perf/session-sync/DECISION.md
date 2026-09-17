@@ -24,8 +24,10 @@ measurement.
 | Fixed split-owner baseline       | `4ead601cdc81e1d594fc56cfc97839cb39f9e75b` |
 | Yielding single-owner experiment | `159b64689e65a488bd89804a599fc39984c16012` |
 
-The subsequent results commit changes only documentation and measurement artifacts. The measured implementation is
-unchanged. [RESULTS.md](./RESULTS.md) is generated from [results.json](./results.json).
+The subsequent results commit changes only documentation and measurement artifacts.
+[RESULTS.md](./RESULTS.md) is generated from [results.json](./results.json). These saved measurements describe the
+original implementation. A later structural refactor names the owner workflows, extracts pull persistence and
+separates asynchronous execution from boot; the original measurement artifacts are retained for comparison.
 
 Representative workload medians, milliseconds:
 
@@ -50,9 +52,10 @@ The implementation removes LocalPushAdmitted and its stale-encoding repair. It a
 reconciliation identity and a notification stage. That stage is necessary because an Effect Queue/Deferred may resume
 another caller inline. Notifications and subscriber callbacks run after the owner has completed its state changes.
 
-The processor grows from 600 to 640 lines, while Store commit plumbing shrinks by 15 lines. The net production change
-is +25 lines. The small interface is deeper, but centralization is not automatically simpler: reading a transition
-switch and understanding staged notifications is a different mental cost from understanding two explicit paths.
+At the measured checkpoint, the processor grew from 600 to 640 lines, while Store commit plumbing shrank by 15 lines.
+The later readability refactor adds private function boundaries and types. The small interface is deeper, but
+centralization is not automatically simpler: navigating owner workflows and understanding staged notifications is a
+different mental cost from understanding two explicit paths.
 
 ## Correctness and review
 

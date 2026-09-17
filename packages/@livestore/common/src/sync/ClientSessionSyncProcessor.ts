@@ -59,6 +59,9 @@ export type RebaseBarrierPoint =
  * The command runner does the waiting. Its reconciliation loop calls dispatch for one complete step, refreshes
  * subscribers, then yields. Loop locals describe traversal, not an alternative copy of session state. This keeps
  * local commits responsive between steps without a second state-changing path or a continuation-event framework.
+ *
+ * Read transition for the workflow map, then commitLocalEvents or applyPullStep for state changes. Persistence
+ * details live in applyPullToSqlite; reconcile shows where cancellation, callbacks and yielding can interleave.
  */
 export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncProcessor')(function* ({
   schema,
@@ -106,9 +109,289 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     terminalCause: undefined,
   }
   const debugInfo = { rebaseCount: 0, advanceCount: 0, rejectCount: 0 }
+
+  /** All model changes run through these workflows under dispatch's synchronous ownership guard. */
+  const transition = (event: Event, deferNotification: DeferNotification): Effect.Effect<StepResult, ProcessorError> =>
+    Effect.gen(function* () {
+      switch (event._tag) {
+        case 'Started':
+          if (model.lifecycle === 'starting') model = { ...model, lifecycle: 'running' }
+          break
+        case 'Commit':
+          return yield* commitLocalEvents(event.events, deferNotification)
+        case 'PullReceived':
+          yield* acceptPull(event, deferNotification)
+          break
+        case 'PullStep':
+          return yield* applyPullStep(event, deferNotification)
+        case 'PullFinished':
+          yield* finishPull(event, deferNotification)
+          break
+        case 'PushSucceeded':
+        case 'PushRejected':
+        case 'PushFailed':
+          yield* completePush(event, deferNotification)
+          break
+        case 'Failed':
+          yield* failSession(event.cause, deferNotification)
+          break
+        case 'ShutdownRequested':
+          yield* requestShutdown(event.exit, deferNotification)
+          break
+        case 'DrainStarted':
+          yield* startDrain(event.exit, deferNotification)
+          break
+        case 'Stopped':
+          model = { ...model, lifecycle: 'stopped', reconciliation: undefined }
+          yield* deferNotification(Deferred.done(shutdownDone, event.exit))
+          break
+        default:
+          casesHandled(event)
+      }
+      return { _tag: 'applied', writeTables: new Set<string>() }
+    })
+
+  let dispatching = false
+  const dispatch = (event: Event) =>
+    Effect.suspend(() => {
+      if (dispatching === true) return Effect.die(new Error('Reentrant session transition from materialization'))
+      dispatching = true
+      // Completing a Deferred or offering a Queue can resume another Effect fiber inline. Stage those notifications
+      // until the owner is released, just as we do for subscriber callbacks. Reentrant callers then see finished state.
+      const notifications: Array<Effect.Effect<unknown>> = []
+      return transition(event, (effect) =>
+        Effect.sync(() => {
+          notifications.push(effect)
+        }),
+      ).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            dispatching = false
+          }),
+        ),
+        Effect.tap(() => Effect.forEach(notifications, (effect) => effect, { discard: true })),
+      )
+    }).pipe(
+      // Exclusion relies on synchronous storage/materializers, not merely a savepoint or an uninterruptible fiber.
+      Effect.provideService(References.PreventSchedulerYield, true),
+      Effect.uninterruptible,
+    )
+
+  // Synchronous owner workflows. Waiting and subscriber callbacks belong to the runner below.
+
+  const commitLocalEvents = (
+    events: ReadonlyArray<LiveStoreEvent.Input.Decoded>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<StepResult, ProcessorError> =>
+    Effect.gen(function* () {
+      yield* checkLocalAdmission
+      const encoded = yield* encodeEvents(events)
+      const result = yield* merge({ _tag: 'local-push', newEvents: encoded })
+      if (result._tag !== 'advance') return yield* Effect.die(new Error('Expected advance from local-push merge'))
+      yield* Effect.annotateCurrentSpan({
+        batchSize: encoded.length,
+        mergeResultTag: result._tag,
+        eventCounts: encoded.reduce<Record<string, number>>((counts, item) => {
+          counts[item.name] = (counts[item.name] ?? 0) + 1
+          return counts
+        }, {}),
+        ...(TRACE_VERBOSE === true ? { mergeResult: Schema.encodeSync(Schema.UnknownFromJsonString)(result) } : {}),
+      })
+      const { writeTables } = yield* materializeEvents(encoded).pipe(
+        SqliteDbHelper.withSavepoint(dbState),
+        Effect.mapError((cause) => (cause._tag === 'SqliteError' ? new UnknownError({ cause }) : cause)),
+      )
+      model = {
+        ...model,
+        syncState: result.newSyncState,
+        push:
+          model.push._tag === 'awaiting-reconciliation'
+            ? model.push
+            : { ...model.push, queued: [...model.push.queued, ...result.newEvents] },
+      }
+      yield* deferNotification(Queue.offer(syncStateUpdateQueue, model.syncState))
+      yield* reserveNextPush(deferNotification)
+      return { _tag: 'applied', writeTables }
+    })
+
+  const acceptPull = (
+    event: Extract<Event, { _tag: 'PullReceived' }>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle !== 'running' || model.shutdownExit !== undefined) {
+        yield* deferNotification(Deferred.succeed(event.completed, undefined))
+        return
+      }
+      // Validate the whole payload before applying a prefix; never retain this as a materialization plan.
+      const result = yield* merge(event.item.payload)
+      if (result._tag === 'reject') return yield* Effect.die(new Error('Unexpected rejected pull'))
+      if (model.reconciliation !== undefined) return yield* Effect.die(new Error('Pull backpressure was bypassed'))
+      const id = model.nextOperationId
+      const minimumEnd =
+        event.item.payload._tag === 'upstream-rebase'
+          ? event.item.payload.newEvents.findIndex((item) =>
+              EventSequenceNumber.Client.isGreaterThanOrEqual(item.seqNum, model.syncState.upstreamHead),
+            ) + 1
+          : 0
+      model = {
+        ...model,
+        nextOperationId: id + 1,
+        reconciliation: { id },
+      }
+      yield* deferNotification(
+        Queue.offer(commands, { _tag: 'Reconcile', id, item: event.item, minimumEnd, completed: event.completed }),
+      )
+    })
+
+  const applyPullStep = (
+    event: Extract<Event, { _tag: 'PullStep' }>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<StepResult, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle !== 'running' || model.reconciliation?.id !== event.id) return { _tag: 'obsolete' }
+      const result = yield* merge(event.payload)
+      if (result._tag === 'reject') return yield* Effect.die(new Error('Unexpected rejected pull'))
+      if (result._tag === 'rebase' && event.pushCancelled === false) return { _tag: 'cancel-push' }
+      const { writeTables } = yield* applyPullToSqlite(result, event)
+      model = {
+        ...model,
+        syncState: result.newSyncState,
+        // Invalidate the old operation before any queued completion can run. No replacement starts mid-pull.
+        push: result._tag === 'rebase' ? { _tag: 'idle', queued: result.newSyncState.pending } : model.push,
+      }
+      yield* deferNotification(Queue.offer(syncStateUpdateQueue, model.syncState))
+      return { _tag: 'applied', writeTables }
+    })
+
+  const finishPull = (
+    event: Extract<Event, { _tag: 'PullFinished' }>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle !== 'running' || model.reconciliation?.id !== event.id) return
+      // A push can finish between steps now. Judge rejection recovery against its current state, not a
+      // snapshot taken when the pull started (the later prefixes may have confirmed the rejected batch).
+      const recovered =
+        model.push._tag === 'awaiting-reconciliation' &&
+        isRejectedBatchRecovered(model.push.rejectedEvents, model.syncState.pending)
+      model = {
+        ...model,
+        reconciliation: undefined,
+        push:
+          event.rebased === true || recovered === true ? { _tag: 'idle', queued: model.syncState.pending } : model.push,
+      }
+      if (event.rebased === true) debugInfo.rebaseCount++
+      else debugInfo.advanceCount++
+      yield* reserveNextPush(deferNotification)
+    })
+
+  const completePush = (
+    event: Extract<Event, { _tag: 'PushSucceeded' | 'PushRejected' | 'PushFailed' }>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle !== 'running' && model.lifecycle !== 'stopping') return
+      if (model.push._tag !== 'in-flight' || model.push.operationId !== event.operationId) return
+      if (event._tag === 'PushFailed') {
+        yield* failSession(event.cause, deferNotification)
+        return
+      }
+      if (event._tag === 'PushSucceeded') {
+        model = { ...model, push: { _tag: 'idle', queued: model.push.queued } }
+      } else {
+        debugInfo.rejectCount++
+        yield* deferNotification(Deferred.succeed(rejectionObserved, undefined))
+        model = {
+          ...model,
+          push:
+            isRejectedBatchRecovered(model.push.batch, model.syncState.pending) === true
+              ? { _tag: 'idle', queued: model.syncState.pending }
+              : { _tag: 'awaiting-reconciliation', rejectedEvents: model.push.batch, error: event.error },
+        }
+        if (model.lifecycle === 'stopping' && model.push._tag === 'awaiting-reconciliation') {
+          yield* deferNotification(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
+        }
+      }
+      yield* reserveNextPush(deferNotification)
+    })
+
+  /** Reserve the operation before its command becomes visible to the asynchronous runner. */
+  const reserveNextPush = (deferNotification: DeferNotification): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.reconciliation !== undefined || (model.lifecycle !== 'running' && model.lifecycle !== 'stopping'))
+        return
+      if (model.push._tag !== 'idle') return
+      if (model.push.queued.length === 0) {
+        if (model.lifecycle === 'stopping')
+          yield* deferNotification(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.void }))
+        return
+      }
+      const operationId = model.nextOperationId
+      const batch = model.push.queued.slice(0, params.leaderPushBatchSize)
+      model = {
+        ...model,
+        nextOperationId: operationId + 1,
+        push: { _tag: 'in-flight', operationId, batch, queued: model.push.queued.slice(batch.length) },
+      }
+      yield* deferNotification(Queue.offer(commands, { _tag: 'Push', operationId, batch }))
+    })
+
+  const requestShutdown = (
+    exit: Exit.Exit<unknown, unknown>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.shutdownExit !== undefined || model.lifecycle === 'stopped') return
+      // Close admission now, but finish the already-accepted pull before starting the graceful drain.
+      model = { ...model, shutdownExit: exit }
+      yield* deferNotification(Queue.offer(commands, { _tag: 'BeginShutdown', exit }))
+    })
+
+  const startDrain = (
+    exit: Exit.Exit<unknown, unknown>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle === 'stopped') return
+      model = { ...model, lifecycle: 'stopping' }
+      if (Exit.isFailure(exit) === true) {
+        yield* deferNotification(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.void }))
+        return
+      }
+      yield* deferNotification(Deferred.succeed(drainStartedSignal, undefined))
+      if (model.terminalCause !== undefined) {
+        yield* deferNotification(
+          Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.failCause(model.terminalCause) }),
+        )
+      } else if (model.push._tag === 'awaiting-reconciliation') {
+        yield* deferNotification(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
+      } else yield* reserveNextPush(deferNotification)
+    })
+
+  const failSession = (
+    cause: Cause.Cause<ProcessorError>,
+    deferNotification: DeferNotification,
+  ): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      if (model.lifecycle === 'failed' || model.lifecycle === 'stopped') return
+      const terminalCause = Cause.die(Cause.squash(cause))
+      const stopping = model.lifecycle === 'stopping'
+      model = { ...model, lifecycle: 'failed', reconciliation: undefined, terminalCause }
+      yield* deferNotification(
+        Queue.offer(
+          commands,
+          stopping === true
+            ? { _tag: 'FinishShutdown', exit: Exit.failCause(terminalCause) }
+            : { _tag: 'NotifyFailure', cause },
+        ),
+      )
+    })
+
+  // Synchronous admission, encoding and persistence. These helpers never install or publish the session model.
+
   const isClientOnlyEvent = (event: LiveStoreEvent.Client.Encoded) =>
     schema.eventsDefsMap.get(event.name)?.options.clientOnly ?? false
-  const rebaseBarrier = (point: RebaseBarrierPoint) => params.rebaseBarriers?.[point] ?? Effect.void
   const merge = (payload: typeof SyncState.Payload.Type) =>
     SyncState.merge({
       syncState: model.syncState,
@@ -166,259 +449,168 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     return { writeTables }
   })
 
-  const transition = (
-    event: Event,
-    notify: (effect: Effect.Effect<unknown>) => Effect.Effect<void>,
-  ): Effect.Effect<StepResult, ProcessorError> =>
+  /** Complete the SQLite step before the owner installs its matching model or publishes notifications. */
+  const applyPullToSqlite = (
+    result: SyncState.MergeResultAdvance | SyncState.MergeResultRebase,
+    event: Extract<Event, { _tag: 'PullStep' }>,
+  ) =>
     Effect.gen(function* () {
-      const emit = (command: Command) => notify(Queue.offer(commands, command))
-      // Only transition calls these helpers. Reserving a push is state work; starting/cancelling its fiber is not.
-      const schedulePush = Effect.gen(function* () {
-        if (model.reconciliation !== undefined || (model.lifecycle !== 'running' && model.lifecycle !== 'stopping'))
-          return
-        if (model.push._tag !== 'idle') return
-        if (model.push.queued.length === 0) {
-          if (model.lifecycle === 'stopping') yield* emit({ _tag: 'FinishShutdown', exit: Exit.void })
-          return
+      const writeTables = new Set<string>()
+      if (result._tag === 'rebase') {
+        yield* materializationJournal.rollback(result.rollbackEvents.map((item) => item.seqNum))
+        // Rollback may touch tables absent from replacement events. Refresh all user tables in that case.
+        if (result.rollbackEvents.length > 0) {
+          for (const table of schema.state.sqlite.tables.keys()) {
+            if (SystemTables.isStateSystemTable(table) === false) writeTables.add(table)
+          }
         }
-        const operationId = model.nextOperationId
-        const batch = model.push.queued.slice(0, params.leaderPushBatchSize)
-        model = {
-          ...model,
-          nextOperationId: operationId + 1,
-          push: { _tag: 'in-flight', operationId, batch, queued: model.push.queued.slice(batch.length) },
-        }
-        yield* emit({ _tag: 'Push', operationId, batch })
-      })
-
-      const fail = (cause: Cause.Cause<ProcessorError>) =>
-        Effect.gen(function* () {
-          if (model.lifecycle === 'failed' || model.lifecycle === 'stopped') return
-          const terminalCause = Cause.die(Cause.squash(cause))
-          const stopping = model.lifecycle === 'stopping'
-          model = { ...model, lifecycle: 'failed', reconciliation: undefined, terminalCause }
-          yield* emit(
-            stopping === true
-              ? { _tag: 'FinishShutdown', exit: Exit.failCause(terminalCause) }
-              : { _tag: 'NotifyFailure', cause },
-          )
-        })
-
-      switch (event._tag) {
-        case 'Started':
-          if (model.lifecycle === 'starting') model = { ...model, lifecycle: 'running' }
-          break
-        case 'Commit': {
-          yield* checkLocalAdmission
-          const encoded = yield* encodeEvents(event.events)
-          const result = yield* merge({ _tag: 'local-push', newEvents: encoded })
-          if (result._tag !== 'advance') return yield* Effect.die(new Error('Expected advance from local-push merge'))
-          yield* Effect.annotateCurrentSpan({
-            batchSize: encoded.length,
-            mergeResultTag: result._tag,
-            eventCounts: encoded.reduce<Record<string, number>>((counts, item) => {
-              counts[item.name] = (counts[item.name] ?? 0) + 1
-              return counts
-            }, {}),
-            ...(TRACE_VERBOSE === true ? { mergeResult: Schema.encodeSync(Schema.UnknownFromJsonString)(result) } : {}),
-          })
-          const { writeTables } = yield* materializeEvents(encoded).pipe(
-            SqliteDbHelper.withSavepoint(dbState),
-            Effect.mapError((cause) => (cause._tag === 'SqliteError' ? new UnknownError({ cause }) : cause)),
-          )
-          model = {
-            ...model,
-            syncState: result.newSyncState,
-            push:
-              model.push._tag === 'awaiting-reconciliation'
-                ? model.push
-                : { ...model.push, queued: [...model.push.queued, ...result.newEvents] },
-          }
-          yield* notify(Queue.offer(syncStateUpdateQueue, model.syncState))
-          yield* schedulePush
-          return { _tag: 'applied', writeTables }
-        }
-        case 'PullReceived': {
-          if (model.lifecycle !== 'running' || model.shutdownExit !== undefined) {
-            yield* notify(Deferred.succeed(event.completed, undefined))
-            break
-          }
-          // Validate the whole payload before applying a prefix; never retain this as a materialization plan.
-          const result = yield* merge(event.item.payload)
-          if (result._tag === 'reject') return yield* Effect.die(new Error('Unexpected rejected pull'))
-          if (model.reconciliation !== undefined) return yield* Effect.die(new Error('Pull backpressure was bypassed'))
-          const id = model.nextOperationId
-          const minimumEnd =
-            event.item.payload._tag === 'upstream-rebase'
-              ? event.item.payload.newEvents.findIndex((item) =>
-                  EventSequenceNumber.Client.isGreaterThanOrEqual(item.seqNum, model.syncState.upstreamHead),
-                ) + 1
-              : 0
-          model = {
-            ...model,
-            nextOperationId: id + 1,
-            reconciliation: { id },
-          }
-          yield* emit({ _tag: 'Reconcile', id, item: event.item, minimumEnd, completed: event.completed })
-          break
-        }
-        case 'PullStep': {
-          if (model.lifecycle !== 'running' || model.reconciliation?.id !== event.id) return { _tag: 'obsolete' }
-          const result = yield* merge(event.payload)
-          if (result._tag === 'reject') return yield* Effect.die(new Error('Unexpected rejected pull'))
-          if (result._tag === 'rebase' && event.pushCancelled === false) return { _tag: 'cancel-push' }
-          const writeTables = new Set<string>()
-          yield* Effect.gen(function* () {
-            if (result._tag === 'rebase') {
-              yield* materializationJournal.rollback(result.rollbackEvents.map((item) => item.seqNum))
-              // Rollback may touch tables absent from replacement events. Refresh all user tables in that case.
-              if (result.rollbackEvents.length > 0) {
-                for (const table of schema.state.sqlite.tables.keys()) {
-                  if (SystemTables.isStateSystemTable(table) === false) writeTables.add(table)
-                }
-              }
-            }
-            for (const item of result.newEvents) {
-              const materialized = yield* materializeEvent(item, {
-                // A replayed pending event can temporarily share a sequence number with a later incoming event.
-                materializerHashLeader:
-                  event.payload.newEvents.some((incoming) => LiveStoreEvent.Client.isEqualEncoded(incoming, item)) ===
-                  true
-                    ? (event.materializerHashes.find(({ eventNum }) =>
-                        EventSequenceNumber.Client.isEqual(eventNum, item.seqNum),
-                      )?.hash ?? Option.none())
-                    : Option.none(),
-              })
-              for (const table of materialized.writeTables) writeTables.add(table)
-            }
-            yield* stateHead.set(result.newSyncState.localHead)
-            if (event.last === true) yield* materializationJournal.discardUpTo(event.globalHead)
-          }).pipe(
-            SqliteDbHelper.withSavepoint(dbState),
-            Effect.mapError((cause) => (cause._tag === 'SqliteError' ? new UnknownError({ cause }) : cause)),
-          )
-          model = {
-            ...model,
-            syncState: result.newSyncState,
-            // Invalidate the old operation before any queued completion can run. No replacement starts mid-pull.
-            push: result._tag === 'rebase' ? { _tag: 'idle', queued: result.newSyncState.pending } : model.push,
-          }
-          yield* notify(Queue.offer(syncStateUpdateQueue, model.syncState))
-          return { _tag: 'applied', writeTables }
-        }
-        case 'PullFinished': {
-          if (model.lifecycle !== 'running' || model.reconciliation?.id !== event.id) break
-          // A push can finish between steps now. Judge rejection recovery against its current state, not a
-          // snapshot taken when the pull started (the later prefixes may have confirmed the rejected batch).
-          const recovered =
-            model.push._tag === 'awaiting-reconciliation' &&
-            isRejectedBatchRecovered(model.push.rejectedEvents, model.syncState.pending)
-          model = {
-            ...model,
-            reconciliation: undefined,
-            push:
-              event.rebased === true || recovered === true
-                ? { _tag: 'idle', queued: model.syncState.pending }
-                : model.push,
-          }
-          if (event.rebased === true) debugInfo.rebaseCount++
-          else debugInfo.advanceCount++
-          yield* schedulePush
-          break
-        }
-        case 'PushSucceeded':
-        case 'PushRejected':
-        case 'PushFailed': {
-          if (model.lifecycle !== 'running' && model.lifecycle !== 'stopping') break
-          if (model.push._tag !== 'in-flight' || model.push.operationId !== event.operationId) break
-          if (event._tag === 'PushFailed') {
-            yield* fail(event.cause)
-            break
-          }
-          if (event._tag === 'PushSucceeded') {
-            model = { ...model, push: { _tag: 'idle', queued: model.push.queued } }
-          } else {
-            debugInfo.rejectCount++
-            yield* notify(Deferred.succeed(rejectionObserved, undefined))
-            model = {
-              ...model,
-              push:
-                isRejectedBatchRecovered(model.push.batch, model.syncState.pending) === true
-                  ? { _tag: 'idle', queued: model.syncState.pending }
-                  : { _tag: 'awaiting-reconciliation', rejectedEvents: model.push.batch, error: event.error },
-            }
-            if (model.lifecycle === 'stopping' && model.push._tag === 'awaiting-reconciliation') {
-              yield* emit({ _tag: 'FinishShutdown', exit: Exit.die(model.push.error) })
-            }
-          }
-          yield* schedulePush
-          break
-        }
-        case 'Failed':
-          yield* fail(event.cause)
-          break
-        case 'ShutdownRequested':
-          if (model.shutdownExit !== undefined || model.lifecycle === 'stopped') break
-          // Close admission now, but finish the already-accepted pull before starting the graceful drain.
-          model = { ...model, shutdownExit: event.exit }
-          yield* emit({ _tag: 'BeginShutdown', exit: event.exit })
-          break
-        case 'DrainStarted':
-          if (model.lifecycle === 'stopped') break
-          model = { ...model, lifecycle: 'stopping' }
-          if (Exit.isFailure(event.exit) === true) {
-            yield* emit({ _tag: 'FinishShutdown', exit: Exit.void })
-            break
-          }
-          yield* notify(Deferred.succeed(drainStartedSignal, undefined))
-          if (model.terminalCause !== undefined) {
-            yield* emit({ _tag: 'FinishShutdown', exit: Exit.failCause(model.terminalCause) })
-          } else if (model.push._tag === 'awaiting-reconciliation') {
-            yield* emit({ _tag: 'FinishShutdown', exit: Exit.die(model.push.error) })
-          } else yield* schedulePush
-          break
-        case 'Stopped':
-          model = { ...model, lifecycle: 'stopped', reconciliation: undefined }
-          yield* notify(Deferred.done(shutdownDone, event.exit))
-          break
-        default:
-          casesHandled(event)
       }
-      return { _tag: 'applied', writeTables: new Set<string>() }
-    })
-
-  let dispatching = false
-  const dispatch = (event: Event) =>
-    Effect.suspend(() => {
-      if (dispatching === true) return Effect.die(new Error('Reentrant session transition from materialization'))
-      dispatching = true
-      // Completing a Deferred or offering a Queue can resume another Effect fiber inline. Stage those notifications
-      // until the owner is released, just as we do for subscriber callbacks. Reentrant callers then see finished state.
-      const notifications: Array<Effect.Effect<unknown>> = []
-      return transition(event, (effect) =>
-        Effect.sync(() => {
-          notifications.push(effect)
-        }),
-      ).pipe(
-        Effect.ensuring(
-          Effect.sync(() => {
-            dispatching = false
-          }),
-        ),
-        Effect.tap(() => Effect.forEach(notifications, (effect) => effect, { discard: true })),
-      )
+      for (const item of result.newEvents) {
+        const materialized = yield* materializeEvent(item, {
+          // A replayed pending event can temporarily share a sequence number with a later incoming event.
+          materializerHashLeader:
+            event.payload.newEvents.some((incoming) => LiveStoreEvent.Client.isEqualEncoded(incoming, item)) === true
+              ? (event.materializerHashes.find(({ eventNum }) =>
+                  EventSequenceNumber.Client.isEqual(eventNum, item.seqNum),
+                )?.hash ?? Option.none())
+              : Option.none(),
+        })
+        for (const table of materialized.writeTables) writeTables.add(table)
+      }
+      yield* stateHead.set(result.newSyncState.localHead)
+      if (event.last === true) yield* materializationJournal.discardUpTo(event.globalHead)
+      return { writeTables }
     }).pipe(
-      // Exclusion relies on synchronous storage/materializers, not merely a savepoint or an uninterruptible fiber.
-      Effect.provideService(References.PreventSchedulerYield, true),
-      Effect.uninterruptible,
+      SqliteDbHelper.withSavepoint(dbState),
+      Effect.mapError((cause) => (cause._tag === 'SqliteError' ? new UnknownError({ cause }) : cause)),
     )
 
-  const boot: ClientSessionSyncProcessor['boot'] = Effect.gen(function* () {
-    const pushHandle = yield* FiberHandle.make<void, never>()
-    const pullHandle = yield* FiberHandle.make<void, never>()
-    const ownerShutdownHandle = yield* FiberHandle.make<void, never>()
-    const reportFailure = (cause: Cause.Cause<ProcessorError>) => dispatch({ _tag: 'Failed', cause }).pipe(Effect.orDie)
-    const report = (event: Event) => dispatch(event).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
+  // Asynchronous runner. It reads current state and enters the owner through dispatch.
+
+  const rebaseBarrier = (point: RebaseBarrierPoint) => params.rebaseBarriers?.[point] ?? Effect.void
+  const reportFailure = (cause: Cause.Cause<ProcessorError>) => dispatch({ _tag: 'Failed', cause }).pipe(Effect.orDie)
+  const report = (event: Event) => dispatch(event).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
+
+  const reconcile = (command: Extract<Command, { _tag: 'Reconcile' }>, pushHandle: RunnerHandles['push']) =>
+    Effect.gen(function* () {
+      let offset = 0
+      let pushCancelled = false
+      do {
+        const newEvents = command.item.payload.newEvents.slice(
+          offset,
+          Math.max(offset + PULL_CHUNK_SIZE, command.minimumEnd),
+        )
+        const last = offset + newEvents.length === command.item.payload.newEvents.length
+        const result = yield* dispatch({
+          _tag: 'PullStep',
+          id: command.id,
+          pushCancelled,
+          last,
+          payload: offset === 0 ? { ...command.item.payload, newEvents } : { _tag: 'upstream-advance', newEvents },
+          materializerHashes: command.item.materializerHashes,
+          globalHead: command.item.globalHead,
+        })
+        if (result._tag === 'obsolete') return
+        if (result._tag === 'cancel-push') {
+          yield* rebaseBarrier('before_leader_push_fiber_interrupt')
+          yield* FiberHandle.clear(pushHandle)
+          yield* rebaseBarrier('before_queue_reconcile')
+          pushCancelled = true
+          continue
+        }
+        // The owner is released before callbacks: subscribers can commit against the completed prefix.
+        if (result.writeTables.size > 0) refreshTables(result.writeTables)
+        offset += newEvents.length
+        if (last === true) break
+        yield* Effect.yieldNow
+      } while (offset <= command.item.payload.newEvents.length)
+      if (pushCancelled === true) yield* rebaseBarrier('before_leader_push_fiber_run')
+      yield* dispatch({ _tag: 'PullFinished', id: command.id, rebased: pushCancelled })
+    }).pipe(Effect.ensuring(Deferred.succeed(command.completed, undefined)))
+
+  const startLeaderPush = (command: Extract<Command, { _tag: 'Push' }>, pushHandle: RunnerHandles['push']) =>
+    Effect.gen(function* () {
+      // A command can wait behind reconciliation and become obsolete before its fiber even starts.
+      if (
+        model.push._tag !== 'in-flight' ||
+        model.push.operationId !== command.operationId ||
+        (model.lifecycle !== 'running' && model.lifecycle !== 'stopping')
+      )
+        return
+      yield* FiberHandle.run(
+        pushHandle,
+        Effect.suspend(() => clientSession.leaderThread.events.push(command.batch)).pipe(
+          Effect.matchEffect({
+            onFailure: (error) => report({ _tag: 'PushRejected', operationId: command.operationId, error }),
+            onSuccess: () => report({ _tag: 'PushSucceeded', operationId: command.operationId }),
+          }),
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause) === true
+              ? Effect.void
+              : report({ _tag: 'PushFailed', operationId: command.operationId, cause }),
+          ),
+          Effect.interruptible,
+        ),
+      )
+    })
+
+  const runCommand = (command: Command, handles: RunnerHandles): Effect.Effect<void, ProcessorError> =>
+    Effect.gen(function* () {
+      switch (command._tag) {
+        case 'Push':
+          yield* startLeaderPush(command, handles.push)
+          break
+        case 'Reconcile':
+          yield* reconcile(command, handles.push)
+          break
+        case 'BeginShutdown':
+          yield* FiberHandle.clear(handles.pull)
+          yield* dispatch({ _tag: 'DrainStarted', exit: command.exit })
+          break
+        case 'FinishShutdown':
+          yield* FiberHandle.clear(handles.pull)
+          yield* FiberHandle.clear(handles.push)
+          yield* dispatch({ _tag: 'Stopped', exit: command.exit })
+          break
+        case 'NotifyFailure':
+          yield* FiberHandle.clear(handles.pull)
+          yield* FiberHandle.clear(handles.push)
+          // Store shutdown may call back into this processor. Supervise it without blocking the runner it needs.
+          yield* FiberHandle.run(handles.shutdown, clientSession.shutdown(Exit.failCause(command.cause)))
+          break
+        default:
+          casesHandled(command)
+      }
+    })
+
+  const runCommands = (handles: RunnerHandles) =>
+    Effect.gen(function* () {
+      while (model.lifecycle !== 'stopped') {
+        yield* runCommand(yield* Queue.take(commands), handles).pipe(Effect.catchCause(reportFailure))
+      }
+      yield* Queue.shutdown(commands)
+    })
+
+  const pull = Stream.suspend(() =>
+    clientSession.leaderThread.events.pull({ cursor: model.syncState.upstreamHead }),
+  ).pipe(
+    Stream.tap(() => (clientSession.devtools.enabled === true ? clientSession.devtools.pullLatch.await : Effect.void)),
+    Stream.tap((item) =>
+      Effect.gen(function* () {
+        const completed = yield* Deferred.make<void>()
+        yield* report({ _tag: 'PullReceived', item, completed })
+        yield* Deferred.await(completed)
+      }),
+    ),
+    Stream.runDrain,
+    Effect.forever,
+    Effect.interruptible,
+    Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) === true ? Effect.void : reportFailure(cause))),
+    Effect.withSpan('client-session-sync-processor:pull'),
+    Effect.tapCauseLogPretty,
+  )
+
+  const installBeforeUnloadWarning = Effect.gen(function* () {
     if (
       confirmUnsavedChanges === true &&
       typeof window !== 'undefined' &&
@@ -432,122 +624,18 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         () => Effect.sync(() => window.removeEventListener('beforeunload', onBeforeUnload)),
       )
     }
+  })
 
-    const reconcile = (command: Extract<Command, { _tag: 'Reconcile' }>) =>
-      Effect.gen(function* () {
-        let offset = 0
-        let pushCancelled = false
-        do {
-          const newEvents = command.item.payload.newEvents.slice(
-            offset,
-            Math.max(offset + PULL_CHUNK_SIZE, command.minimumEnd),
-          )
-          const last = offset + newEvents.length === command.item.payload.newEvents.length
-          const result = yield* dispatch({
-            _tag: 'PullStep',
-            id: command.id,
-            pushCancelled,
-            last,
-            payload: offset === 0 ? { ...command.item.payload, newEvents } : { _tag: 'upstream-advance', newEvents },
-            materializerHashes: command.item.materializerHashes,
-            globalHead: command.item.globalHead,
-          })
-          if (result._tag === 'obsolete') return
-          if (result._tag === 'cancel-push') {
-            yield* rebaseBarrier('before_leader_push_fiber_interrupt')
-            yield* FiberHandle.clear(pushHandle)
-            yield* rebaseBarrier('before_queue_reconcile')
-            pushCancelled = true
-            continue
-          }
-          // The owner is released before callbacks: subscribers can commit against the completed prefix.
-          if (result.writeTables.size > 0) refreshTables(result.writeTables)
-          offset += newEvents.length
-          if (last === true) break
-          yield* Effect.yieldNow
-        } while (offset <= command.item.payload.newEvents.length)
-        if (pushCancelled === true) yield* rebaseBarrier('before_leader_push_fiber_run')
-        yield* dispatch({ _tag: 'PullFinished', id: command.id, rebased: pushCancelled })
-      }).pipe(Effect.ensuring(Deferred.succeed(command.completed, undefined)))
-
-    const runCommand = (command: Command): Effect.Effect<void, ProcessorError> =>
-      Effect.gen(function* () {
-        switch (command._tag) {
-          case 'Push':
-            // A command can wait behind reconciliation and become obsolete before its fiber even starts.
-            if (
-              model.push._tag !== 'in-flight' ||
-              model.push.operationId !== command.operationId ||
-              (model.lifecycle !== 'running' && model.lifecycle !== 'stopping')
-            )
-              break
-            yield* FiberHandle.run(
-              pushHandle,
-              Effect.suspend(() => clientSession.leaderThread.events.push(command.batch)).pipe(
-                Effect.matchEffect({
-                  onFailure: (error) => report({ _tag: 'PushRejected', operationId: command.operationId, error }),
-                  onSuccess: () => report({ _tag: 'PushSucceeded', operationId: command.operationId }),
-                }),
-                Effect.catchCause((cause) =>
-                  Cause.hasInterruptsOnly(cause) === true
-                    ? Effect.void
-                    : report({ _tag: 'PushFailed', operationId: command.operationId, cause }),
-                ),
-                Effect.interruptible,
-              ),
-            )
-            break
-          case 'Reconcile':
-            yield* reconcile(command)
-            break
-          case 'BeginShutdown':
-            yield* FiberHandle.clear(pullHandle)
-            yield* dispatch({ _tag: 'DrainStarted', exit: command.exit })
-            break
-          case 'FinishShutdown':
-            yield* FiberHandle.clear(pullHandle)
-            yield* FiberHandle.clear(pushHandle)
-            yield* dispatch({ _tag: 'Stopped', exit: command.exit })
-            break
-          case 'NotifyFailure':
-            yield* FiberHandle.clear(pullHandle)
-            yield* FiberHandle.clear(pushHandle)
-            // Store shutdown may call back into this processor. Supervise it without blocking the runner it needs.
-            yield* FiberHandle.run(ownerShutdownHandle, clientSession.shutdown(Exit.failCause(command.cause)))
-            break
-          default:
-            casesHandled(command)
-        }
-      })
-    const run = Effect.gen(function* () {
-      while (model.lifecycle !== 'stopped') {
-        yield* runCommand(yield* Queue.take(commands)).pipe(Effect.catchCause(reportFailure))
-      }
-      yield* Queue.shutdown(commands)
-    })
-    const pull = Stream.suspend(() =>
-      clientSession.leaderThread.events.pull({ cursor: model.syncState.upstreamHead }),
-    ).pipe(
-      Stream.tap(() =>
-        clientSession.devtools.enabled === true ? clientSession.devtools.pullLatch.await : Effect.void,
-      ),
-      Stream.tap((item) =>
-        Effect.gen(function* () {
-          const completed = yield* Deferred.make<void>()
-          yield* report({ _tag: 'PullReceived', item, completed })
-          yield* Deferred.await(completed)
-        }),
-      ),
-      Stream.runDrain,
-      Effect.forever,
-      Effect.interruptible,
-      Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) === true ? Effect.void : reportFailure(cause))),
-      Effect.withSpan('client-session-sync-processor:pull'),
-      Effect.tapCauseLogPretty,
-    )
+  const boot: ClientSessionSyncProcessor['boot'] = Effect.gen(function* () {
+    const handles: RunnerHandles = {
+      push: yield* FiberHandle.make<void, never>(),
+      pull: yield* FiberHandle.make<void, never>(),
+      shutdown: yield* FiberHandle.make<void, never>(),
+    }
+    yield* installBeforeUnloadWarning
     yield* dispatch({ _tag: 'Started' }).pipe(Effect.orDie)
-    yield* run.pipe(Effect.forkScoped)
-    yield* FiberHandle.run(pullHandle, pull.pipe(Effect.asVoid))
+    yield* runCommands(handles).pipe(Effect.forkScoped)
+    yield* FiberHandle.run(handles.pull, pull.pipe(Effect.asVoid))
   }).pipe(Effect.withSpan('client-session-sync-processor:boot'))
 
   return {
@@ -576,6 +664,13 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   } satisfies ClientSessionSyncProcessor
 })
 
+/** Delivery is staged until dispatch releases the owner; a failed transition drops its notifications. */
+type DeferNotification = (effect: Effect.Effect<unknown>) => Effect.Effect<void>
+interface RunnerHandles {
+  readonly push: FiberHandle.FiberHandle<void, never>
+  readonly pull: FiberHandle.FiberHandle<void, never>
+  readonly shutdown: FiberHandle.FiberHandle<void, never>
+}
 type ProcessorError = MaterializeError | MaterializationJournal.MaterializationJournalError | UnknownError
 type EventBatch = ReadonlyArray<LiveStoreEvent.Client.Encoded>
 type Pull = typeof PullItem.Type
