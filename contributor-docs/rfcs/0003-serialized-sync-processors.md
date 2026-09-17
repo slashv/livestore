@@ -88,8 +88,8 @@ These are adapters around the model. They no longer compete with it as sources o
 │      │                                                                 │
 │      ▼                                                                 │
 │  ClientSessionSyncProcessor                                            │
-│    ├─ one synchronous owner: local commits, pull steps, push results    │
-│    └─ async runner: network, cancellation, refresh, yield, shutdown      │
+│    ├─ one synchronous owner: local commits, pull steps, push results   │
+│    └─ async runner: network, cancellation, refresh, yield, shutdown    │
 │                         │                                              │
 └─────────────────────────┼──────────────────────────────────────────────┘
                           │ leaderThread.events.push / pull
