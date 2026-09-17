@@ -1,7 +1,8 @@
 # Yielding single owner: measured comparison
 
-Status: isolated local experiment; no adoption decision, push or PR. The current fixed split-owner implementation and
-the earlier whole-batch alternative remain unchanged in their own worktrees.
+Status: refactored C is the preferred session-sync design for the fork as of September 17, 2026. This is the user's
+architecture choice, not upstream acceptance or a release decision. A and the whole-batch alternative remain preserved
+on branches; their worktrees need not remain. This document retains the original measurement evidence.
 
 ## Outcome
 
@@ -28,6 +29,9 @@ The subsequent results commit changes only documentation and measurement artifac
 [RESULTS.md](./RESULTS.md) is generated from [results.json](./results.json). These saved measurements describe the
 original implementation. A later structural refactor names the owner workflows, extracts pull persistence and
 separates asynchronous execution from boot; the original measurement artifacts are retained for comparison.
+
+That refactor was checkpointed at `66ca5d3e09ddd16d59c3e12c71f33dd64734734e`. Its fresh browser rerun also passed 130
+samples with zero correctness or trial failures. Neither run compares C to main: both compare C against fixed A.
 
 Representative workload medians, milliseconds:
 
@@ -93,7 +97,7 @@ were updated for this change and the outer local savepoint; functional query che
 The root unit script selects package-common files here; affected package projects were also run explicitly. Intermediate
 development failures were resolved before measurement. A one-pair smoke run also passed but is not the final artifact.
 
-## Limits and next decision
+## Limits and fork decision
 
 Same limits as the fixed baseline: steps are atomic, whole pull payloads are not; storage/materializers must be
 synchronous; pending replay and large explicit rebases are not bounded by wall-clock time. No new guarantee covers
@@ -104,9 +108,10 @@ Synthetic timer input and RAF are not trusted input/INP or display scanout. OPFS
 network and telemetry exporters are not measured. Explicit upstream-rebase has a regression test but is not a distinct
 browser workload. Five samples per workload on one machine cannot establish tail-latency bounds.
 
-The next decision is a human code comparison, not another automatic refactor: does the single writer make the processor
-easier to follow despite the added commands and notification stage? The measurements provide no strong performance
-reason to prefer either yielding implementation. Keep the fixed baseline unless the ownership improvement earns its
-mental cost.
+The user has chosen the refactored single-owner implementation for the fork, with A and the other alternatives retained
+on branches. The choice favors one state-changing owner and named workflows, accepting the command and notification
+stage as a readability trade-off. The measurements provide no strong performance reason to prefer either yielding
+implementation, and no evidence of a performance win over main. Future changes must preserve the coherent-step and
+synchronous-commit contracts regardless of that architectural preference.
 
 Start with [the implementation/design navigation](../../../contributor-docs/rfcs/0003-session-single-owner-experiment.md).

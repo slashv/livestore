@@ -1,7 +1,8 @@
 # Fixed mailbox versus yielding single owner
 
-This fixture compares the clean fixed baseline `4ead601cd` with this branch. It retains the workloads and invariants
-from the earlier full-Store browser experiment. It does not include the whole-batch synchronous prototype.
+This fixture compares the clean fixed baseline A at `4ead601cd` with preferred fork design C on this branch.
+It retains the workloads and invariants from the earlier full-Store browser experiment. It compares neither main
+nor the whole-batch synchronous prototype.
 
 Read [the findings](./DECISION.md), [measurement table](./RESULTS.md), and [raw samples](./results.json).
 
@@ -17,7 +18,7 @@ pnpm exec tsc --project tests/perf/session-sync/tsconfig.json --noEmit
 
 Install dependencies in both checkouts first with `pnpm install`. Keep the baseline at `4ead601cd`; the original task
 worktree is suitable while it remains clean. Stop other build/test jobs before collecting final measurements.
-`SESSION_SYNC_RUNS=1` is a smoke run; default five measured alternating A/B pairs follow one warmup per variant/workload.
+`SESSION_SYNC_RUNS=1` is a smoke run; default five measured alternating fixed-A/C pairs follow one warmup per variant/workload.
 Each build keeps its own page for warmup and measured runs. The intended page is brought to the foreground outside
 the timed interval. Source commits are recorded in results.json.
 

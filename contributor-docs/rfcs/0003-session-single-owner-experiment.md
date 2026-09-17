@@ -1,18 +1,21 @@
 # Session sync: single owner with yielding reconciliation
 
-Status: isolated experiment, not accepted intent. Based on the fixed split-owner checkpoint `4ead601cd`, not the
-whole-batch synchronous prototype. The original `refactor/serialized-sync-processors` checkout is unchanged.
+Status: preferred session-sync direction for the fork as of September 17, 2026, not accepted upstream intent.
+The user chose refactored C at `66ca5d3e0`; [the main RFC](./0003-serialized-sync-processors.md) now describes it directly.
+This companion preserves the experiment's design rationale, alternatives and validation history. C builds on the fixed
+split-owner checkpoint `4ead601cd`, not the whole-batch synchronous prototype. A remains preserved on
+`refactor/serialized-sync-processors`, independently of whether its worktree is retained.
 
 ## The question
 
 Can one synchronous owner improve human navigation without losing immediate Store commits, safe reconciliation,
 or opportunities for browser input? Single ownership and whole-batch execution are independent choices.
 
-| Variant | State writers | Work before yielding |
-| --- | --- | --- |
-| Fixed baseline (A) | Local commit path and mailbox pull handler | Complete upstream prefix plus live pending edits |
-| Earlier alternative (B) | Synchronous dispatcher | Entire pulled batch |
-| This experiment (C) | Synchronous dispatcher | Complete upstream prefix plus live pending edits |
+| Variant                   | State writers                              | Work before yielding                             |
+| ------------------------- | ------------------------------------------ | ------------------------------------------------ |
+| Fixed baseline (A)        | Local commit path and mailbox pull handler | Complete upstream prefix plus live pending edits |
+| Earlier alternative (B)   | Synchronous dispatcher                     | Entire pulled batch                              |
+| Preferred fork design (C) | Synchronous dispatcher                     | Complete upstream prefix plus live pending edits |
 
 The smallest useful third implementation retains the existing reconciliation loop as one asynchronous command.
 It calls the synchronous owner once per step; it does not turn every cursor advance into a scheduled event. This
@@ -78,6 +81,10 @@ leader push completes
 This is a synchronous, effectful owner, not a pure reducer or strict input-FIFO actor. The command queue schedules
 work; it does not define event-log order. Sequence numbers and SyncState.merge still govern reconciliation.
 
+An input handler can wait for a synchronous pull step to finish before it starts. Once it calls Store.commit, the
+local change completes before that call returns. Yielding between steps creates input opportunities; it does not
+guarantee a frame budget or make network pull synchronous.
+
 ## What gets simpler, and what does not
 
 - Removed the session interface's encode/materialize/push sequence in favor of `commit(events)`. The processor owns
@@ -99,18 +106,18 @@ materializers are rejected; subscriber commits after a completed step are suppor
 
 ## Guarantees and differences
 
-| Concern | Contract in this experiment |
-| --- | --- |
-| Immediate local read | Store.commit finishes the local SQLite/model transition before returning. |
-| Observable pull state | Every step exposes a complete upstream prefix plus current pending edits. |
-| Local batch failure | One outer savepoint rolls back the entire batch; no model installation or propagation. |
-| Fatal result during reconciliation | Failure is handled immediately; identity/lifecycle checks prevent another step or finalization. |
-| Graceful shutdown | Close admission immediately, finish the accepted pull, then drain the rebuilt pending suffix. |
-| Late command/result | Validate operation identity before execution and again on completion. |
-| Whole-payload atomicity | Not guaranteed; earlier successful prefixes remain after a later step fails. |
-| Frame budget | Not guaranteed; pending replay, large explicit rebases and expensive callbacks remain unbounded. |
-| Async storage/materializers | Unsupported, as with synchronous Store.commit. PreventSchedulerYield does not make genuine async work synchronous. |
-| Crash atomicity/durability | No new guarantee; session optimism and leader cross-database crash limitations are unchanged. |
+| Concern                            | Contract in the preferred fork implementation                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Immediate local read               | Store.commit finishes the local SQLite/model transition before returning.                                          |
+| Observable pull state              | Every step exposes a complete upstream prefix plus current pending edits.                                          |
+| Local batch failure                | One outer savepoint rolls back the entire batch; no model installation or propagation.                             |
+| Fatal result during reconciliation | Failure is handled immediately; identity/lifecycle checks prevent another step or finalization.                    |
+| Graceful shutdown                  | Close admission immediately, finish the accepted pull, then drain the rebuilt pending suffix.                      |
+| Late command/result                | Validate operation identity before execution and again on completion.                                              |
+| Whole-payload atomicity            | Not guaranteed; earlier successful prefixes remain after a later step fails.                                       |
+| Frame budget                       | Not guaranteed; pending replay, large explicit rebases and expensive callbacks remain unbounded.                   |
+| Async storage/materializers        | Unsupported, as with synchronous Store.commit. PreventSchedulerYield does not make genuine async work synchronous. |
+| Crash atomicity/durability         | No new guarantee; session optimism and leader cross-database crash limitations are unchanged.                      |
 
 Unlike the baseline, a push completion can be handled between pull steps, not only after the complete mailbox turn.
 This consequential ordering change requires recovery to consult current rejection state. A regression test confirms
@@ -136,6 +143,8 @@ Browser fixture and results: [run instructions](../../tests/perf/session-sync/RE
 [interpretation](../../tests/perf/session-sync/DECISION.md), and [complete table](../../tests/perf/session-sync/RESULTS.md).
 The final 130-sample run passed every checked invariant for both versions, with closely comparable timings. It supports
 preserving responsiveness with single ownership; it does not decide whether that ownership is easier to understand.
+The measured comparison is fixed A versus C, not main. Choosing C is a human architecture decision, not a measured
+performance win over main.
 
 At the original measured checkpoint, the processor was 640 lines versus the baseline's 600; Store's commit plumbing
 lost 15 lines. The subsequent structural refactor adds private workflow functions and explicit helper types, keeping
@@ -147,7 +156,7 @@ regressions (45 passed), the Common/LiveStore package suites (352 passed, 1 skip
 lint. A fresh browser comparison also passed all 130 samples with zero correctness or trial failures. The original
 measurement artifacts remain unchanged; the rerun validates the refactor without replacing the recorded comparison.
 
-## Experiment checklist
+## Experiment and fork-decision checklist
 
 - [x] Extract pull persistence into one savepoint helper, keeping SQLite-before-model ordering visible.
 - [x] Give owner workflows names and retain one guarded dispatch entrypoint.
@@ -158,6 +167,9 @@ measurement artifacts remain unchanged; the rerun validates the refactor without
 - [x] Run baseline regressions and add tests for changed completion ordering.
 - [x] Review, fix justified findings and review the revised implementation.
 - [x] Compare complete browser runs for input delay, catch-up time and correctness.
-- [ ] Decide with a human code read whether the ownership change earns its additional concepts.
+- [x] Choose refactored C as the current fork direction after the human readability review.
+- [x] Explain C directly in the main RFC and preserve A, B and Effect Machine as alternatives on branches.
 
-No new accepted context contract or release is proposed. Related existing issue: [#1465](https://github.com/livestorejs/livestore/issues/1465).
+This fork choice does not establish upstream acceptance, a new accepted context contract or a release.
+Staged notifications and owner/runner navigation remain conscious costs.
+Related existing issue: [#1465](https://github.com/livestorejs/livestore/issues/1465).
