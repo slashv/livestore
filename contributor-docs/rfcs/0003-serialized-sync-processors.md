@@ -469,17 +469,18 @@ the readability refactor, not proof that fewer state writers always make code si
 
 | Alternative          | Preserved branch / checkpoint                                          | Why keep it                                                                                                                     |
 | -------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Fixed split-owner A  | `refactor/serialized-sync-processors` at `4ead601cd`                   | Direct local path plus mailbox, with the same coherent-step safety rule. Fewer owner/runner concepts, but two writers to audit. |
+| Fixed split-owner A  | `codex/split-owner-a` at `4ead601cd`                   | Direct local path plus mailbox, with the same coherent-step safety rule. Fewer owner/runner concepts, but two writers to audit. |
 | Whole-batch B        | `experiment/session-sync-latency` at `e2edfa693`                       | One synchronous owner without stepwise yielding. Large batches delay UI input. Its mailbox comparison predates A's safety fix.  |
 | Fixed A/B comparison | `experiment/session-sync-fix`                                          | Keeps the later comparison against the whole-batch alternative.                                                                 |
 | Effect Machine       | `refactor/effect-machine-processors` and `codex/effect-machine-spike`  | Separate framework-based explorations, not dependencies of this design.                                                         |
-| Preferred C          | `experiment/session-sync-owner`, implementation checkpoint `66ca5d3e0` | One synchronous owner, coherent-step yielding, named workflows and separate async execution in one file.                        |
+| Preferred C          | `refactor/serialized-sync-processors`, implementation checkpoint `66ca5d3e0` | One synchronous owner, coherent-step yielding, named workflows and separate async execution in one file.                        |
 
 The Effect Machine review refinements are checkpointed at `db978b595`; its earlier bounded spike is preserved at
 `18c0273a1`. The fixed A/B comparison is preserved at `53a8cea42`.
 
-Preserving a branch does not require keeping its worktree. The earlier published fork RFC branch predates the local
-fixed-A checkpoint; this document describes the C branch, which includes that fix. No remote update is implied.
+Preserving a branch does not require keeping its worktree. `refactor/serialized-sync-processors` is the canonical
+fork refactor branch and now follows C, including the fixed-A safety checkpoint. The original C experiment remains
+preserved on `experiment/session-sync-owner`; fixed A remains on `codex/split-owner-a`.
 
 The saved browser measurements compare **fixed A with C, not main**. All 130 samples passed checked invariants and
 runtime checks; input delay and catch-up were closely comparable. They provide no measured performance win over main

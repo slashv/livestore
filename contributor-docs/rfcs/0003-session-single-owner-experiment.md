@@ -4,7 +4,8 @@ Status: preferred session-sync direction for the fork as of September 17, 2026, 
 The user chose refactored C at `66ca5d3e0`; [the main RFC](./0003-serialized-sync-processors.md) now describes it directly.
 This companion preserves the experiment's design rationale, alternatives and validation history. C builds on the fixed
 split-owner checkpoint `4ead601cd`, not the whole-batch synchronous prototype. A remains preserved on
-`refactor/serialized-sync-processors`, independently of whether its worktree is retained.
+`codex/split-owner-a`, independently of whether its worktree is retained. The canonical fork refactor branch,
+`refactor/serialized-sync-processors`, now follows C.
 
 ## The question
 
