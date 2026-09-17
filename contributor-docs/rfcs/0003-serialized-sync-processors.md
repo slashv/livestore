@@ -155,48 +155,199 @@ There is one important distinction between kinds of work:
 Every concurrent operation has an identity. A late completion is ignored when its identity no longer matches the
 current state.
 
-### Session: a synchronous owner and an asynchronous runner
+### Session: synchronous changes, asynchronous waiting
+
+**Every change to the session model completes synchronously under `dispatch`. Work that must wait happens outside
+that owner, then calls `dispatch` again using the current state.** Local commits and incoming history use the same
+owner, so neither can interrupt the other's unfinished SQLite/model work.
+
+Here, **owner** means the synchronous section guarded by `dispatching`, not a dedicated thread, a mailbox, or a lock
+held throughout a pull. Updating in-memory sync state means assigning the new event heads, pending local events,
+and relevant push state after the SQLite changes succeed. **Runner** means the Effect code that consumes commands, manages asynchronous operations,
+and advances reconciliation. The runner calls the owner; it has no second model to write. `yield*` in an Effect
+program does not itself imply an asynchronous pause: the storage and materializer effects inside the owner must
+complete synchronously, and automatic scheduler yielding is suppressed there.
+
+Read the following views separately. Boxes marked OWNER contain synchronous state changes; waits and callbacks
+are outside those boxes. Time runs downward in the sequence view. Its lanes represent responsibilities in the
+client, not separate operating-system threads.
+
+#### 1. What does Store.commit wait for?
 
 ```text
-Store.commit ──────────────┐
-network result ────────────┤
-runner: next pull step ────┤
-shutdown request ──────────┘
-                          │
-                          ▼
-                   dispatch(Event)
-                          │
-                   transition router
-                          │
-                   named owner workflow
-                          │
-                SQLite work when needed
-                    → matching model
-                          │
-                    release owner
-                          │
-                 notifications / commands
-                          │
-                          ▼
-                    async runner
-                wait, cancel, refresh, yield
-                          │
-                          └──► next step / completion enters dispatch
+                     Store.commit(events)
+                              |
+                              v
+       +---------------------------------------------+
+       | OWNER: dispatch(Commit)                     |
+       |                                             |
+       | Check admission; encode; merge              |
+       | Apply local batch in savepoint              |
+       | Update in-memory sync state to match SQLite |
+       | Stage notifications / commands              |
+       +---------------------------------------------+
+                              |
+                        release owner
+                              |
+                   deliver notifications
+                              |
+             +----------------+ - - - - - - - - - - +
+             |                                       : eligible Push
+             v                                       v
+    Store refreshes subscribers             Runner starts leader push
+    (callbacks may commit again)                     :
+             |                                       : async result
+             v                                       v
+    Store.commit returns                    New dispatch handles result
+    LOCAL CHANGE APPLIED                    (operation identity checked)
+
+    No network acknowledgement awaited by Store.commit.
+    After owner release, the two paths have no fixed ordering.
 ```
 
-All session model changes go through `dispatch`. It does not wait for network I/O, cancellation or a timer.
-The command queue schedules work, not LiveStore event-log order. Sequence numbers and `SyncState.merge` still
-determine which history is valid. A command or completion can become obsolete while waiting, so identities are
-checked before a push starts and when its result arrives.
+The solid path is the local call: `Store.commit` calls `dispatch(Commit)`, which checks admission, applies the local
+batch, updates in-memory sync state to match SQLite, and stages notifications. After releasing the owner, dispatch
+delivers those notifications. Store then refreshes local subscribers and returns. The local change does not wait for a leader or
+backend acknowledgement. This diagram shows the successful path; a local materialization failure rolls back the
+batch without updating in-memory sync state or scheduling its propagation.
 
-Notifications are deliberately staged until after the owner is released. An Effect Queue offer or Deferred completion
-can resume another fiber immediately, even when automatic scheduler yielding is disabled. Sending it halfway through
-a transition would let that caller see unfinished state or reenter the owner. Subscriber refresh also runs outside
-the owner: Store refreshes after a local commit, and the runner refreshes after a pull step.
+The dashed branch shows eligible propagation. The owner reserves a push before releasing its command to the runner.
+The runner starts the leader call; its success, rejection, or failure enters a new dispatch. Operation identities
+prevent an obsolete command or result from advancing newer work. A push can be deferred, for example while
+reconciliation is active; committing locally still completes immediately.
 
-This separation preserves synchronous `Store.commit` without a second state-changing path. Browser input may still
-wait for a synchronous pull step to finish before its handler can start. Once that handler calls `Store.commit`, the
-local SQLite/model change completes before the call returns. Neither statement requires network I/O to be synchronous.
+**Owner release is earlier than dispatch return.** Offering an Effect Queue or completing a Deferred can resume
+another fiber inline. The two branches therefore have no fixed ordering after release: a push can start before
+`Store.commit` returns, but the commit does not await its network result. Staging notifications ensures any resumed
+caller sees finished state. Store's subscriber callbacks also run after owner release and can make another commit.
+
+#### 2. Where can a local commit run during a pull?
+
+```text
+  App / subscriber              Shared dispatch owner               Async runner
+          |                               |                               |
+          |                               |<---------- PullStep ----------|
+          |                  +------------+------------+                  |
+          |                  | OWNER                   |                  |
+          |                  | Merge live pending      |                  |
+          |                  | Finish SQLite changes   |                  |
+          |                  | Update in-memory state  |                  |
+          |                  | to match SQLite         |                  |
+          |                  +------------+------------+                  |
+          |                               |                               |
+          |                               |--- release; notify; return -->|
+          |                               |                        refresh / yield
+          |                               |                               |
+          |------- Store.commit(L) ------>|                               |
+          |                  +------------+------------+                  |
+          |                  | SAME OWNER              |                  |
+          |                  | Apply L locally         |                  |
+          |                  | Update pending state    |                  |
+          |                  +------------+------------+                  |
+          |                               |                               |
+          |<-- release; notify; return ---|                               |
+  Store refreshes;                        |                               |
+   commit returns                         |                               |
+          |                               |                               |
+          |                               |<------- next PullStep --------|
+          |                  +------------+------------+                  |
+          |                  | SAME OWNER              |                  |
+          |                  | Merge CURRENT pending   |                  |
+          |                  | (now accounting for L)  |                  |
+          |                  | Finish SQLite changes   |                  |
+          |                  | Update in-memory state  |                  |
+          |                  | to match SQLite         |                  |
+          |                  +------------+------------+                  |
+          |                               |                               |
+          |                               |--- release; notify; return -->|
+          |                               |                        refresh / yield
+          |                               |                               |
+
+  One possible interleaving: L completes between two complete pull steps.
+  No wait, yield or subscriber callback occurs inside an OWNER box.
+```
+
+This is one possible successful interleaving after a pull has been accepted. Each owner box represents
+a complete synchronous SQLite/model step. After that step, the runner refreshes subscribers and yields before the
+next step. A subscriber can commit during refresh; a browser handler may run when scheduling gives it an opportunity.
+The sequence shows a commit between steps, without promising that one occurs at every yield. Notifications can also
+resume other fibers immediately after owner release, before the step returns to the runner.
+
+The next step **merges again from live pending events**. It cannot reuse a plan made before the local commit. A
+concrete example, assuming neither incoming prefix confirms local event L:
+
+| Completed transition | Materialized counter | Still-pending local work |
+| --- | --- | --- |
+| First incoming prefix leaves the counter at 1 | 1 | none |
+| Local L increments the counter by 10 | 11 | L: increment by 10 |
+| Next incoming prefix sets the counter to 2; reconciliation replays L | 12 | L: increment by 10 |
+
+At every pause, rows, journal and head describe a complete incoming prefix plus the current optimistic events.
+The reader can see intermediate states such as 11 and 12; it must never see a new head paired with unfinished rows.
+If incoming history confirms L, the merge removes it from pending instead of applying it twice.
+
+Only the last step discards the journal through the payload's confirmed global head. After the last refresh,
+`dispatch(PullFinished)` finishes reconciliation and resumes eligible propagation using current pending state.
+There is no yield required after the final step. A complete step or its subscriber work can still be expensive:
+this design provides interleaving opportunities, not a hard browser frame-time bound.
+
+#### 3. What if applying a step first requires asynchronous cancellation?
+
+```text
+    Runner calls dispatch(PullStep)
+                   |
+                   v
+    +--------------------------------------------+
+    | OWNER: merge detects cancellation needed   |
+    | Return cancel-push BEFORE changing state   |
+    +--------------------------------------------+
+                   |
+             release owner
+                   |
+    Runner interrupts old push and waits
+                   :
+                   :     Store.commit(L) may run during this wait
+                   :     +--------------------------------------+
+                   :     | SAME OWNER: apply L; update pending  |
+                   :     +--------------------------------------+
+                   :     Release; notify; refresh; commit returns
+                   :
+    Cancellation finishes
+                   |
+    Retry the SAME incoming prefix
+                   |
+                   v
+    +--------------------------------------------+
+    | OWNER: recompute merge from LIVE state     |
+    |                                            |
+    | One savepoint:                             |
+    |   rollback -> materialize -> replay -> head|
+    | Update in-memory sync state to match       |
+    | SQLite (including L)                       |
+    +--------------------------------------------+
+                   |
+             release owner
+                   |
+             notify / refresh
+
+    The wait holds neither the owner nor a reconciliation savepoint.
+    The merge computed before the wait is never reused as a write plan.
+```
+
+This view shows the rebase path with a local commit during the cancellation wait. The first attempt detects that
+cancellation is needed and returns `cancel-push` **before changing SQLite or the session model**. The runner then
+interrupts the old push outside the owner. No reconciliation savepoint spans that wait, so a local commit can finish
+against the previous coherent state.
+
+Once cancellation finishes, the runner retries the same incoming prefix. The owner recomputes its merge, including
+any local events committed during the wait, then applies rollback, incoming materialization, pending replay and head
+updates together in one savepoint. It then updates in-memory sync state to match SQLite before releasing
+notifications. If that SQLite step fails, its savepoint rolls back; earlier completed steps remain. A stopped or failed reconciliation is rejected
+by the lifecycle/identity guard instead of applying a late step.
+
+**The safety rule is the same in all three views:** finish the SQLite changes and update in-memory sync state to
+match before permitting another caller to observe or change session state. Waiting, notifications and subscriber callbacks belong outside that
+boundary. The command queue schedules work; sequence numbers and `SyncState.merge` determine valid event history.
 
 ## The States That Matter
 
@@ -263,8 +414,8 @@ upstream prefix plus all current optimistic events, with matching SQLite state, 
 3. Normally apply up to 32 upstream events against the live pending suffix. An explicit leader rebase's first step
    must replace enough history to reach the old upstream head before yielding. Rollback, incoming materialization, pending replay,
    and the state head share one savepoint. Suppress automatic Effect scheduler yields during this synchronous work.
-4. After success, install the matching model, release the owner, and deliver staged notifications. The runner refreshes
-   affected tables. Subscriber callbacks may commit at this point. Yield before the next step so other fibers and browser input can run.
+4. After success, update in-memory sync state to match SQLite, release the owner, and deliver staged notifications.
+   The runner refreshes affected tables. Subscriber callbacks may commit at this point. Yield before the next step so other fibers and browser input can run.
 5. Only the final step discards the journal through the payload's confirmed `globalHead`. Rebuild propagation from the
    final pending suffix after reconciliation completes. No replacement push starts during reconciliation, and there
    are no delayed admission messages to repair.
@@ -285,7 +436,7 @@ Consequential behavior and limits:
 - If a later step fails, earlier committed prefixes remain. The failing step rolls back and the processor fails.
   This is step atomicity, not whole-payload atomicity. Cleanup failures still mean the connection cannot be trusted.
 - Admission is checked before encoding/materialization under the same owner. A local batch uses one outer savepoint:
-  a materialization failure rolls back the whole batch without installing its model or scheduling propagation.
+  a materialization failure rolls back the whole batch without updating in-memory sync state or scheduling propagation.
 - A pending event rebased onto the end of one prefix can be confirmed by a matching event in the next prefix. The
   tests require confirmation rather than duplicating that event. Arbitrary batch partitions are not guaranteed to
   produce identical merge outcomes under the old whole-batch algorithm.
@@ -304,7 +455,8 @@ Store.commit
   │    └─ dispatch(Commit) → commitLocalEvents
   │         ├─ check admission, encode, merge
   │         ├─ savepoint: materialize batch, journal and head
-  │         ├─ install matching model; reserve propagation if allowed
+  │         ├─ update in-memory sync state to match SQLite
+  │         ├─ reserve propagation if allowed
   │         └─ release owner; publish and enqueue commands
   └─ Store refreshes local subscribers; return synchronously
 
@@ -362,7 +514,8 @@ session leader-pull fiber
                  ├─ dispatch(PullStep) → applyPullStep
                  │    ├─ check identity and lifecycle; merge live pending
                  │    ├─ cancellation needed? return without applying
-                 │    └─ applyPullToSqlite → install model → release owner → notify
+                 │    ├─ applyPullToSqlite; update in-memory sync state to match SQLite
+                 │    └─ release owner → notify
                  ├─ cancellation requested? wait outside owner, then retry from live state
                  ├─ applied? refresh subscribers, yield, repeat
                  └─ dispatch(PullFinished) → finishPull
