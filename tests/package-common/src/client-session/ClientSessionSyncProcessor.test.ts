@@ -109,6 +109,11 @@ const makeClientProcessorHarness = Effect.fn(function* ({
   leaderPushBatchSize = 1,
   rebaseBarriers,
   onDiscardUpTo = () => Effect.void,
+  materializeEvent = () =>
+    Effect.succeed({
+      writeTables: new Set<string>(),
+      materializerHash: Option.none<number>(),
+    }),
 }: {
   push: LeaderEvents['push']
   pull?: LeaderEvents['pull']
@@ -117,6 +122,7 @@ const makeClientProcessorHarness = Effect.fn(function* ({
   leaderPushBatchSize?: number
   rebaseBarriers?: ClientProcessorParams['params']['rebaseBarriers']
   onDiscardUpTo?: MaterializationJournal.Service['discardUpTo']
+  materializeEvent?: ClientProcessorParams['materializeEvent']
 }) {
   const sqlite3 = yield* Effect.promise(() => loadSqlite3Wasm())
   const makeSqliteDb = yield* sqliteDbFactory({ sqlite3 })
@@ -156,11 +162,7 @@ const makeClientProcessorHarness = Effect.fn(function* ({
   const processor = yield* makeClientSessionSyncProcessor({
     schema: schema as LiveStoreSchema,
     clientSession,
-    materializeEvent: () =>
-      Effect.succeed({
-        writeTables: new Set<string>(),
-        materializerHash: Option.none<number>(),
-      }),
+    materializeEvent,
     refreshTables: () => undefined,
     params: { leaderPushBatchSize, rebaseBarriers },
     confirmUnsavedChanges: false,
@@ -979,6 +981,84 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       }).pipe(withTestCtx(test)),
     )
   }
+  // The owner only excludes other writers because its body cannot suspend. A materializer that does suspend must be
+  // reported with that reason and fail the session, instead of leaving the owner held or shutdown awaiting lost work.
+  Vitest.it.effect('fails the session with a named defect when a materializer suspends', (test) =>
+    Effect.gen(function* () {
+      const { pushIds, close } = yield* makeClientProcessorHarness({
+        push: () => Effect.void,
+        materializeEvent: () =>
+          Effect.promise(() => Promise.resolve()).pipe(
+            Effect.as({ writeTables: new Set<string>(), materializerHash: Option.none<number>() }),
+          ),
+      })
+
+      const commitExit = yield* Effect.exit(pushIds(['suspending']))
+      assert(Exit.isFailure(commitExit))
+      expect(String(Cause.squash(commitExit.cause))).toContain('must be synchronous')
+
+      const closeExit = yield* Effect.exit(close())
+      assert(Exit.isFailure(closeExit))
+      expect(String(Cause.squash(closeExit.cause))).toContain('must be synchronous')
+    }).pipe(withTestCtx(test)),
+  )
+
+  // A push being cancelled for a rebase is superseded by that rebase. Its late rejection must not leave a fence that
+  // blocks the rebuilt propagation.
+  Vitest.it.effect('ignores a rejection that arrives while a rebase cancels the push', (test) =>
+    Effect.gen(function* () {
+      const pullQueue = yield* Queue.unbounded<typeof SyncState.PayloadUpstream.Type>()
+      const firstPushStarted = yield* Deferred.make<void>()
+      const rejectFirstPush = yield* Deferred.make<void>()
+      const firstPushRejected = yield* Deferred.make<void>()
+      const persistedIds: string[] = []
+      let pushCallCount = 0
+      const barrier = yield* makeRebaseBarrier()
+
+      const { processor, pushIds, close } = yield* makeClientProcessorHarness({
+        pull: () =>
+          Stream.fromQueue(pullQueue).pipe(
+            Stream.map((payload) =>
+              ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }),
+            ),
+          ),
+        push: (batch) => {
+          pushCallCount++
+          return pushCallCount === 1
+            ? Deferred.succeed(firstPushStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(rejectFirstPush)),
+                Effect.andThen(
+                  Effect.fail(
+                    new LeaderAheadError({
+                      minimumExpectedNum: EventSequenceNumber.Client.ROOT,
+                      providedNum: EventSequenceNumber.Client.ROOT,
+                      sessionId: 'session-test',
+                    }),
+                  ),
+                ),
+                Effect.ensuring(Deferred.succeed(firstPushRejected, undefined)),
+              )
+            : Effect.sync(() => persistedIds.push(...batch.map((event) => event.args.id as string)))
+        },
+        rebaseBarriers: { before_leader_push_fiber_interrupt: barrier.effect },
+      })
+
+      yield* pushIds(['local'])
+      yield* Deferred.await(firstPushStarted)
+      yield* Queue.offer(pullQueue, yield* makeConflictingUpstream(processor))
+      yield* barrier.awaitReached
+
+      // The owner has already marked the push as cancelling, so this rejection belongs to a superseded operation.
+      yield* Deferred.succeed(rejectFirstPush, undefined)
+      yield* Deferred.await(firstPushRejected)
+      yield* barrier.release
+
+      yield* close()
+      expect(processor.debug.debugInfo().rebaseCount).toBe(1)
+      expect(persistedIds).toEqual(['local'])
+    }).pipe(withTestCtx(test)),
+  )
+
   Vitest.it.effect('interrupts a hung leader push during failed shutdown', (test) =>
     Effect.gen(function* () {
       const firstPushStarted = yield* Deferred.make<void>()

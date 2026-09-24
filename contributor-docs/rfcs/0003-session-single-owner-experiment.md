@@ -157,6 +157,28 @@ regressions (45 passed), the Common/LiveStore package suites (352 passed, 1 skip
 lint. A fresh browser comparison also passed all 130 samples with zero correctness or trial failures. The original
 measurement artifacts remain unchanged; the rerun validates the refactor without replacing the recorded comparison.
 
+## Explicit-state follow-up (September 24, 2026)
+
+A review found that some session state still lived outside `Model`: the runner's `pushCancelled` flag, the
+`shutdownExit`/`terminalCause` fields beside a string lifecycle, and a `failed → stopping` path that the lifecycle
+diagram did not show. The follow-up changes, all in `ClientSessionSyncProcessor.ts`:
+
+- `lifecycle` is a tagged union: `starting | running | shutdown-requested | stopping | failed | stopped`, with the
+  reconciliation identity inside the states where it can exist. A failed session finishes shutdown directly.
+- `push: cancelling` records a push being stopped for a rebase; the runner reports `PushCancelled` afterwards. Late
+  success or rejection of that operation is ignored; a fatal failure still fails the session.
+- `owned(body)` replaces the `dispatching` flag and threaded `deferNotification`, staging notifications through
+  `stage(...)`. A microtask check detects a body that suspended; it then fails the session with a named defect instead
+  of surfacing later as a misleading reentrancy error or leaving shutdown waiting on dropped commands. A first version
+  ran the body on a separate `Effect.runSyncExitWith` fiber; interleaved perf runs showed about +4% on the
+  10,000-item commit, while running the body inline (the old way, with every other change kept) matched the baseline.
+  `commit` and pull steps call it directly, so `Event` only lists inputs without a result.
+- A failed `PullReceived` fails the pull fiber instead of leaving it waiting on a dropped `completed` signal.
+- Development builds check after every owner body that the push queue is the unpushed suffix of pending events.
+
+Verified from Effect 4.0.0-beta.99 source: resuming a fiber calls `fiber.evaluate` inline, and the resumed fiber reads
+its own `PreventSchedulerYield`. The main RFC now documents the resulting refresh-ordering consequence for Store.
+
 ## Experiment and fork-decision checklist
 
 - [x] Extract pull persistence into one savepoint helper, keeping SQLite-before-model ordering visible.

@@ -2,7 +2,9 @@
 
 > **Status:** Preferred direction for this fork as of September 17, 2026, not an accepted upstream RFC or product
 > contract. The session uses approach C: one synchronous owner with yielding reconciliation, including the readability
-> refactor at `66ca5d3e0`. The leader architecture is unchanged. Alternatives remain preserved on named branches.
+> refactor at `66ca5d3e0` and the explicit-state follow-up of September 24, 2026 (tagged lifecycle, a `cancelling` push
+> state, enforced synchronous owner). The leader architecture is unchanged. Alternatives remain preserved on named
+> branches.
 
 This work builds on Igor Gassmann's `MaterializationJournal` and role-specific SQLite Effect service extraction. It
 preserves that storage architecture and adds a more explicit orchestration model above it, with
@@ -21,8 +23,9 @@ reconstruct their timing.
 
 Now, named events enter one state-changing owner in each processor. The leader uses a serialized mailbox loop. It
 delegates durable SQLite work to `LeaderSyncCommitter` and only publishes or acknowledges after that work succeeds.
-The session uses a synchronous `dispatch`: local commits and network results enter the same owner. An asynchronous
-runner handles waiting and applies incoming history one complete SQLite/model step at a time, yielding between steps.
+The session uses a synchronous owner: local commits, pull steps and network results all run through `owned`, which
+finishes each state change synchronously and fails the session loudly if one ever suspends. An asynchronous runner handles
+waiting and applies incoming history one complete SQLite/model step at a time, yielding between steps.
 
 This is not a framework-driven or fully pure state machine. The session owner is effectful and is not an input-FIFO
 mailbox. It finishes state changes synchronously, then releases notifications and commands. Both processors make
@@ -60,15 +63,15 @@ owner, rather than independent synchronization primitives that can disagree.
 
 The session processor had a similar set of implicit controls:
 
-| Previous coordination mechanism                   | What it was encoding                                          | What owns that information now                                     |
-| ------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `leaderPushQueue`                                 | pending events and whether propagation was active             | the tagged `model.push` state                                      |
-| `pullReconciliationMutex`                         | exclusion between pull, rejection recovery, and shutdown      | synchronous dispatch, reconciliation identity and lifecycle checks |
-| `unresolvedRejection`                             | whether propagation was waiting for corrective leader history | `push: awaiting-reconciliation`                                    |
-| `terminalPushCause`                               | whether the background worker had failed                      | `model.lifecycle` and `model.terminalCause`                        |
-| a permanent push-drain worker                     | batching, propagation, and parking after rejection            | one finite push operation at a time                                |
-| `Effect.never` in that worker                     | a rejection fence waiting for corrective history              | the explicit `awaiting-reconciliation` state                       |
-| clearing and restarting that worker during rebase | invalidating an old push plan                                 | operation identities and rebuilding from live pending events       |
+| Previous coordination mechanism                   | What it was encoding                                          | What owns that information now                                    |
+| ------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `leaderPushQueue`                                 | pending events and whether propagation was active             | the tagged `model.push` state                                     |
+| `pullReconciliationMutex`                         | exclusion between pull, rejection recovery, and shutdown      | the synchronous owner, reconciliation identity and lifecycle tags |
+| `unresolvedRejection`                             | whether propagation was waiting for corrective leader history | `push: awaiting-reconciliation`                                   |
+| `terminalPushCause`                               | whether the background worker had failed                      | `lifecycle: failed { cause }`                                     |
+| a permanent push-drain worker                     | batching, propagation, and parking after rejection            | one finite push operation at a time                               |
+| `Effect.never` in that worker                     | a rejection fence waiting for corrective history              | the explicit `awaiting-reconciliation` state                      |
+| clearing and restarting that worker during rebase | invalidating an old push plan                                 | `push: cancelling`, `PushCancelled`, and rebuilding from pending  |
 
 Some runtime machinery remains, but with narrower jobs:
 
@@ -157,16 +160,28 @@ current state.
 
 ### Session: synchronous changes, asynchronous waiting
 
-**Every change to the session model completes synchronously under `dispatch`. Work that must wait happens outside
-that owner, then calls `dispatch` again using the current state.** Local commits and incoming history use the same
-owner, so neither can interrupt the other's unfinished SQLite/model work.
+**Every change to the session model completes synchronously inside the owner. Work that must wait happens outside
+that owner, then enters it again using the current state.** Local commits and incoming history use the same owner, so
+neither can interrupt the other's unfinished SQLite/model work.
 
-Here, **owner** means the synchronous section guarded by `dispatching`, not a dedicated thread, a mailbox, or a lock
-held throughout a pull. Updating in-memory sync state means assigning the new event heads, pending local events,
-and relevant push state after the SQLite changes succeed. **Runner** means the Effect code that consumes commands, manages asynchronous operations,
-and advances reconciliation. The runner calls the owner; it has no second model to write. `yield*` in an Effect
-program does not itself imply an asynchronous pause: the storage and materializer effects inside the owner must
-complete synchronously, and automatic scheduler yielding is suppressed there.
+The file uses five terms:
+
+- **Owner**: `owned(body)`, the only code allowed to write `model`. It is not a thread, a mailbox, or a lock held
+  throughout a pull. Exclusion relies on the body being synchronous. A synchronous body always finishes before any
+  microtask runs, so `owned` schedules one: if it still finds the body holding the owner, the body suspended. That
+  body then fails the session with a named defect, and callers that meet the held owner get the same defect.
+  Running the body on a separate synchronous fiber (`Effect.runSyncExitWith`) would catch this earlier, but it
+  measurably slowed a 10,000-event commit in the perf suite, so it was rejected.
+- **Event**: an input that changes the model without returning a result, entered through `dispatch(event)`.
+  `commit` and one pull step are the two owner calls that do return a result (`writeTables`, or a `StepResult`).
+- **Command**: asynchronous work the owner stages for the runner (`Push`, `Reconcile`, shutdown steps).
+- **Notification**: a staged Queue offer or Deferred completion delivered after the owner is released.
+- **Runner**: the Effect code that consumes commands, manages asynchronous operations and advances reconciliation.
+  It has no second model to write; its only loop state is the offset into the pull being applied.
+
+This is close to an Elm-style `update` returning `(model, commands)`, except the owner stages commands imperatively
+with `stage(...)` instead of returning them. Updating in-memory sync state means assigning the new event heads,
+pending local events and relevant push state after the SQLite changes succeed.
 
 Read the following views separately. Boxes marked OWNER contain synchronous state changes; waits and callbacks
 are outside those boxes. Time runs downward in the sequence view. Its lanes represent responsibilities in the
@@ -216,10 +231,16 @@ The runner starts the leader call; its success, rejection, or failure enters a n
 prevent an obsolete command or result from advancing newer work. A push can be deferred, for example while
 reconciliation is active; committing locally still completes immediately.
 
-**Owner release is earlier than dispatch return.** Offering an Effect Queue or completing a Deferred can resume
-another fiber inline. The two branches therefore have no fixed ordering after release: a push can start before
-`Store.commit` returns, but the commit does not await its network result. Staging notifications ensures any resumed
-caller sees finished state. Store's subscriber callbacks also run after owner release and can make another commit.
+**Owner release is earlier than dispatch return.** Offering an Effect Queue or completing a Deferred resumes the
+waiting fiber inline: Effect calls `fiber.evaluate` in the caller's stack. The resumed fiber uses its own scheduler
+settings, so the owner's `PreventSchedulerYield` does not carry over. The two branches therefore have no fixed ordering
+after release: a push can start before `Store.commit` returns, but the commit does not await its network result.
+Staging notifications ensures any resumed caller sees finished state.
+
+This has a consequence for Store: code resumed by a notification, such as a `syncState` subscriber or the runner's
+next command, can run **inside** `Store.commit`, before that commit refreshes its own tables. If that code commits
+again, the nested commit refreshes its tables first. Model state stays coherent; only the order of reactive refreshes
+can be nested. Store's subscriber callbacks also run after owner release and can make another commit.
 
 #### 2. Where can a local commit run during a pull?
 
@@ -276,11 +297,11 @@ resume other fibers immediately after owner release, before the step returns to 
 The next step **merges again from live pending events**. It cannot reuse a plan made before the local commit. A
 concrete example, assuming neither incoming prefix confirms local event L:
 
-| Completed transition | Materialized counter | Still-pending local work |
-| --- | --- | --- |
-| First incoming prefix leaves the counter at 1 | 1 | none |
-| Local L increments the counter by 10 | 11 | L: increment by 10 |
-| Next incoming prefix sets the counter to 2; reconciliation replays L | 12 | L: increment by 10 |
+| Completed transition                                                 | Materialized counter | Still-pending local work |
+| -------------------------------------------------------------------- | -------------------- | ------------------------ |
+| First incoming prefix leaves the counter at 1                        | 1                    | none                     |
+| Local L increments the counter by 10                                 | 11                   | L: increment by 10       |
+| Next incoming prefix sets the counter to 2; reconciliation replays L | 12                   | L: increment by 10       |
 
 At every pause, rows, journal and head describe a complete incoming prefix plus the current optimistic events.
 The reader can see intermediate states such as 11 and 12; it must never see a new head paired with unfinished rows.
@@ -294,12 +315,13 @@ this design provides interleaving opportunities, not a hard browser frame-time b
 #### 3. What if applying a step first requires asynchronous cancellation?
 
 ```text
-    Runner calls dispatch(PullStep)
+    Runner runs a pull step in the owner
                    |
                    v
     +--------------------------------------------+
     | OWNER: merge detects cancellation needed   |
-    | Return cancel-push BEFORE changing state   |
+    | push: in-flight -> cancelling              |
+    | Return cancel-push; nothing else changes   |
     +--------------------------------------------+
                    |
              release owner
@@ -308,11 +330,18 @@ this design provides interleaving opportunities, not a hard browser frame-time b
                    :
                    :     Store.commit(L) may run during this wait
                    :     +--------------------------------------+
-                   :     | SAME OWNER: apply L; update pending  |
+                   :     | SAME OWNER: apply L; queue behind    |
+                   :     | the cancelling push                  |
                    :     +--------------------------------------+
                    :     Release; notify; refresh; commit returns
                    :
+                   :     A late success or rejection of the
+                   :     cancelling push is ignored; a fatal
+                   :     failure still fails the session.
+                   :
     Cancellation finishes
+                   |
+    dispatch(PushCancelled): cancelling -> idle
                    |
     Retry the SAME incoming prefix
                    |
@@ -335,8 +364,9 @@ this design provides interleaving opportunities, not a hard browser frame-time b
 ```
 
 This view shows the rebase path with a local commit during the cancellation wait. The first attempt detects that
-cancellation is needed and returns `cancel-push` **before changing SQLite or the session model**. The runner then
-interrupts the old push outside the owner. No reconciliation savepoint spans that wait, so a local commit can finish
+cancellation is needed, records `push: cancelling`, and returns `cancel-push` **before changing SQLite or sync
+state**. The cancellation is therefore visible in the model, not only in the runner. The runner then interrupts the
+old push outside the owner and reports `PushCancelled` for that operation. No reconciliation savepoint spans that wait, so a local commit can finish
 against the previous coherent state.
 
 Once cancellation finishes, the runner retries the same incoming prefix. The owner recomputes its merge, including
@@ -375,26 +405,66 @@ waits until that upstream sequence is complete.
 
 ### Client session
 
+Every field that affects a later decision is part of `Model`. Lifecycle and push are tagged unions, so combinations
+such as "running with a terminal cause" cannot be constructed.
+
 ```text
-lifecycle:  starting ──► running ──► stopping ──► stopped
-                            └──────► failed
+lifecycle:
+  starting ─────────► running { reconciliation? }
+     │                    │
+     └────────────────────┴──► shutdown-requested { exit, reconciliation? } ──► stopping { exit } ──► stopped
+                                                                                                       ▲
+  starting / running / shutdown-requested / stopping ──► failed { cause, shutdownExit? } ─────────────┘
 
-push:       idle
-            in-flight
-            awaiting-reconciliation
+push:
+  idle { queued }                          ──► in-flight                 reserveNextPush
+  in-flight { operationId, batch, queued } ──► idle                      PushSucceeded, or a recovered PushRejected
+  in-flight                                ──► awaiting-reconciliation   PushRejected
+  in-flight                                ──► cancelling                a pull step needs a rebase
+  cancelling { operationId, batch, queued } ─► idle                      PushCancelled (batch requeued)
+  awaiting-reconciliation { error, ... }   ──► idle                      rebase step, or PullFinished sees recovery
+  any                                      ──► idle                      applied rebase step (queue = live pending)
 
-reconcile:  none
-            active { id } ──► complete step ──► yield ──► next step
+reconciliation (inside running / shutdown-requested):
+  undefined ──► { id, rebased } ──► complete step ──► yield ──► next step ──► undefined
 ```
 
-`Store.commit` calls `processor.commit(events)`, which enters the same `dispatch` used by pull steps and completions.
+Transitions that change `lifecycle` or `push`, and what each stages for the runner:
+
+| Input               | From                            | To                                               | Staged                                           |
+| ------------------- | ------------------------------- | ------------------------------------------------ | ------------------------------------------------ |
+| `Started`           | starting                        | running                                          |                                                  |
+| `commit`            | running (else defect)           | push `queued` grows (unless awaiting)            | sync-state update; `Push` if idle                |
+| `PullReceived`      | running                         | reconciliation `{ id, rebased: false }`          | `Reconcile`                                      |
+| pull step, rebase   | push in-flight                  | push cancelling                                  | (returns `cancel-push`)                          |
+| `PushCancelled`     | push cancelling, same operation | push idle, batch requeued                        |                                                  |
+| pull step, applied  | reconciliation active           | sync state; rebase: push idle, `rebased: true`   | sync-state update                                |
+| `PullFinished`      | reconciliation active           | reconciliation cleared; push rebuilt if needed   | `Push` if eligible                               |
+| `PushSucceeded`     | push in-flight, same operation  | push idle                                        | next `Push`, or `FinishShutdown` if done         |
+| `PushRejected`      | push in-flight, same operation  | push idle (recovered) or awaiting-reconciliation | next `Push`; `FinishShutdown` if stopping        |
+| `PushFailed`        | push in-flight or cancelling    | failed                                           | `NotifyFailure` or `FinishShutdown`              |
+| `ShutdownRequested` | starting / running              | shutdown-requested                               | `BeginShutdown`                                  |
+| `ShutdownRequested` | failed, not yet requested       | failed with `shutdownExit`                       | `FinishShutdown`                                 |
+| `DrainStarted`      | shutdown-requested              | stopping                                         | next `Push` or `FinishShutdown`                  |
+| `DrainStarted`      | failed                          | (unchanged)                                      | `FinishShutdown`                                 |
+| `Failed`            | any live state                  | failed                                           | `NotifyFailure`, or `FinishShutdown` if stopping |
+| `Stopped`           | any                             | stopped                                          | shutdown result                                  |
+
+A failed session never re-enters `stopping`: nothing is drained after a fatal error, and push completions are ignored.
+
+`Store.commit` calls `processor.commit(events)`, which enters the same owner used by pull steps and completions.
 There is no session mailbox-ownership exception and no delayed `LocalPushAdmitted` event. Pull reconciliation yields
-only after a complete SQLite/model step, and merges again from live pending events when it resumes.
-The runner's cursor and cancellation flag describe traversal, not a second copy of the model.
+only after a complete SQLite/model step, and merges again from live pending events when it resumes. The runner handles
+one command at a time, so `BeginShutdown`, `FinishShutdown` and `NotifyFailure` wait behind an active `Reconcile`,
+including its cancellation wait and yields. A failure still takes effect at the next step, because it clears the
+reconciliation and every later step is then obsolete.
 
 Shutdown closes admission immediately, finishes the accepted pull, then drains the rebuilt pending suffix.
 A fatal completion can be handled between steps, unlike A's whole mailbox turn. It invalidates reconciliation so late
 steps cannot apply. Rejection recovery likewise consults current state at pull completion, not a snapshot from pull start.
+
+In development builds the owner also checks, after every successful body, that a cancelling push only exists during
+reconciliation and that the push queue is the unpushed suffix of pending events outside reconciliation.
 
 ### Safe session reconciliation steps
 
@@ -452,7 +522,7 @@ Consequential behavior and limits:
 ```text
 Store.commit
   ├─ ClientSessionSyncProcessor.commit
-  │    └─ dispatch(Commit) → commitLocalEvents
+  │    └─ owned(commitLocalEvents)
   │         ├─ check admission, encode, merge
   │         ├─ savepoint: materialize batch, journal and head
   │         ├─ update in-memory sync state to match SQLite
@@ -511,12 +581,12 @@ session leader-pull fiber
        ├─ validate full payload; register reconciliation identity
        └─ release owner; enqueue Reconcile command
             └─ reconcile (async runner)
-                 ├─ dispatch(PullStep) → applyPullStep
+                 ├─ owned(applyPullStep)
                  │    ├─ check identity and lifecycle; merge live pending
-                 │    ├─ cancellation needed? return without applying
+                 │    ├─ cancellation needed? push = cancelling; return without applying
                  │    ├─ applyPullToSqlite; update in-memory sync state to match SQLite
                  │    └─ release owner → notify
-                 ├─ cancellation requested? wait outside owner, then retry from live state
+                 ├─ cancellation requested? wait outside owner, dispatch(PushCancelled), retry from live state
                  ├─ applied? refresh subscribers, yield, repeat
                  └─ dispatch(PullFinished) → finishPull
                       └─ release reconciliation; rebuild/reserve propagation
@@ -562,7 +632,8 @@ leaderThread.events.push rejects
 A maintainer can now answer the main coordination questions in one place:
 
 - **What can happen now?** Read the tagged lifecycle, pull, and push states.
-- **What inputs can change it?** Read the closed `Event` union.
+- **What inputs can change it?** Read the closed `Event` union; in the session, add the two owner calls that return
+  results (`commit` and a pull step).
 - **In what order can changes happen?** Follow the leader mailbox, or session dispatch and the runner's safe yield points.
 - **What makes a transition durable?** Follow the two methods on `LeaderSyncCommitter`.
 - **Can an old completion corrupt current work?** No; operation identities reject stale results.
@@ -586,6 +657,8 @@ concepts, but they do not add another production module or a continuation-event 
 | Late provider or leader-push completions cannot advance newer work           | guarded by operation identities                                    |
 | A session commit is immediately visible to that session                      | guaranteed by the synchronous owner before the call returns        |
 | Session observers can reenter only after a completed transition              | owner released before staged notifications and subscriber refresh  |
+| Session owner work cannot suspend while holding the owner                    | detected; a suspending body fails the session with a named defect  |
+| Store refreshes a commit's tables before any code it resumes runs            | **not guaranteed**; resumed code can refresh (and commit) first    |
 | Session rows, journal and head agree at reconciliation yield points          | guaranteed for the synchronous SQLite/materializer implementations |
 | A complete session pull payload is applied atomically                        | **not guaranteed**; complete prefixes may be visible               |
 | Backend head and matching event inserts use the same eventlog transaction    | guaranteed                                                         |
@@ -603,7 +676,8 @@ still leave state ahead of eventlog truth and requires a separate recovery strat
 For a code review or architecture walkthrough, read the implementation in this order:
 
 1. [ClientSessionSyncProcessor.ts](../../packages/@livestore/common/src/sync/ClientSessionSyncProcessor.ts):
-   `transition` for the workflow map, then `dispatch` for ownership and staged notifications.
+   the `Model`, `Lifecycle` and `LeaderPushState` types at the bottom, then `transition` for the event map and `owned`
+   for ownership and staged notifications.
    Follow `commitLocalEvents` and `applyPullStep` for updates, `applyPullToSqlite` for persistence, and
    `reconcile` / `runCommand` for waits, callbacks and yields. `boot` only acquires and starts the runtime.
    [Store.commit](../../packages/@livestore/livestore/src/store/store.ts) calls the processor and retains local refresh.
@@ -620,12 +694,12 @@ The fork currently chooses C's single session owner with yielding steps. This is
 the readability refactor, not proof that fewer state writers always make code simpler. The leader mailbox and
 `LeaderSyncCommitter` are unchanged. This decision does not update accepted `context/` intent or imply upstream adoption.
 
-| Alternative          | Preserved branch / checkpoint                                          | Why keep it                                                                                                                     |
-| -------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Fixed split-owner A  | `codex/split-owner-a` at `4ead601cd`                   | Direct local path plus mailbox, with the same coherent-step safety rule. Fewer owner/runner concepts, but two writers to audit. |
-| Whole-batch B        | `experiment/session-sync-latency` at `e2edfa693`                       | One synchronous owner without stepwise yielding. Large batches delay UI input. Its mailbox comparison predates A's safety fix.  |
-| Fixed A/B comparison | `experiment/session-sync-fix`                                          | Keeps the later comparison against the whole-batch alternative.                                                                 |
-| Effect Machine       | `refactor/effect-machine-processors` and `codex/effect-machine-spike`  | Separate framework-based explorations, not dependencies of this design.                                                         |
+| Alternative          | Preserved branch / checkpoint                                                | Why keep it                                                                                                                     |
+| -------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Fixed split-owner A  | `codex/split-owner-a` at `4ead601cd`                                         | Direct local path plus mailbox, with the same coherent-step safety rule. Fewer owner/runner concepts, but two writers to audit. |
+| Whole-batch B        | `experiment/session-sync-latency` at `e2edfa693`                             | One synchronous owner without stepwise yielding. Large batches delay UI input. Its mailbox comparison predates A's safety fix.  |
+| Fixed A/B comparison | `experiment/session-sync-fix`                                                | Keeps the later comparison against the whole-batch alternative.                                                                 |
+| Effect Machine       | `refactor/effect-machine-processors` and `codex/effect-machine-spike`        | Separate framework-based explorations, not dependencies of this design.                                                         |
 | Preferred C          | `refactor/serialized-sync-processors`, implementation checkpoint `66ca5d3e0` | One synchronous owner, coherent-step yielding, named workflows and separate async execution in one file.                        |
 
 The Effect Machine review refinements are checkpointed at `db978b595`; its earlier bounded spike is preserved at
@@ -643,5 +717,7 @@ results were preserved.
 
 Validation at the refactored implementation checkpoint: root unit suite 129 passed / 1 skipped, focused session tests
 45 passed, Common and LiveStore suites 352 passed / 1 skipped, TypeScript build and perf-fixture typecheck passed,
-and full lint passed. [The companion](./0003-session-single-owner-experiment.md) records the review findings, fixes,
+and full lint passed. After the explicit-state follow-up: root unit suite 131 passed / 1 skipped, focused session tests
+47 passed (new: suspending materializer, rejection during push cancellation), Common and LiveStore suites 352 passed /
+1 skipped. [The companion](./0003-session-single-owner-experiment.md) records the review findings, fixes,
 and the remaining notification-stage and scheduling trade-offs.
