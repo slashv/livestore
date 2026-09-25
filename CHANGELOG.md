@@ -63,6 +63,7 @@
   rebase generation while stale epochs remain checked separately, avoiding
   duplicate materialization and ghost fences during multi-writer rebases
   ([#1530](https://github.com/livestorejs/livestore/pull/1530)).
+- **Session sync:** Keep local edits and persisted state heads consistent during concurrent reconciliation by yielding between complete SQLite/model steps. Refresh cached queries after rollback and prevent failed-processor admission from materializing events. Large pull batches can publish complete intermediate prefixes ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 
 ### Breaking Changes
 
@@ -87,6 +88,9 @@
 ### Internal Changes
 
 For maintainers and contributors:
+
+- **Session sync:** Organize the processor into named owner workflows, a pull-persistence helper, and asynchronous execution functions with concise startup wiring. This structural refactor preserves the existing synchronous commit and yielding reconciliation contracts ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
+- **Session sync:** Make every session sync state explicit in the processor model: lifecycle is a tagged union (including `shutdown-requested` and a terminal `failed` that no longer re-enters draining), and a push stopped for a rebase is tracked as `cancelling` instead of a runner-local flag. A materializer or SQLite service that suspends inside the owner now fails the session with a named defect instead of leaving the owner held ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 
 - **CI composition:** Aligned the megarepo setup with the automatic CI worktree
   policy and consolidated devenv resolver from

@@ -135,14 +135,14 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
     }).pipe(withTestCtx()(test)),
   )
 
-  Vitest.live('retains leader materialization metadata for pending local events', (test) =>
+  Vitest.live('publishes leader materializer hashes beside pending local events', (test) =>
     Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx
       const testContext = yield* TestContext
 
       yield* testContext.mockSyncBackend.disconnect
 
-      const localEvent = new LiveStoreEvent.Client.EncodedWithMeta({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({ id: 'local', text: 'local', completed: false }),
         ),
@@ -156,8 +156,10 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       const retainedEvent = (yield* leaderThreadCtx.syncProcessor.syncState.get).pending[0]!
       const publishedEvent = downstreamItem.payload.newEvents[0]!
 
-      expect(retainedEvent.meta.materializerHashLeader._tag).toEqual('Some')
-      expect(retainedEvent.meta.materializerHashLeader).toEqual(publishedEvent.meta.materializerHashLeader)
+      expect(retainedEvent).toEqual(publishedEvent)
+      expect(downstreamItem.materializerHashes).toEqual([
+        expect.objectContaining({ eventNum: retainedEvent.seqNum, hash: expect.objectContaining({ _tag: 'Some' }) }),
+      ])
 
       const journalChangeset = (yield* StateSqliteDb.StateSqliteDb).select<{
         changeset: Uint8Array<ArrayBuffer> | null
@@ -240,7 +242,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({ id: 'local-after-pull', text: 'local', completed: false }),
         ),
@@ -289,7 +291,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({
             id: 'local-after-pull-failure',
@@ -354,7 +356,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
       })
 
-      const localEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const localEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(
           testContext.eventFactory.todoCreated.next({
             id: 'local-after-pull-interrupt',
@@ -370,9 +372,11 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       const rows = (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query)
       expect(rows.map((row) => row.id).toSorted()).toEqual(['backend-1', 'local-after-pull-interrupt'])
+      expect(yield* Deferred.isDone(testContext.shutdownDeferred)).toBe(false)
     }).pipe(
       withTestCtx({
-        syncOptions: { livePull: false, onSyncError: 'ignore' },
+        syncOptions: { livePull: false, onSyncError: 'shutdown' },
+        captureShutdown: true,
         mockBackendOptions: { nonLiveChunkSize: 1 },
         seedMockBackend: seedPaginatedBackendTodos,
         mockBackendOverride: (mockBackend) => () =>
@@ -385,6 +389,65 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
                   syncBackend.pull(cursor, pullOptions).pipe(Stream.take(1)),
                   Stream.fromEffect(Effect.interrupt),
                 ),
+            }
+          }),
+      })(test),
+    ),
+  )
+
+  Vitest.live('provider push defects re-enter the machine and retry', (test) => {
+    let shouldDefect = true
+
+    return Effect.gen(function* () {
+      const testContext = yield* TestContext
+
+      yield* testContext.pushEncoded(
+        testContext.eventFactory.todoCreated.next({ id: 'push-after-defect', text: 'retried', completed: false }),
+      )
+
+      const pushed = yield* testContext.mockSyncBackend.pushedEvents.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.timeout(4000),
+      )
+      expect(pushed[0]?.args.id).toEqual('push-after-defect')
+    }).pipe(
+      withTestCtx({
+        syncOptions: { livePull: false, onSyncError: 'ignore' },
+        mockBackendOverride: (mockBackend) => () =>
+          Effect.gen(function* () {
+            const syncBackend = yield* mockBackend.makeSyncBackend
+            return {
+              ...syncBackend,
+              push: (batch) => {
+                if (shouldDefect === true) {
+                  shouldDefect = false
+                  return Effect.die(new Error('Simulated provider push defect'))
+                }
+                return syncBackend.push(batch)
+              },
+            }
+          }),
+      })(test),
+    )
+  })
+
+  Vitest.live('provider pull defects follow the configured shutdown path', (test) =>
+    Effect.gen(function* () {
+      const testContext = yield* TestContext
+
+      const shutdownError = yield* Deferred.await(testContext.shutdownDeferred).pipe(Effect.flip, Effect.timeout(3000))
+      expect(shutdownError._tag).toEqual('UnknownError')
+    }).pipe(
+      withTestCtx({
+        syncOptions: { livePull: false, onSyncError: 'shutdown' },
+        captureShutdown: true,
+        mockBackendOverride: (mockBackend) => () =>
+          Effect.gen(function* () {
+            const syncBackend = yield* mockBackend.makeSyncBackend
+            return {
+              ...syncBackend,
+              pull: () => Stream.fromEffect(Effect.die(new Error('Simulated provider pull defect'))),
             }
           }),
       })(test),
@@ -417,7 +480,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       })
 
       // push waits on the deferred, so we observe the rejection path.
-      const staleEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const staleEvent = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(baseEvent),
         seqNum: staleSeq,
         parentSeqNum: staleParent,
@@ -512,7 +575,6 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       )
 
       yield* testContext.mockSyncBackend.connect
-      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain, Effect.timeout(3000))
       const shutdownError = yield* Deferred.await(testContext.shutdownDeferred).pipe(Effect.flip, Effect.timeout(3000))
 
       expect(shutdownError._tag).toEqual('MaterializeError')
@@ -575,7 +637,9 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
           .pipe(Effect.tapCauseLogPretty, Effect.exit)
       }
 
-      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(2), Stream.runDrain)
+      // The supported concurrency guarantee is eventual propagation after reconciliation. The serialized machine
+      // intentionally removes the old queue race that made the exact number of pre-rebase successes timing-dependent.
+      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain)
     }).pipe(withTestCtx()(test)),
   )
 
@@ -736,7 +800,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         isClientOnly: false,
         rebaseGeneration: 1,
       })
-      const rebasedRetry = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const rebasedRetry = LiveStoreEvent.Client.Encoded.make({
         ...LiveStoreEvent.Global.toClientEncoded(retryBase),
         ...retryPair,
         clientId: 'shared-client',
@@ -821,7 +885,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         rebaseGeneration: syncStateBefore.localHead.rebaseGeneration + 1,
       })
 
-      const rebasedClientEvent = LiveStoreEvent.Client.EncodedWithMeta.make({
+      const rebasedClientEvent = LiveStoreEvent.Client.Encoded.make({
         name: 'app_configSet',
         args: { id: 'session-a', value: { theme: 'dark' } },
         seqNum: nextPair.seqNum,
@@ -1151,13 +1215,13 @@ const LeaderThreadCtxLive = ({
         client: EventFactory.clientIdentity(leaderThreadCtx.clientId, 'static-session-id'),
       })
 
-      const toEncodedWithMeta = (event: LiveStoreEvent.Global.Encoded) =>
-        new LiveStoreEvent.Client.EncodedWithMeta({
+      const toEncoded = (event: LiveStoreEvent.Global.Encoded) =>
+        LiveStoreEvent.Client.Encoded.make({
           ...LiveStoreEvent.Global.toClientEncoded(event),
         })
 
       const pushEncoded = (...events: ReadonlyArray<LiveStoreEvent.Global.Encoded>) =>
-        leaderThreadCtx.syncProcessor.push(events.map((event) => toEncodedWithMeta(event)))
+        leaderThreadCtx.syncProcessor.push(events.map((event) => toEncoded(event)))
 
       const pullQueue = yield* leaderThreadCtx.syncProcessor.pullQueue({
         cursor: EventSequenceNumber.Client.ROOT,

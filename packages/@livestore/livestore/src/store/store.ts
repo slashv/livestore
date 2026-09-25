@@ -214,7 +214,9 @@ export class Store<TSchema extends LiveStoreSchema = LiveStoreSchema.Any, TConte
 
     const reactivityGraph = makeReactivityGraph()
     const sqliteDbWrapper = new SqliteDbWrapper({ otel: otelOptions, db: clientSession.sqliteDb })
-    const stateDbLayer = StateSqliteDb.layer(clientSession.sqliteDb)
+    // Journal rollback must invalidate cached reads too. Both roles use the same connection, with the state
+    // services consuming its cache-aware adapter instead of bypassing it during changeset/savepoint rollback.
+    const stateDbLayer = StateSqliteDb.layer(sqliteDbWrapper)
     const reactiveStateDbLayer = ReactiveStateSqliteDb.layer(sqliteDbWrapper)
     const stateServicesLayer = Layer.mergeAll(MaterializationJournal.layer, StateHead.layer).pipe(
       Layer.provide(stateDbLayer),
@@ -883,22 +885,7 @@ export class Store<TSchema extends LiveStoreSchema = LiveStoreSchema.Any, TConte
 
       if (events.length === 0) return
 
-      const localServices = yield* Effect.context()
-
-      const encodedEvents = yield* this[StoreInternalsSymbol].syncProcessor.encodeEvents(events)
-
-      const { writeTables } = yield* Effect.try({
-        try: () => {
-          const materialize = () =>
-            this[StoreInternalsSymbol].syncProcessor
-              .materializeEvents(encodedEvents)
-              .pipe(Effect.runSyncWith(localServices))
-          return events.length > 1 ? this[StoreInternalsSymbol].sqliteDbWrapper.txn(materialize) : materialize()
-        },
-        catch: (cause) => UnknownError.make({ cause }),
-      })
-
-      yield* this[StoreInternalsSymbol].syncProcessor.push(encodedEvents)
+      const { writeTables } = yield* this[StoreInternalsSymbol].syncProcessor.commit(events)
 
       const tablesToUpdate: [Ref<null, ReactivityGraphContext, RefreshReason>, null][] = []
       for (const tableName of writeTables) {

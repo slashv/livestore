@@ -127,7 +127,7 @@ Vitest.describe.concurrent('unknown event handling in materializeEvent', () => {
       )
       yield* Queue.shutdown(bootStatusQueue)
 
-      const event = new LiveStoreEvent.Client.EncodedWithMeta({
+      const event = LiveStoreEvent.Client.Encoded.make({
         name: 'known-event',
         args: { value: 'example' },
         seqNum: EventSequenceNumber.Client.Composite.make({ global: 1, client: 0 }),
@@ -170,7 +170,7 @@ Vitest.describe.concurrent('unknown event handling in materializeEvent', () => {
 })
 
 const makeUnknownEncodedEvent = () =>
-  new LiveStoreEvent.Client.EncodedWithMeta({
+  LiveStoreEvent.Client.Encoded.make({
     name: 'v1.UnknownEvent',
     args: { payload: 'test' },
     seqNum: EventSequenceNumber.Client.Composite.make({ global: 1, client: 0 }),

@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "include": ["./*.ts"],
+  "references": [
+    { "path": "../../../packages/@livestore/common" },
+    { "path": "../../../packages/@livestore/adapter-web" },
+    { "path": "../../../packages/@livestore/livestore" },
+    { "path": "../../../packages/@livestore/utils" }
+  ]
+}

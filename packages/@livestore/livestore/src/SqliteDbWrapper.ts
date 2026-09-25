@@ -85,7 +85,19 @@ export class SqliteDbWrapper implements SqliteDb {
     return this.db.session()
   }
   makeChangeset(data: Uint8Array<ArrayBuffer>): SqliteDbChangeset {
-    return this.db.makeChangeset(data)
+    const wrap = (changeset: SqliteDbChangeset): SqliteDbChangeset => ({
+      invert: () => wrap(changeset.invert()),
+      apply: () => {
+        try {
+          changeset.apply()
+        } finally {
+          // Journal rollback bypasses cachedExecute. SQLite doesn't report the touched tables here, so cached
+          // results must all be discarded, including when applying a changeset fails partway through.
+          this.resultCache = new QueryCache()
+        }
+      },
+    })
+    return wrap(this.db.makeChangeset(data))
   }
 
   txn<TRes>(callback: () => TRes): TRes {
@@ -182,7 +194,10 @@ export class SqliteDbWrapper implements SqliteDb {
 
           stmt.execute(bindValues)
 
-          if (options?.hasNoEffects !== true && this.resultCache.ignoreQuery(queryStr) === false) {
+          if (/^\s*rollback\b/i.test(queryStr) === true) {
+            // A savepoint rollback can undo writes whose intermediate results were read by a materializer.
+            this.resultCache = new QueryCache()
+          } else if (options?.hasNoEffects !== true && this.resultCache.ignoreQuery(queryStr) === false) {
             // TODO use write tables instead
             // check what queries actually end up here.
             this.resultCache.invalidate(options?.writeTables ?? this.getTablesUsed(queryStr))
