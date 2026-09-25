@@ -741,3 +741,7 @@ pending suffix at every step: heavy rebases took about 2 seconds, a candidate fo
    exist: what the owner stages as notifications versus commands, when each is delivered or executed relative to
    releasing the owner, and what problem the split solves (for example reentrant observers, and asynchronous work
    started from synchronous transitions).
+8. **Does the leader need concurrent work at all?** "Leader: a serialized mailbox" separates durable leader work
+   (awaited inside the mailbox turn) from genuinely concurrent work (provider requests, retry timers) running in
+   supervised fibers. What actually has to run concurrently, and why? Could the leader be fully serial, so that its
+   state machine never has to handle several things in flight at once?
