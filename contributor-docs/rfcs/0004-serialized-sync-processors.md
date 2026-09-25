@@ -468,9 +468,6 @@ reconciliation and that the push queue is the unpushed suffix of pending events 
 
 ### Safe session reconciliation steps
 
-See [the original safety fix](./0004-session-reconciliation-validation.md) and
-[C's design and validation history](./0004-session-single-owner-experiment.md) for evidence and limits.
-
 The earlier split let a local commit land inside an unfinished rebase. It repaired the pending propagation queue, but
 an older materialization could still overwrite the newer durable head. Independent inserts hid the corresponding
 row-order problem. The full-Store regression tests now cover both head equality and noncommutative updates.
@@ -698,34 +695,49 @@ For a code review or architecture walkthrough, read the implementation in this o
 
 ## Choice, Alternatives and Evidence
 
-The fork currently chooses C's single session owner with yielding steps. This is a human architecture decision after
-the readability refactor, not proof that fewer state writers always make code simpler. The leader mailbox and
-`LeaderSyncCommitter` are unchanged. This decision does not update accepted `context/` intent or imply upstream adoption.
+The fork chooses C: one synchronous session owner that reconciles in small, coherent, yielding steps, beside the
+leader's serialized mailbox and `LeaderSyncCommitter`. This is a readability and safety decision, not a measured
+performance win over main, and it does not update accepted `context/` intent.
 
-| Alternative          | Preserved branch / checkpoint                                                | Why keep it                                                                                                                     |
-| -------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Fixed split-owner A  | `codex/split-owner-a` at `4ead601cd`                                         | Direct local path plus mailbox, with the same coherent-step safety rule. Fewer owner/runner concepts, but two writers to audit. |
-| Whole-batch B        | `experiment/session-sync-latency` at `e2edfa693`                             | One synchronous owner without stepwise yielding. Large batches delay UI input. Its mailbox comparison predates A's safety fix.  |
-| Fixed A/B comparison | `experiment/session-sync-fix`                                                | Keeps the later comparison against the whole-batch alternative.                                                                 |
-| Effect Machine       | `refactor/effect-machine-processors` and `codex/effect-machine-spike`        | Separate framework-based explorations, not dependencies of this design.                                                         |
-| Preferred C          | `refactor/serialized-sync-processors`, implementation checkpoint `66ca5d3e0` | One synchronous owner, coherent-step yielding, named workflows and separate async execution in one file.                        |
+| Tried                                                   | Why it was not chosen                                                                                                                   | Preserved at                                                               |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Split owner as on main (local commit path + mailbox)    | Unsafe: a local commit during an unfinished rebase could have its durable head overwritten (60 head failures in the browser run).       | `experiment/session-sync-latency` at `e2edfa693`                           |
+| Fixed split owner A (same coherent steps, two writers)  | As safe and as fast as C, but two writers to audit, and push completions wait for the whole mailbox turn.                               | `codex/split-owner-a` at `4ead601cd`                                       |
+| Whole-batch synchronous owner B                         | One owner, but applies an entire pull before yielding: input delay grows with batch size (about 430 ms vs 16 ms on 1,000 events).       | `experiment/session-sync-latency` at `e2edfa693`                           |
+| Owner body on its own fiber                             | Cleaner isolation, but about 4% slower on a 10,000-event commit; the body runs inline and a microtask check catches suspension.         | –                                                                          |
+| Effect Machine statecharts (leader and session)         | Adds a framework dependency and vocabulary, deeply nested specifications and duplicated schemas to critical synchronization code.       | `refactor/effect-machine-processors` at `db978b595`, spike at `18c0273a1`  |
+| Pure reducer + command interpreter                      | Represents every effect twice and separates a durable operation from the invariant it completes.                                        | –                                                                          |
+| Guarding the first pull step by rebase generation       | Head ordering deliberately ignores the local rebase generation; the guard would invent a monotonicity contract the protocol lacks.      | –                                                                          |
 
-The Effect Machine review refinements are checkpointed at `db978b595`; its earlier bounded spike is preserved at
-`18c0273a1`. The fixed A/B comparison is preserved at `53a8cea42`.
+Evidence: a browser comparison of fixed A and C (130 samples, Effect beta.99) passed every correctness check for both,
+with comparable input delay and catch-up times; see [the measurement interpretation](../../tests/perf/session-sync/DECISION.md).
+It does not compare against main and gives no frame-time bound. A known cost shared by A and C is replaying a large
+pending suffix at every step: heavy rebases took about 2 seconds, a candidate for follow-up optimization.
 
-Preserving a branch does not require keeping its worktree. `refactor/serialized-sync-processors` is the canonical
-fork refactor branch and now follows C, including the fixed-A safety checkpoint. The original C experiment remains
-preserved on `experiment/session-sync-owner`; fixed A remains on `codex/split-owner-a`.
+## Topics to Look Into After Meeting With Igor (September 25, 2026)
 
-The saved browser measurements compare **fixed A with C, not main**. All 130 samples passed checked invariants and
-runtime checks; input delay and catch-up were closely comparable. They provide no measured performance win over main
-and no hard latency bound. See [the measurement interpretation](../../tests/perf/session-sync/DECISION.md).
-The readability refactor was separately rerun against the same baseline with 130 passing samples; original generated
-results were preserved.
-
-Validation at the refactored implementation checkpoint: root unit suite 129 passed / 1 skipped, focused session tests
-45 passed, Common and LiveStore suites 352 passed / 1 skipped, TypeScript build and perf-fixture typecheck passed,
-and full lint passed. After the explicit-state follow-up: root unit suite 131 passed / 1 skipped, focused session tests
-47 passed (new: suspending materializer, rejection during push cancellation), Common and LiveStore suites 352 passed /
-1 skipped. [The companion](./0004-session-single-owner-experiment.md) records the review findings, fixes,
-and the remaining notification-stage and scheduling trade-offs.
+1. **Rename the processors' "events".** The inputs that flow through the sync processors (the `Event` union, for
+   example `LocalPushRequested` and `UpstreamBatchReceived`) are easily confused with LiveStore events. Pick a
+   distinct term, such as "machine event", "processor message" or "command", and apply it consistently in code and in
+   this RFC. The name is not decided yet.
+2. **What does `store.commit` wait for? (owner box in the diagrams)**
+   - Left branch: confirm that the path from `store.commit` through `dispatch(Commit)` and the subscriber refresh until
+     `store.commit` returns is fully synchronous, with nothing on it able to suspend or yield.
+   - Right branch: when the asynchronous follow-up work fails (for example the push to the leader), is the failure fed
+     back into the owner as a new input, or handled some other way? Trace each failure path.
+3. **Explain how these differ from conventional state machines.** Write a short primer for readers who know
+   conventional synchronous state machines, focused on the client session's dispatcher: it makes synchronous
+   transitions but coordinates asynchronous work (commands, runners, staged notifications). This needs a mental model
+   or analogy, not a full specification.
+4. **Check what "savepoint" means in the diagrams.** Presumably a SQLite `SAVEPOINT`, a nested transaction that can
+   roll back cleanly to the state before it. Confirm it means that, and whether it wraps materialization, journal and
+   state head together.
+5. **Sync state versus in-memory SQLite.** How is the in-memory sync state (pending events, heads) kept consistent
+   with the session's SQLite state? Is it guaranteed today, and if so, by what mechanism and at which points (for
+   example yield points)? Where can the two diverge?
+6. **Rename `LeaderSyncCommitter`.** Consider something like "Materialization Service" or "Leader Materialization
+   Service" to better describe its role. The name is not decided yet.
+7. **Notifications and commands in the client session processor.** Clarify how these two concepts work and why both
+   exist: what the owner stages as notifications versus commands, when each is delivered or executed relative to
+   releasing the owner, and what problem the split solves (for example reentrant observers, and asynchronous work
+   started from synchronous transitions).

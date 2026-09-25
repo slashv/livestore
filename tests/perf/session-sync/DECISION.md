@@ -114,4 +114,4 @@ stage as a readability trade-off. The measurements provide no strong performance
 implementation, and no evidence of a performance win over main. Future changes must preserve the coherent-step and
 synchronous-commit contracts regardless of that architectural preference.
 
-Start with [the implementation/design navigation](../../../contributor-docs/rfcs/0004-session-single-owner-experiment.md).
+Start with [the RFC's alternatives section](../../../contributor-docs/rfcs/0004-serialized-sync-processors.md#choice-alternatives-and-evidence).
