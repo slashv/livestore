@@ -63,6 +63,7 @@
   rebase generation while stale epochs remain checked separately, avoiding
   duplicate materialization and ghost fences during multi-writer rebases
   ([#1530](https://github.com/livestorejs/livestore/pull/1530)).
+- **Store lifecycle:** Closing the scope a store was created in (for example when a store registry disposes an unused store) now sends events committed in the session to the leader before closing, like `store.shutdown()`. Previously such events could be dropped if the leader had not acknowledged them yet. Disposal can now wait up to one second ([#1437](https://github.com/livestorejs/livestore/issues/1437)).
 - **Session sync:** Keep local edits and persisted state heads consistent during concurrent reconciliation by yielding between complete SQLite/model steps. Refresh cached queries after rollback and prevent failed-processor admission from materializing events. Large pull batches can publish complete intermediate prefixes ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 
 ### Breaking Changes
