@@ -1,7 +1,7 @@
 # Session sync: single owner with yielding reconciliation
 
 Status: preferred session-sync direction for the fork as of September 17, 2026, not accepted upstream intent.
-The user chose refactored C at `66ca5d3e0`; [the main RFC](./0005-serialized-sync-processors.md) now describes it directly.
+The user chose refactored C at `66ca5d3e0`; [the main RFC](./0004-serialized-sync-processors.md) now describes it directly.
 This companion preserves the experiment's design rationale, alternatives and validation history. C builds on the fixed
 split-owner checkpoint `4ead601cd`, not the whole-batch synchronous prototype. A remains preserved on
 `codex/split-owner-a`, independently of whether its worktree is retained. The canonical fork refactor branch,

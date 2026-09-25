@@ -468,8 +468,8 @@ reconciliation and that the push queue is the unpushed suffix of pending events 
 
 ### Safe session reconciliation steps
 
-See [the original safety fix](./0005-session-reconciliation-validation.md) and
-[C's design and validation history](./0005-session-single-owner-experiment.md) for evidence and limits.
+See [the original safety fix](./0004-session-reconciliation-validation.md) and
+[C's design and validation history](./0004-session-single-owner-experiment.md) for evidence and limits.
 
 The earlier split let a local commit land inside an unfinished rebase. It repaired the pending propagation queue, but
 an older materialization could still overwrite the newer durable head. Independent inserts hid the corresponding
@@ -727,5 +727,5 @@ Validation at the refactored implementation checkpoint: root unit suite 129 pass
 45 passed, Common and LiveStore suites 352 passed / 1 skipped, TypeScript build and perf-fixture typecheck passed,
 and full lint passed. After the explicit-state follow-up: root unit suite 131 passed / 1 skipped, focused session tests
 47 passed (new: suspending materializer, rejection during push cancellation), Common and LiveStore suites 352 passed /
-1 skipped. [The companion](./0005-session-single-owner-experiment.md) records the review findings, fixes,
+1 skipped. [The companion](./0004-session-single-owner-experiment.md) records the review findings, fixes,
 and the remaining notification-stage and scheduling trade-offs.

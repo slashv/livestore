@@ -2,8 +2,8 @@
 
 Status: historical validation of fixed split-owner A at `4ead601cd`, not accepted upstream intent. The fork now prefers
 C, which retains this safety fix and its regressions under a single synchronous owner.
-See [the current architecture RFC](./0005-serialized-sync-processors.md#safe-session-reconciliation-steps) and
-[the C comparison](./0005-session-single-owner-experiment.md). The A/B measurements below are distinct from the later
+See [the current architecture RFC](./0004-serialized-sync-processors.md#safe-session-reconciliation-steps) and
+[the C comparison](./0004-session-single-owner-experiment.md). The A/B measurements below are distinct from the later
 fixed-A/C measurements, and neither is a comparison against main.
 
 ## What changed

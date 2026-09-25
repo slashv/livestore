@@ -38,4 +38,4 @@ Five samples per workload on one machine are not a tail-latency study. Synthetic
 OPFS, workers, network, multiple tabs and telemetry exporters are outside the experiment. Neither version has a hard
 frame bound or a new cross-database crash-atomicity guarantee.
 
-See [the design comparison](../../../contributor-docs/rfcs/0005-session-single-owner-experiment.md).
+See [the design comparison](../../../contributor-docs/rfcs/0004-session-single-owner-experiment.md).
