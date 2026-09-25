@@ -367,8 +367,10 @@ export const make = Effect.fnUntraced(function* ({
         .pipe(Effect.exit)
       if (Exit.isFailure(commitExit) === true) return yield* stopForSyncFailure(Cause.squash(commitExit.cause))
       const receipt = commitExit.value
+      // The backend reports confirmed events without their local rebase generation, so confirming a pending event
+      // that was rebased locally leaves the persisted state head at the same DAG position with a higher generation.
       if (
-        EventSequenceNumber.Client.isEqual(receipt.stateHead, merge.newSyncState.localHead) === false ||
+        isSameEventPosition(receipt.stateHead, merge.newSyncState.localHead) === false ||
         EventSequenceNumber.Client.isEqual(receipt.backendHead, backendHead) === false
       ) {
         return yield* stopForSyncFailure({
@@ -1179,3 +1181,7 @@ const isSameSequencePosition = (
   left: EventSequenceNumber.Client.Composite,
   right: EventSequenceNumber.Client.Composite,
 ) => left.global === right.global && left.client === right.client
+
+/** Compares DAG positions while ignoring the local rebase generation, which the backend does not preserve. */
+const isSameEventPosition = (left: EventSequenceNumber.Client.Composite, right: EventSequenceNumber.Client.Composite) =>
+  left.global === right.global && left.client === right.client

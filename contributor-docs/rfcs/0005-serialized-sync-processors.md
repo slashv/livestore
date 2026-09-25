@@ -655,6 +655,7 @@ concepts, but they do not add another production module or a continuation-event 
 | Upstream pagination takes precedence over new local durable work             | guaranteed                                                         |
 | Publication and acknowledgement happen only after a successful leader commit | guaranteed                                                         |
 | Late provider or leader-push completions cannot advance newer work           | guarded by operation identities                                    |
+| Upstream commit receipts match the merged local head                         | by DAG position; the rebase generation is local                    |
 | A session commit is immediately visible to that session                      | guaranteed by the synchronous owner before the call returns        |
 | Session observers can reenter only after a completed transition              | owner released before staged notifications and subscriber refresh  |
 | Session owner work cannot suspend while holding the owner                    | detected; a suspending body fails the session with a named defect  |
@@ -670,6 +671,13 @@ The state and eventlog databases use separate SQLite connections. The committer 
 rollback paths, but it cannot make them atomic across a process crash. State is committed first so the eventlog does not
 claim a transition that never reached materialized state. A crash or eventlog commit failure after the state commit can
 still leave state ahead of eventlog truth and requires a separate recovery strategy.
+
+The backend confirms events without the leader's local rebase generation. When the leader rebases a pending event
+before the backend accepts it (for example `e1` becomes `e2` with generation 1), the eventlog row and `StateHead` keep
+generation 1 while the merged sync state adopts the backend's `e2`. The leader therefore checks upstream commit receipts
+by global and client position, the same way the committer matches confirmed events. Which of the two orderings occurs
+depends on fiber scheduling: Effect 4.0.0-rc.113 lets a local push reach the leader before concurrently forked backend
+events, where beta.99 happened to order them the other way.
 
 ## Reading Order
 
