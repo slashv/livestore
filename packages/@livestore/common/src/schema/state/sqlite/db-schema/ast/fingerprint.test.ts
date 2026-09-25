@@ -15,7 +15,7 @@ describe('SQLite storage fingerprints', () => {
     expect(fingerprint(makeJsonTable('documents', representativeJsonSchema).ast)).toBe(
       'kUzaurzV2rcXYLljHOZ64TDR9c_RebqD7y5ZUM_nPBE',
     )
-    expect(makeState({ tables: [], materializers: {} }).sqlite.hash).toBe('o8mmnRDnhXhkgDpBybM3FK7S-PkaLEj_pKcnbzgg3TU')
+    expect(makeState({ tables: [], materializers: {} }).sqlite.hash).toBe('1_2x-8RoI45JYrfY63I7lNiHj4ptli9Ong1XNS1gA10')
   })
 
   test('isolates pre-completion-marker state databases without changing the hash algorithm', () => {
@@ -24,7 +24,7 @@ describe('SQLite storage fingerprints', () => {
       .filter((table) => table.sqliteDef.name !== REBUILD_META_TABLE)
       .map((table) => table.sqliteDef.ast)
     const legacyHash = fingerprint({ _tag: 'dbSchema', tables: legacyTables })
-    expect(legacyHash).toBe('H5Uktp6Ffp84WDj_RWPnfDnaQEu_E61AMl7ieZ9Zn8k')
+    expect(legacyHash).toBe('0Ce3j3biUjf2_KpqhAVO5tS222iEWtwju9xIP8EkGKc')
     expect(state.sqlite.hash).not.toBe(legacyHash)
   })
 
