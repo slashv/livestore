@@ -32,7 +32,7 @@ import type { BackendIdMismatchError, IsOfflineError, ServerAheadError } from '.
 import type * as SyncBackend from '../sync/sync-backend.ts'
 import * as SyncState from '../sync/syncstate.ts'
 import * as Eventlog from './eventlog.ts'
-import * as LeaderSyncCommitter from './LeaderSyncCommitter.ts'
+import * as LeaderPersistence from './LeaderPersistence.ts'
 import {
   LeaderAheadError,
   NonContiguousBatchError,
@@ -53,7 +53,7 @@ export type TypeId = typeof TypeId
  * This makes the in-memory model easier to reason about because the mailbox loop is the only place that changes it.
  *
  * The processor owns lifecycle, queues, provider work, publication, and acknowledgements. Durable work is delegated to
- * `LeaderSyncCommitter`, and only a successful receipt may update observable state, publish events, schedule a backend
+ * `LeaderPersistence`, and only a successful receipt may update observable state, publish events, schedule a backend
  * push, or resolve a push acknowledgement.
  */
 export class LeaderSyncProcessor extends Context.Service<LeaderSyncProcessor, Service>()(
@@ -112,7 +112,7 @@ export const make = Effect.fnUntraced(function* ({
   testing,
 }: Options) {
   const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
-  const syncCommitter = yield* LeaderSyncCommitter.LeaderSyncCommitter
+  const persistence = yield* LeaderPersistence.LeaderPersistence
   const { devtoolsLatch, shutdownChannel, span, syncBackend } = runtime
 
   const mailbox = yield* Queue.unbounded<LeaderMessage>()
@@ -300,25 +300,25 @@ export const make = Effect.fnUntraced(function* ({
       if (merge._tag === 'rebase') return yield* stopForSyncFailure(new Error('Local push required rebase'))
 
       // Commit the events retained by the merge, not the input objects. This is the proposed state transition that
-      // the committer must either make durable as a whole or reject.
+      // LeaderPersistence must either make durable as a whole or reject.
       const events = merge.newSyncState.pending.slice(model.syncState.pending.length)
       if (events.length !== merge.newEvents.length) {
         return yield* stopForSyncFailure(new Error('Local push was not retained as pending'))
       }
-      const commitExit = yield* syncCommitter.commitLocal({ events }).pipe(Effect.exit)
-      if (Exit.isFailure(commitExit) === true) return yield* stopForSyncFailure(Cause.squash(commitExit.cause))
-      const receipt = commitExit.value
+      const persistExit = yield* persistence.persistLocal({ events }).pipe(Effect.exit)
+      if (Exit.isFailure(persistExit) === true) return yield* stopForSyncFailure(Cause.squash(persistExit.cause))
+      const receipt = persistExit.value
       if (EventSequenceNumber.Client.isEqual(receipt.stateHead, merge.newSyncState.localHead) === false) {
         return yield* stopForSyncFailure({
-          _tag: 'CommitReceiptMismatch',
+          _tag: 'PersistReceiptMismatch',
           expectedStateHead: merge.newSyncState.localHead,
           receipt,
         })
       }
 
-      // Materialization may enrich copied events. Replace the planned values with the committer's durable receipt
+      // Materialization may enrich copied events. Replace the planned values with the durable receipt from LeaderPersistence
       // before anything becomes observable or is sent to the backend.
-      const committedSyncState = replacePendingEvents(merge.newSyncState, receipt.committedEvents)
+      const committedSyncState = replacePendingEvents(merge.newSyncState, receipt.persistedEvents)
       const completedKeys = new Set(items.map(localItemKey))
       model = {
         ...model,
@@ -326,12 +326,12 @@ export const make = Effect.fnUntraced(function* ({
       }
       yield* publish({
         syncState: committedSyncState,
-        payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents }),
+        payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.persistedEvents }),
         materializerHashes: receipt.materializerHashes,
       })
       model = enqueuePushEvents(
         model,
-        receipt.committedEvents.filter((event) => !isClientOnlyEvent(event)),
+        receipt.persistedEvents.filter((event) => !isClientOnlyEvent(event)),
       )
       yield* startProviderPush()
       yield* completeLocalItems(localRequests, items)
@@ -356,8 +356,8 @@ export const make = Effect.fnUntraced(function* ({
       const confirmedEvents = merge._tag === 'advance' ? merge.confirmedEvents : []
       const backendHead = batch.events.at(-1)?.seqNum
       if (backendHead === undefined) return yield* stopForSyncFailure(new Error('Upstream batch has no head'))
-      const commitExit = yield* syncCommitter
-        .commitUpstream({
+      const persistExit = yield* persistence
+        .persistUpstream({
           pulledEvents: batch.pulledEvents,
           events: merge.newEvents,
           rollbackEvents,
@@ -365,8 +365,8 @@ export const make = Effect.fnUntraced(function* ({
           backendHead,
         })
         .pipe(Effect.exit)
-      if (Exit.isFailure(commitExit) === true) return yield* stopForSyncFailure(Cause.squash(commitExit.cause))
-      const receipt = commitExit.value
+      if (Exit.isFailure(persistExit) === true) return yield* stopForSyncFailure(Cause.squash(persistExit.cause))
+      const receipt = persistExit.value
       // The backend reports confirmed events without their local rebase generation, so confirming a pending event
       // that was rebased locally leaves the persisted state head at the same DAG position with a higher generation.
       if (
@@ -374,18 +374,18 @@ export const make = Effect.fnUntraced(function* ({
         EventSequenceNumber.Client.isEqual(receipt.backendHead, backendHead) === false
       ) {
         return yield* stopForSyncFailure({
-          _tag: 'CommitReceiptMismatch',
+          _tag: 'PersistReceiptMismatch',
           expectedStateHead: merge.newSyncState.localHead,
           expectedBackendHead: backendHead,
           receipt,
         })
       }
 
-      const committedSyncState = replacePendingEvents(merge.newSyncState, receipt.committedEvents)
+      const committedSyncState = replacePendingEvents(merge.newSyncState, receipt.persistedEvents)
       const payload =
         merge._tag === 'rebase'
-          ? SyncState.PayloadUpstreamRebase.make({ rollbackEvents, newEvents: receipt.committedEvents })
-          : SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.committedEvents })
+          ? SyncState.PayloadUpstreamRebase.make({ rollbackEvents, newEvents: receipt.persistedEvents })
+          : SyncState.PayloadUpstreamAdvance.make({ newEvents: receipt.persistedEvents })
       yield* publish({ syncState: committedSyncState, payload, materializerHashes: receipt.materializerHashes })
       yield* completePullBatch(pullBatches, batch.batchId)
       yield* replacePushPlan(committedSyncState.pending.filter((event) => !isClientOnlyEvent(event)))
@@ -462,7 +462,7 @@ export const make = Effect.fnUntraced(function* ({
             interruptAllLocalRequests(localRequests),
             interruptAllPullBatches(pullBatches),
           ])
-          const resetExit = yield* syncCommitter.resetLocalDatabases.pipe(Effect.exit)
+          const resetExit = yield* persistence.resetLocalDatabases.pipe(Effect.exit)
           const cause =
             Exit.isFailure(resetExit) === true
               ? Cause.squash(resetExit.cause)
@@ -763,7 +763,7 @@ interface UpstreamBatch {
   readonly pullId: OperationId
   readonly batchId: PullBatchId
   readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
-  readonly pulledEvents: ReadonlyArray<LeaderSyncCommitter.PulledEvent>
+  readonly pulledEvents: ReadonlyArray<LeaderPersistence.PulledEvent>
   readonly pageInfo: SyncBackend.PullResPageInfo
 }
 
@@ -931,7 +931,7 @@ const runProviderPull = ({
             batch: { pullId, batchId, events: pulledEvents.map(({ event }) => event), pulledEvents, pageInfo },
           })
           // Backpressure the provider stream until this page is durably committed (or deliberately discarded).
-          // This keeps later pages from racing ahead of the cursor stored by the committer.
+          // This keeps later pages from racing ahead of the cursor stored by LeaderPersistence.
           yield* Deferred.await(completion)
           yield* initialBlockingSyncContext.update({ processed: batch.length, pageInfo })
           yield* Effect.yieldNow
@@ -1005,12 +1005,12 @@ const validatePushBatch = (
   return undefined
 }
 
-const replacePendingEvents = (syncState: SyncState.SyncState, committedEvents: EventBatch) =>
+const replacePendingEvents = (syncState: SyncState.SyncState, persistedEvents: EventBatch) =>
   new SyncState.SyncState({
     ...syncState,
     pending: syncState.pending.map(
       (pendingEvent) =>
-        committedEvents.find((committedEvent) =>
+        persistedEvents.find((committedEvent) =>
           EventSequenceNumber.Client.isEqual(committedEvent.seqNum, pendingEvent.seqNum),
         ) ?? pendingEvent,
     ),

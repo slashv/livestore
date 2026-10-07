@@ -37,7 +37,7 @@ import { sql } from '../util.ts'
 import { configureConnection } from './connection.ts'
 import * as Eventlog from './eventlog.ts'
 import { bootDevtools } from './leader-worker-devtools.ts'
-import * as LeaderSyncCommitter from './LeaderSyncCommitter.ts'
+import * as LeaderPersistence from './LeaderPersistence.ts'
 import * as LeaderSyncProcessor from './LeaderSyncProcessor.ts'
 import { makeMaterializeEvent } from './materialize-event.ts'
 import { hasCompletedState, recreateDb } from './recreate-db.ts'
@@ -208,7 +208,7 @@ export const makeLeaderThreadLayer = ({
         : { enabled: false as const }
 
     const span = yield* Effect.currentSpan.pipe(Effect.option, Effect.map(Option.getOrUndefined))
-    const syncCommitter = yield* LeaderSyncCommitter.make({ materializeEvent })
+    const persistence = yield* LeaderPersistence.make({ materializeEvent })
 
     const syncProcessor = yield* LeaderSyncProcessor.make({
       schema,
@@ -232,7 +232,7 @@ export const makeLeaderThreadLayer = ({
       testing: {
         ...omitUndefineds({ delays: testing?.syncProcessor?.delays, hooks: testing?.syncProcessor?.hooks }),
       },
-    }).pipe(Effect.provideService(LeaderSyncCommitter.LeaderSyncCommitter, syncCommitter))
+    }).pipe(Effect.provideService(LeaderPersistence.LeaderPersistence, persistence))
 
     const extraIncomingMessagesQueue = yield* Effect.acquireRelease(
       Queue.unbounded<Devtools.Leader.MessageToApp>(),

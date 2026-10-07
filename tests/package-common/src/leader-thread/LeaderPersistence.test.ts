@@ -8,7 +8,7 @@ import {
   StateHead,
   StateSqliteDb,
 } from '@livestore/common'
-import { Eventlog, LeaderSyncCommitter, makeMaterializeEvent, recreateDb } from '@livestore/common/leader-thread'
+import { Eventlog, LeaderPersistence, makeMaterializeEvent, recreateDb } from '@livestore/common/leader-thread'
 import { EventSequenceNumber, LiveStoreEvent } from '@livestore/common/schema'
 import { loadSqlite3Wasm } from '@livestore/sqlite-wasm/load-wasm'
 import { sqliteDbFactory } from '@livestore/sqlite-wasm/node'
@@ -18,13 +18,13 @@ import { PlatformNode } from '@livestore/utils/node'
 
 import { events, schema } from './fixture.ts'
 
-Vitest.describe.concurrent('LeaderSyncCommitter', () => {
+Vitest.describe.concurrent('LeaderPersistence', () => {
   Vitest.live('commits local events without mutating the plan and returns an immutable receipt', (test) =>
     Effect.gen(function* () {
-      const { committer, dbEventlog, dbState, stateHead } = yield* setup
+      const { persistence, dbEventlog, dbState, stateHead } = yield* setup
       const event = makeTodoEvent({ global: 1, id: 'local', text: 'Local' })
 
-      const receipt = yield* committer.commitLocal({ events: [event] })
+      const receipt = yield* persistence.persistLocal({ events: [event] })
 
       expect(dbState.select('SELECT id, text FROM todos')).toEqual([{ id: 'local', text: 'Local' }])
       expect(dbEventlog.select<{ name: string }>('SELECT name FROM eventlog')).toEqual([
@@ -32,27 +32,27 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
       ])
       expect(yield* stateHead.get).toEqual(event.seqNum)
 
-      expect(receipt.committedEvents[0]).not.toBe(event)
+      expect(receipt.persistedEvents[0]).not.toBe(event)
       expect(event).not.toHaveProperty('meta')
       expect(Object.isFrozen(receipt)).toBe(true)
-      expect(Object.isFrozen(receipt.committedEvents)).toBe(true)
+      expect(Object.isFrozen(receipt.persistedEvents)).toBe(true)
       expect(Object.isFrozen(receipt.materializerHashes)).toBe(true)
       expect(Object.isFrozen(receipt.materializerHashes[0])).toBe(true)
-      expect(Object.isFrozen(receipt.committedEvents[0])).toBe(true)
-      expect(receipt.committedEvents[0]!.args).not.toBe(event.args)
-      expect(Object.isFrozen(receipt.committedEvents[0]!.args)).toBe(true)
-      expect(Object.isFrozen(receipt.committedEvents[0]!.seqNum)).toBe(true)
+      expect(Object.isFrozen(receipt.persistedEvents[0])).toBe(true)
+      expect(receipt.persistedEvents[0]!.args).not.toBe(event.args)
+      expect(Object.isFrozen(receipt.persistedEvents[0]!.args)).toBe(true)
+      expect(Object.isFrozen(receipt.persistedEvents[0]!.seqNum)).toBe(true)
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test)),
   )
 
   Vitest.live('rolls back both databases when an upstream batch fails during materialization', (test) =>
     Effect.gen(function* () {
-      const { committer, dbEventlog, dbState, stateHead } = yield* setup
+      const { persistence, dbEventlog, dbState, stateHead } = yield* setup
       const first = makeTodoEvent({ global: 1, id: 'duplicate', text: 'First' })
       const duplicate = makeTodoEvent({ global: 2, parentSeqNum: first.seqNum, id: 'duplicate', text: 'Second' })
 
-      const error = yield* committer
-        .commitUpstream({
+      const error = yield* persistence
+        .persistUpstream({
           pulledEvents: [pulled(first), pulled(duplicate)],
           events: [first, duplicate],
           rollbackEvents: [],
@@ -72,7 +72,7 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
 
   Vitest.live('does not expose event inserts when backend-head persistence fails', (test) =>
     Effect.gen(function* () {
-      const { committer, dbEventlog, dbState, stateHead } = yield* setup
+      const { persistence, dbEventlog, dbState, stateHead } = yield* setup
       const event = makeTodoEvent({ global: 1, id: 'head-failure', text: 'Head failure' })
       dbEventlog.execute(`
         CREATE TRIGGER fail_backend_head
@@ -82,8 +82,8 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
         END
       `)
 
-      const error = yield* committer
-        .commitUpstream({
+      const error = yield* persistence
+        .persistUpstream({
           pulledEvents: [pulled(event)],
           events: [event],
           rollbackEvents: [],
@@ -102,9 +102,9 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
 
   Vitest.live('replaces rolled-back history and advances the backend head in one upstream commit', (test) =>
     Effect.gen(function* () {
-      const { committer, dbEventlog, dbState, stateHead } = yield* setup
+      const { persistence, dbEventlog, dbState, stateHead } = yield* setup
       const original = makeTodoEvent({ global: 1, id: 'original', text: 'Original' })
-      yield* committer.commitLocal({ events: [original] })
+      yield* persistence.persistLocal({ events: [original] })
 
       const replacement = makeTodoEvent({
         global: 1,
@@ -113,7 +113,7 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
         text: 'Replacement',
       })
 
-      const receipt = yield* committer.commitUpstream({
+      const receipt = yield* persistence.persistUpstream({
         pulledEvents: [pulled(replacement, Option.some({ cursor: 'upstream-1' }))],
         events: [replacement],
         rollbackEvents: [original],
@@ -129,23 +129,23 @@ Vitest.describe.concurrent('LeaderSyncCommitter', () => {
       expect(yield* stateHead.get).toEqual(replacement.seqNum)
       expect(dbState.select(`SELECT * FROM ${MATERIALIZATION_JOURNAL_META_TABLE}`)).toEqual([])
       expect(receipt.rolledBackEventNums).toEqual([original.seqNum])
-      expect(receipt.committedEvents[0]).not.toBe(replacement)
+      expect(receipt.persistedEvents[0]).not.toBe(replacement)
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test)),
   )
 
   Vitest.live('persists confirmation metadata with the matching backend head', (test) =>
     Effect.gen(function* () {
-      const { committer, dbEventlog, dbState } = yield* setup
+      const { persistence, dbEventlog, dbState } = yield* setup
       const pending = makeTodoEvent({
         global: 1,
         rebaseGeneration: 2,
         id: 'confirmed',
         text: 'Confirmed',
       })
-      yield* committer.commitLocal({ events: [pending] })
+      yield* persistence.persistLocal({ events: [pending] })
       const upstream = makeTodoEvent({ global: 1, id: 'confirmed', text: 'Confirmed' })
 
-      yield* committer.commitUpstream({
+      yield* persistence.persistUpstream({
         pulledEvents: [pulled(upstream, Option.some({ cursor: 'confirmed-1' }))],
         events: [],
         rollbackEvents: [],
@@ -184,10 +184,10 @@ const setup = Effect.gen(function* () {
   yield* recreateDb({ schema, bootStatusQueue, materializeEvent }).pipe(Effect.provide(servicesLayer))
   yield* Queue.shutdown(bootStatusQueue)
 
-  const committer = yield* LeaderSyncCommitter.make({ materializeEvent }).pipe(Effect.provide(servicesLayer))
+  const persistence = yield* LeaderPersistence.make({ materializeEvent }).pipe(Effect.provide(servicesLayer))
   const stateHead = yield* StateHead.make.pipe(Effect.provideService(StateSqliteDb.StateSqliteDb, dbState))
 
-  return { committer, dbEventlog, dbState, stateHead }
+  return { persistence, dbEventlog, dbState, stateHead }
 })
 
 const makeTodoEvent = ({
@@ -215,4 +215,4 @@ const makeTodoEvent = ({
 const pulled = (
   event: LiveStoreEvent.Client.Encoded,
   syncMetadata: Option.Option<{ cursor: string }> = Option.none(),
-): LeaderSyncCommitter.PulledEvent => ({ event, syncMetadata })
+): LeaderPersistence.PulledEvent => ({ event, syncMetadata })

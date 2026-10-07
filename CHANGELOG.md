@@ -94,6 +94,7 @@ For maintainers and contributors:
 - **Session sync:** Make every session sync state explicit in the processor model: lifecycle is a tagged union (including `shutdown-requested` and a terminal `failed` that no longer re-enters draining), and a push stopped for a rebase is tracked as `cancelling` instead of a runner-local flag. A materializer or SQLite service that suspends inside the owner now fails the session with a named defect instead of leaving the owner held ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 - **Session sync:** If the processor cannot even record a failure, because a suspended body still holds the owner, it now logs the failure and shuts down the Store instead of letting the defect die unobserved in the runner or push fiber.
 - **Sync processors:** Rename the processors' internal input unions from `Event` to `SessionMessage` and `LeaderMessage`, so "event" only ever means a LiveStore event.
+- **Leader sync:** Rename `LeaderSyncCommitter` to `LeaderPersistence` (`persistLocal`, `persistUpstream`, `LocalPersistReceipt`, `UpstreamPersistReceipt`). It durably writes events that were already committed or received, so "commit" no longer echoes `store.commit`.
 
 - **CI composition:** Aligned the megarepo setup with the automatic CI worktree
   policy and consolidated devenv resolver from

@@ -12,10 +12,10 @@ import { sql } from '../util.ts'
 import * as Eventlog from './eventlog.ts'
 import type { MaterializeEvent } from './types.ts'
 
-export const TypeId = '~@livestore/common/LeaderSyncCommitter' as const
+export const TypeId = '~@livestore/common/LeaderPersistence' as const
 export type TypeId = typeof TypeId
 
-export interface LocalCommitPlan {
+export interface LocalPersistPlan {
   readonly events: ReadonlyArray<LiveStoreEvent.Client.Encoded>
 }
 
@@ -24,7 +24,7 @@ export interface PulledEvent {
   readonly syncMetadata: Option.Option<Schema.Json>
 }
 
-export interface UpstreamCommitPlan {
+export interface UpstreamPersistPlan {
   /** The events received in the backend chunk, including metadata used to confirm pending events. */
   readonly pulledEvents: ReadonlyArray<PulledEvent>
   /** The merged events to materialize, including any locally rebased pending suffix. */
@@ -34,44 +34,44 @@ export interface UpstreamCommitPlan {
   readonly backendHead: EventSequenceNumber.Client.Composite
 }
 
-export interface LocalCommitReceipt {
-  readonly _tag: 'local-commit'
-  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+export interface LocalPersistReceipt {
+  readonly _tag: 'local-persist'
+  readonly persistedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
   readonly materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
   readonly stateHead: EventSequenceNumber.Client.Composite
 }
 
-export interface UpstreamCommitReceipt {
-  readonly _tag: 'upstream-commit'
-  readonly committedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
+export interface UpstreamPersistReceipt {
+  readonly _tag: 'upstream-persist'
+  readonly persistedEvents: ReadonlyArray<LiveStoreEvent.Client.Encoded>
   readonly materializerHashes: ReadonlyArray<LiveStoreEvent.Client.MaterializerHash>
   readonly rolledBackEventNums: ReadonlyArray<EventSequenceNumber.Client.Composite>
   readonly stateHead: EventSequenceNumber.Client.Composite
   readonly backendHead: EventSequenceNumber.Client.Composite
 }
 
-export type CommitError = MaterializeError | MaterializationJournal.MaterializationJournalError
+export type PersistError = MaterializeError | MaterializationJournal.MaterializationJournalError
 
 export interface Service {
   readonly [TypeId]: TypeId
-  readonly commitLocal: (plan: LocalCommitPlan) => Effect.Effect<LocalCommitReceipt, CommitError>
-  readonly commitUpstream: (plan: UpstreamCommitPlan) => Effect.Effect<UpstreamCommitReceipt, CommitError>
+  readonly persistLocal: (plan: LocalPersistPlan) => Effect.Effect<LocalPersistReceipt, PersistError>
+  readonly persistUpstream: (plan: UpstreamPersistPlan) => Effect.Effect<UpstreamPersistReceipt, PersistError>
   readonly resetLocalDatabases: Effect.Effect<void, UnknownError>
 }
 
 /**
  * Durable SQLite boundary for leader-sync transitions.
  *
- * `commitLocal` and `commitUpstream` handle rollback, materialization, journal maintenance, eventlog writes, and head
- * updates. They return immutable receipts so the processor publishes exactly what was committed, without changing the
+ * `persistLocal` and `persistUpstream` handle rollback, materialization, journal maintenance, eventlog writes, and head
+ * updates. They return immutable receipts so the processor publishes exactly what was persisted, without changing the
  * caller's plan in place.
  *
  * Provider and session queues, retries, publication, acknowledgements, and in-memory sync state stay in
  * `LeaderSyncProcessor`. The two SQLite databases cannot be crash-atomic together; state is committed first so the
  * eventlog never claims that a state transition was durable when the state commit itself failed.
  */
-export class LeaderSyncCommitter extends Context.Service<LeaderSyncCommitter, Service>()(
-  '@livestore/common/LeaderSyncCommitter',
+export class LeaderPersistence extends Context.Service<LeaderPersistence, Service>()(
+  '@livestore/common/LeaderPersistence',
 ) {}
 
 export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent }) =>
@@ -107,7 +107,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         }),
       )
 
-    const commitLocal: Service['commitLocal'] = ({ events }) =>
+    const persistLocal: Service['persistLocal'] = ({ events }) =>
       withCoordinatedTransactions(
         { dbState, dbEventlog },
         Effect.gen(function* () {
@@ -117,19 +117,19 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
           )
 
           return freezeReceipt({
-            _tag: 'local-commit' as const,
-            committedEvents: freezeArray(materialized.map(({ event }) => event)),
+            _tag: 'local-persist' as const,
+            persistedEvents: freezeArray(materialized.map(({ event }) => event)),
             materializerHashes: freezeArray(materialized.map(({ materializerHash }) => materializerHash)),
             stateHead: freezeSeqNum(persistedStateHead),
           })
         }),
       ).pipe(
-        Effect.withSpan('@livestore/common:LeaderSyncCommitter:commitLocal', {
+        Effect.withSpan('@livestore/common:LeaderPersistence:persistLocal', {
           attributes: { batchSize: events.length },
         }),
       )
 
-    const commitUpstream: Service['commitUpstream'] = (plan) =>
+    const persistUpstream: Service['persistUpstream'] = (plan) =>
       withCoordinatedTransactions(
         { dbState, dbEventlog },
         Effect.gen(function* () {
@@ -169,8 +169,8 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
           )
 
           return freezeReceipt({
-            _tag: 'upstream-commit' as const,
-            committedEvents: freezeArray(materialized.map(({ event }) => event)),
+            _tag: 'upstream-persist' as const,
+            persistedEvents: freezeArray(materialized.map(({ event }) => event)),
             materializerHashes: freezeArray(materialized.map(({ materializerHash }) => materializerHash)),
             rolledBackEventNums: freezeArray(rollbackEventNums.map(freezeSeqNum)),
             stateHead: freezeSeqNum(persistedStateHead),
@@ -178,7 +178,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
           })
         }),
       ).pipe(
-        Effect.withSpan('@livestore/common:LeaderSyncCommitter:commitUpstream', {
+        Effect.withSpan('@livestore/common:LeaderPersistence:persistUpstream', {
           attributes: {
             batchSize: plan.events.length,
             rollbackCount: plan.rollbackEvents.length,
@@ -201,11 +201,10 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
       catch: (cause) => UnknownError.make({ cause, note: 'Failed to reset local databases after backend mismatch' }),
     })
 
-    return LeaderSyncCommitter.of({ [TypeId]: TypeId, commitLocal, commitUpstream, resetLocalDatabases })
+    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream, resetLocalDatabases })
   })
 
-export const layer = (options: { materializeEvent: MaterializeEvent }) =>
-  Layer.effect(LeaderSyncCommitter, make(options))
+export const layer = (options: { materializeEvent: MaterializeEvent }) => Layer.effect(LeaderPersistence, make(options))
 
 const withCoordinatedTransactions = <A, E, R>(
   { dbState, dbEventlog }: { dbState: SqliteDb; dbEventlog: SqliteDb },
