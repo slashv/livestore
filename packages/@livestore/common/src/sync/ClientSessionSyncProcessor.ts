@@ -57,7 +57,7 @@ export type RebaseBarrierPoint =
  * as a `SessionMessage` sent through `dispatch`. All three go through `owned`, so a transition finishes its
  * SQLite/model work before returning and never waits on another fiber. Store retains its local subscriber refresh.
  *
- * The command runner does the waiting. Its reconciliation loop runs one complete pull step, refreshes subscribers,
+ * The runner does the waiting. Its reconciliation loop runs one complete pull step, refreshes subscribers,
  * then yields. Every state that affects a later decision, including a push being cancelled, lives in `Model`; the
  * runner's loop locals only track the traversal offset.
  *
@@ -94,7 +94,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   const stateHead = yield* StateHead.StateHead
   const dbState = yield* StateSqliteDb.StateSqliteDb
   const eventSchema = LiveStoreEvent.Client.makeSchemaMemo(schema)
-  const commands = yield* Queue.unbounded<Command>()
+  const jobs = yield* Queue.unbounded<RunnerJob>()
   const syncStateUpdateQueue = yield* Queue.unbounded<SyncState.SyncState>()
   const shutdownDone = yield* Deferred.make<void>()
   const drainStartedSignal = yield* Deferred.make<void>()
@@ -142,15 +142,18 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
           break
         case 'Stopped':
           model = { ...model, lifecycle: { _tag: 'stopped' } }
-          stage(Deferred.done(shutdownDone, message.exit))
+          addToOutbox(Deferred.done(shutdownDone, message.exit))
           break
         default:
           casesHandled(message)
       }
     })
 
-  /** Notifications staged by the owner body currently running, or `undefined` while the owner is free. */
-  let staged: Array<Effect.Effect<unknown>> | undefined
+  /**
+   * Notifications and jobs held back by the owner body currently running, or `undefined` while the owner is free.
+   * Like a transactional outbox: delivered after the owner is released, dropped if the body fails.
+   */
+  let outbox: Array<Effect.Effect<unknown>> | undefined
   /** Set when the owner body currently running has suspended, which breaks the exclusion `owned` relies on. */
   let ownerSuspended = false
 
@@ -164,41 +167,41 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
    * body on a separate synchronous fiber would catch suspension immediately, but measurably slowed large commits.)
    *
    * Completing a Deferred or offering a Queue resumes the waiting fiber inline (Effect calls `fiber.evaluate` in the
-   * caller's stack), so the body stages those notifications and they are delivered only after the owner is released.
-   * A failed body drops its notifications.
+   * caller's stack), so the body adds those to its outbox, which is delivered only after the owner is released.
+   * A failed body drops its outbox.
    */
   const owned = <A>(body: Effect.Effect<A, ProcessorError>): Effect.Effect<A, ProcessorError> =>
     Effect.suspend(() => {
-      if (staged !== undefined) {
+      if (outbox !== undefined) {
         return Effect.die(ownerSuspended === true ? suspendedOwnerError() : new Error(REENTRANT_OWNER_MESSAGE))
       }
-      const notifications: Array<Effect.Effect<unknown>> = []
-      staged = notifications
+      const entries: Array<Effect.Effect<unknown>> = []
+      outbox = entries
       queueMicrotask(() => {
-        if (staged === notifications) ownerSuspended = true
+        if (outbox === entries) ownerSuspended = true
       })
       return body.pipe(
         Effect.tap(() => (isDevEnv() === true ? checkModelInvariants : Effect.void)),
         Effect.ensuring(
           Effect.sync(() => {
-            staged = undefined
+            outbox = undefined
           }),
         ),
         Effect.exit,
         Effect.flatMap((exit) => Effect.andThen(failIfSuspended, exit)),
-        Effect.tap(() => Effect.forEach(notifications, (effect) => effect, { discard: true })),
+        Effect.tap(() => Effect.forEach(entries, (effect) => effect, { discard: true })),
       )
     }).pipe(
       // Exclusion relies on synchronous storage/materializers; this only avoids needless scheduler yields.
       Effect.provideService(References.PreventSchedulerYield, true),
-      // A caller interrupted after the body finished must still deliver the staged notifications.
+      // A caller interrupted after the body finished must still deliver the outbox.
       Effect.uninterruptible,
     )
 
   const dispatch = (message: SessionMessage) => owned(transition(message))
 
   /**
-   * A body that suspended may already have written the model and had its staged commands dropped, so the session can
+   * A body that suspended may already have written the model and had its outbox dropped, so the session can
    * no longer be trusted. Fail it with the named defect, which also lets shutdown finish instead of awaiting lost work.
    */
   const failIfSuspended = Effect.suspend(() => {
@@ -208,10 +211,10 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     return dispatch({ _tag: 'Failed', cause: Cause.die(error) }).pipe(Effect.orDie, Effect.andThen(Effect.die(error)))
   })
 
-  /** Queues a notification or command for delivery after the current owner body releases the owner. */
-  const stage = (effect: Effect.Effect<unknown>): void => {
-    if (staged === undefined) throw new Error('Session notifications can only be staged inside the owner')
-    staged.push(effect)
+  /** Adds a notification or job to the outbox, delivered after the current owner body releases the owner. */
+  const addToOutbox = (effect: Effect.Effect<unknown>): void => {
+    if (outbox === undefined) throw new Error('The session outbox can only be used inside the owner')
+    outbox.push(effect)
   }
 
   // Synchronous owner workflows. Waiting and subscriber callbacks belong to the runner below.
@@ -252,7 +255,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
             ? model.push
             : { ...model.push, queued: [...model.push.queued, ...result.newEvents] },
       }
-      stage(Queue.offer(syncStateUpdateQueue, model.syncState))
+      addToOutbox(Queue.offer(syncStateUpdateQueue, model.syncState))
       reserveNextPush()
       return { writeTables }
     })
@@ -262,7 +265,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   ): Effect.Effect<void, ProcessorError> =>
     Effect.gen(function* () {
       if (model.lifecycle._tag !== 'running') {
-        stage(Deferred.succeed(message.completed, undefined))
+        addToOutbox(Deferred.succeed(message.completed, undefined))
         return
       }
       // Validate the whole payload before applying a prefix; never retain this as a materialization plan.
@@ -282,8 +285,8 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         nextOperationId: id + 1,
         lifecycle: { _tag: 'running', reconciliation: { id, rebased: false } },
       }
-      stage(
-        Queue.offer(commands, { _tag: 'Reconcile', id, item: message.item, minimumEnd, completed: message.completed }),
+      addToOutbox(
+        Queue.offer(jobs, { _tag: 'Reconcile', id, item: message.item, minimumEnd, completed: message.completed }),
       )
     })
 
@@ -311,7 +314,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         push: result._tag === 'rebase' ? { _tag: 'idle', queued: result.newSyncState.pending } : model.push,
       }
       if (result._tag === 'rebase') setReconciliation({ ...reconciliation, rebased: true })
-      stage(Queue.offer(syncStateUpdateQueue, model.syncState))
+      addToOutbox(Queue.offer(syncStateUpdateQueue, model.syncState))
       return { _tag: 'applied', writeTables }
     })
 
@@ -357,7 +360,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       model = { ...model, push: { _tag: 'idle', queued: push.queued } }
     } else {
       debugInfo.rejectCount++
-      stage(Deferred.succeed(rejectionObserved, undefined))
+      addToOutbox(Deferred.succeed(rejectionObserved, undefined))
       model = {
         ...model,
         push:
@@ -366,18 +369,19 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
             : { _tag: 'awaiting-reconciliation', rejectedEvents: push.batch, error: message.error },
       }
       if (model.lifecycle._tag === 'stopping' && model.push._tag === 'awaiting-reconciliation') {
-        stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
+        addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
       }
     }
     reserveNextPush()
   }
 
-  /** Reserve the operation before its command becomes visible to the asynchronous runner. */
+  /** Reserve the operation before its job becomes visible to the asynchronous runner. */
   const reserveNextPush = (): void => {
     if (propagates(model.lifecycle) === false || activeReconciliation() !== undefined) return
     if (model.push._tag !== 'idle') return
     if (model.push.queued.length === 0) {
-      if (model.lifecycle._tag === 'stopping') stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.void }))
+      if (model.lifecycle._tag === 'stopping')
+        addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: Exit.void }))
       return
     }
     const operationId = model.nextOperationId
@@ -387,7 +391,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       nextOperationId: operationId + 1,
       push: { _tag: 'in-flight', operationId, batch, queued: model.push.queued.slice(batch.length) },
     }
-    stage(Queue.offer(commands, { _tag: 'Push', operationId, batch }))
+    addToOutbox(Queue.offer(jobs, { _tag: 'Push', operationId, batch }))
   }
 
   const requestShutdown = (exit: Exit.Exit<unknown, unknown>): void => {
@@ -404,13 +408,13 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
             reconciliation: lifecycle._tag === 'running' ? lifecycle.reconciliation : undefined,
           },
         }
-        stage(Queue.offer(commands, { _tag: 'BeginShutdown', exit }))
+        addToOutbox(Queue.offer(jobs, { _tag: 'BeginShutdown', exit }))
         break
       case 'failed':
         // Nothing is left to drain; stop the runner and report the failure unless the caller already knows it.
         if (lifecycle.shutdownExit !== undefined) return
         model = { ...model, lifecycle: { ...lifecycle, shutdownExit: exit } }
-        stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: failedShutdownExit(exit, lifecycle.cause) }))
+        addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: failedShutdownExit(exit, lifecycle.cause) }))
         break
       case 'shutdown-requested':
       case 'stopping':
@@ -425,18 +429,18 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     const lifecycle = model.lifecycle
     if (lifecycle._tag === 'failed') {
       // The session failed while the accepted pull finished; there is nothing left to drain.
-      stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: failedShutdownExit(exit, lifecycle.cause) }))
+      addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: failedShutdownExit(exit, lifecycle.cause) }))
       return
     }
     if (lifecycle._tag !== 'shutdown-requested') return
     model = { ...model, lifecycle: { _tag: 'stopping', exit } }
     if (Exit.isFailure(exit) === true) {
-      stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.void }))
+      addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: Exit.void }))
       return
     }
-    stage(Deferred.succeed(drainStartedSignal, undefined))
+    addToOutbox(Deferred.succeed(drainStartedSignal, undefined))
     if (model.push._tag === 'awaiting-reconciliation') {
-      stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
+      addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
     } else reserveNextPush()
   }
 
@@ -446,7 +450,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     const terminalCause = Cause.die(Cause.squash(cause))
     if (lifecycle._tag === 'stopping') {
       model = { ...model, lifecycle: { _tag: 'failed', cause: terminalCause, shutdownExit: lifecycle.exit } }
-      stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.failCause(terminalCause) }))
+      addToOutbox(Queue.offer(jobs, { _tag: 'FinishShutdown', exit: Exit.failCause(terminalCause) }))
       return
     }
     model = {
@@ -454,11 +458,11 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       lifecycle: {
         _tag: 'failed',
         cause: terminalCause,
-        // A requested shutdown still finishes through its BeginShutdown command; see startDrain.
+        // A requested shutdown still finishes through its BeginShutdown job; see startDrain.
         shutdownExit: lifecycle._tag === 'shutdown-requested' ? lifecycle.exit : undefined,
       },
     }
-    stage(Queue.offer(commands, { _tag: 'NotifyFailure', cause }))
+    addToOutbox(Queue.offer(jobs, { _tag: 'NotifyFailure', cause }))
   }
 
   // Model accessors and invariants.
@@ -553,7 +557,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     return { writeTables }
   })
 
-  /** Complete the SQLite step before the owner installs its matching model or publishes notifications. */
+  /** Complete the SQLite step before the owner installs its matching model or delivers its outbox. */
   const applyPullToSqlite = (result: SyncState.MergeResultAdvance | SyncState.MergeResultRebase, step: PullStep) =>
     Effect.gen(function* () {
       const writeTables = new Set<string>()
@@ -613,23 +617,21 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     })
   const report = (message: SessionMessage) => dispatch(message).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
 
-  const reconcile = (command: Extract<Command, { _tag: 'Reconcile' }>, pushHandle: RunnerHandles['push']) =>
+  const reconcile = (job: Extract<RunnerJob, { _tag: 'Reconcile' }>, pushHandle: RunnerHandles['push']) =>
     Effect.gen(function* () {
-      const newEvents = command.item.payload.newEvents
+      const newEvents = job.item.payload.newEvents
       let offset = 0
       while (true) {
-        const chunk = newEvents.slice(offset, Math.max(offset + PULL_CHUNK_SIZE, command.minimumEnd))
+        const chunk = newEvents.slice(offset, Math.max(offset + PULL_CHUNK_SIZE, job.minimumEnd))
         const last = offset + chunk.length === newEvents.length
         const result = yield* owned(
           applyPullStep({
-            id: command.id,
+            id: job.id,
             last,
             payload:
-              offset === 0
-                ? { ...command.item.payload, newEvents: chunk }
-                : { _tag: 'upstream-advance', newEvents: chunk },
-            materializerHashes: command.item.materializerHashes,
-            globalHead: command.item.globalHead,
+              offset === 0 ? { ...job.item.payload, newEvents: chunk } : { _tag: 'upstream-advance', newEvents: chunk },
+            materializerHashes: job.item.materializerHashes,
+            globalHead: job.item.globalHead,
           }),
         )
         if (result._tag === 'obsolete') return
@@ -648,70 +650,70 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         yield* Effect.yieldNow
       }
       if (activeReconciliation()?.rebased === true) yield* rebaseBarrier('before_leader_push_fiber_run')
-      yield* dispatch({ _tag: 'PullFinished', id: command.id })
-    }).pipe(Effect.ensuring(Deferred.succeed(command.completed, undefined)))
+      yield* dispatch({ _tag: 'PullFinished', id: job.id })
+    }).pipe(Effect.ensuring(Deferred.succeed(job.completed, undefined)))
 
-  const startLeaderPush = (command: Extract<Command, { _tag: 'Push' }>, pushHandle: RunnerHandles['push']) =>
+  const startLeaderPush = (job: Extract<RunnerJob, { _tag: 'Push' }>, pushHandle: RunnerHandles['push']) =>
     Effect.gen(function* () {
-      // A command can wait behind reconciliation and become obsolete before its fiber even starts.
+      // A job can wait behind reconciliation and become obsolete before its fiber even starts.
       if (
         model.push._tag !== 'in-flight' ||
-        model.push.operationId !== command.operationId ||
+        model.push.operationId !== job.operationId ||
         propagates(model.lifecycle) === false
       )
         return
       yield* FiberHandle.run(
         pushHandle,
-        Effect.suspend(() => clientSession.leaderThread.events.push(command.batch)).pipe(
+        Effect.suspend(() => clientSession.leaderThread.events.push(job.batch)).pipe(
           Effect.matchEffect({
-            onFailure: (error) => report({ _tag: 'PushRejected', operationId: command.operationId, error }),
-            onSuccess: () => report({ _tag: 'PushSucceeded', operationId: command.operationId }),
+            onFailure: (error) => report({ _tag: 'PushRejected', operationId: job.operationId, error }),
+            onSuccess: () => report({ _tag: 'PushSucceeded', operationId: job.operationId }),
           }),
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause) === true
               ? Effect.void
-              : report({ _tag: 'PushFailed', operationId: command.operationId, cause }),
+              : report({ _tag: 'PushFailed', operationId: job.operationId, cause }),
           ),
           Effect.interruptible,
         ),
       )
     })
 
-  const runCommand = (command: Command, handles: RunnerHandles): Effect.Effect<void, ProcessorError> =>
+  const runJob = (job: RunnerJob, handles: RunnerHandles): Effect.Effect<void, ProcessorError> =>
     Effect.gen(function* () {
-      switch (command._tag) {
+      switch (job._tag) {
         case 'Push':
-          yield* startLeaderPush(command, handles.push)
+          yield* startLeaderPush(job, handles.push)
           break
         case 'Reconcile':
-          yield* reconcile(command, handles.push)
+          yield* reconcile(job, handles.push)
           break
         case 'BeginShutdown':
           yield* FiberHandle.clear(handles.pull)
-          yield* dispatch({ _tag: 'DrainStarted', exit: command.exit })
+          yield* dispatch({ _tag: 'DrainStarted', exit: job.exit })
           break
         case 'FinishShutdown':
           yield* FiberHandle.clear(handles.pull)
           yield* FiberHandle.clear(handles.push)
-          yield* dispatch({ _tag: 'Stopped', exit: command.exit })
+          yield* dispatch({ _tag: 'Stopped', exit: job.exit })
           break
         case 'NotifyFailure':
           yield* FiberHandle.clear(handles.pull)
           yield* FiberHandle.clear(handles.push)
           // Store shutdown may call back into this processor. Supervise it without blocking the runner it needs.
-          yield* FiberHandle.run(handles.shutdown, clientSession.shutdown(Exit.failCause(command.cause)))
+          yield* FiberHandle.run(handles.shutdown, clientSession.shutdown(Exit.failCause(job.cause)))
           break
         default:
-          casesHandled(command)
+          casesHandled(job)
       }
     })
 
-  const runCommands = (handles: RunnerHandles) =>
+  const runJobs = (handles: RunnerHandles) =>
     Effect.gen(function* () {
       while (model.lifecycle._tag !== 'stopped') {
-        yield* runCommand(yield* Queue.take(commands), handles).pipe(Effect.catchCause(reportFailure))
+        yield* runJob(yield* Queue.take(jobs), handles).pipe(Effect.catchCause(reportFailure))
       }
-      yield* Queue.shutdown(commands)
+      yield* Queue.shutdown(jobs)
     })
 
   const pull = Stream.suspend(() =>
@@ -721,7 +723,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     Stream.tap((item) =>
       Effect.gen(function* () {
         const completed = yield* Deferred.make<void>()
-        // A failed acceptance drops the staged `completed` signal, so fail the pull instead of awaiting it.
+        // A failed acceptance drops its outbox, including `completed`, so fail the pull instead of awaiting it.
         yield* dispatch({ _tag: 'PullReceived', item, completed })
         yield* Deferred.await(completed)
       }),
@@ -758,7 +760,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     }
     yield* installBeforeUnloadWarning
     yield* dispatch({ _tag: 'Started' }).pipe(Effect.orDie)
-    yield* runCommands(handles).pipe(Effect.forkScoped)
+    yield* runJobs(handles).pipe(Effect.forkScoped)
     yield* FiberHandle.run(handles.pull, pull.pipe(Effect.asVoid))
   }).pipe(Effect.withSpan('client-session-sync-processor:boot'))
 
@@ -802,8 +804,8 @@ type SessionMessage =
   | { readonly _tag: 'Failed'; readonly cause: Cause.Cause<ProcessorError> }
   | { readonly _tag: 'ShutdownRequested' | 'DrainStarted'; readonly exit: Exit.Exit<unknown, unknown> }
   | { readonly _tag: 'Stopped'; readonly exit: Exit.Exit<void> }
-/** Asynchronous work the owner stages for the runner. */
-type Command =
+/** Asynchronous work the owner puts in its outbox for the runner. */
+type RunnerJob =
   | { readonly _tag: 'Push'; readonly operationId: number; readonly batch: EventBatch }
   | {
       readonly _tag: 'Reconcile'
