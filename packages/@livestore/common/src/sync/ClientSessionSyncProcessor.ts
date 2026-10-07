@@ -589,7 +589,28 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   // Asynchronous runner. It reads current state and enters the owner through dispatch or a pull step.
 
   const rebaseBarrier = (point: RebaseBarrierPoint) => params.rebaseBarriers?.[point] ?? Effect.void
-  const reportFailure = (cause: Cause.Cause<ProcessorError>) => dispatch({ _tag: 'Failed', cause }).pipe(Effect.orDie)
+  const reportFailure = (cause: Cause.Cause<ProcessorError>) =>
+    dispatch({ _tag: 'Failed', cause }).pipe(
+      Effect.catchCause((recordCause) => escalateUnrecordedFailure(cause, recordCause)),
+    )
+
+  /**
+   * Last resort when the owner cannot even record a failure, for example because a suspended body still holds it.
+   * Nothing in the session can be trusted to report the failure, so log it and shut down the Store directly instead of
+   * letting the defect die unobserved in a runner or push fiber. The shutdown is forked because Store teardown calls
+   * back into this processor and may need the runner that is reporting this failure.
+   */
+  let unrecordedFailureEscalated = false
+  const escalateUnrecordedFailure = (cause: Cause.Cause<ProcessorError>, recordCause: Cause.Cause<ProcessorError>) =>
+    Effect.suspend(() => {
+      if (unrecordedFailureEscalated === true) return Effect.void
+      unrecordedFailureEscalated = true
+      return Effect.logError(
+        'Client session sync processor could not record a failure; shutting down the store',
+        cause,
+        recordCause,
+      ).pipe(Effect.andThen(Effect.forkDetach(clientSession.shutdown(Exit.failCause(cause)))), Effect.asVoid)
+    })
   const report = (message: SessionMessage) => dispatch(message).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
 
   const reconcile = (command: Extract<Command, { _tag: 'Reconcile' }>, pushHandle: RunnerHandles['push']) =>

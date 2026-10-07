@@ -290,7 +290,15 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
             clientSession: {
               leaderThreadProxy: () => ({
                 events: {
-                  pull: () => Stream.fromQueue(pullQueue).pipe(Stream.map((payload) => ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }))),
+                  pull: () =>
+                    Stream.fromQueue(pullQueue).pipe(
+                      Stream.map((payload) =>
+                        ClientSessionLeaderThreadProxy.PullItem.make({
+                          payload,
+                          globalHead: EventSequenceNumber.Client.ROOT,
+                        }),
+                      ),
+                    ),
                   push: (batch) =>
                     Effect.gen(function* () {
                       pushCount++
@@ -994,6 +1002,50 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
     }).pipe(withTestCtx(test)),
   )
 
+  // While a suspended body holds the owner, neither a push result nor the failure reported in its place can be
+  // recorded. That last failure must still shut down the Store instead of dying unobserved in the push fiber.
+  Vitest.it.effect('shuts down the store when the owner cannot record a failure', (test) =>
+    Effect.gen(function* () {
+      const pushStarted = yield* Deferred.make<void>()
+      const releasePush = yield* Deferred.make<void>()
+      const materializerSuspended = yield* Deferred.make<void>()
+      const releaseMaterializer = yield* Deferred.make<void>()
+      const shutdownExit = yield* Deferred.make<Exit.Exit<unknown, unknown>>()
+      let suspendMaterializer = false
+      const { pushIds, close } = yield* makeClientProcessorHarness({
+        shutdown: (exit) => Deferred.succeed(shutdownExit, exit).pipe(Effect.asVoid),
+        push: () => Deferred.succeed(pushStarted, undefined).pipe(Effect.andThen(Deferred.await(releasePush))),
+        materializeEvent: () => {
+          const result = { writeTables: new Set<string>(), materializerHash: Option.none<number>() }
+          return suspendMaterializer === true
+            ? Deferred.succeed(materializerSuspended, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseMaterializer)),
+                Effect.as(result),
+              )
+            : Effect.succeed(result)
+        },
+      })
+
+      yield* pushIds(['pushed'])
+      yield* Deferred.await(pushStarted)
+
+      suspendMaterializer = true
+      const commitFiber = yield* Effect.forkChild(pushIds(['suspending']))
+      yield* Deferred.await(materializerSuspended)
+      // Let the owner's microtask check mark the held body as suspended before the push result arrives.
+      yield* Effect.yieldNow
+      yield* Deferred.succeed(releasePush, undefined)
+
+      const exit = yield* Deferred.await(shutdownExit)
+      assert(Exit.isFailure(exit))
+      expect(String(Cause.squash(exit.cause))).toContain('must be synchronous')
+
+      yield* Deferred.succeed(releaseMaterializer, undefined)
+      yield* Fiber.await(commitFiber)
+      yield* Effect.exit(close())
+    }).pipe(withTestCtx(test)),
+  )
+
   // A push being cancelled for a rebase is superseded by that rebase. Its late rejection must not leave a fence that
   // blocks the rebuilt propagation.
   Vitest.it.effect('ignores a rejection that arrives while a rebase cancels the push', (test) =>
@@ -1189,7 +1241,12 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       })
       let pushCount = 0
       const { processor, pushIds, close } = yield* makeClientProcessorHarness({
-        pull: () => Stream.fromQueue(pullQueue).pipe(Stream.map((payload) => ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }))),
+        pull: () =>
+          Stream.fromQueue(pullQueue).pipe(
+            Stream.map((payload) =>
+              ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }),
+            ),
+          ),
         push: () => {
           pushCount++
           return pushCount === 1
@@ -1236,7 +1293,12 @@ Vitest.describe.concurrent('ClientSessionSyncProcessor', () => {
       })
       let pushCount = 0
       const { processor, pushIds, close } = yield* makeClientProcessorHarness({
-        pull: () => Stream.fromQueue(pullQueue).pipe(Stream.map((payload) => ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }))),
+        pull: () =>
+          Stream.fromQueue(pullQueue).pipe(
+            Stream.map((payload) =>
+              ClientSessionLeaderThreadProxy.PullItem.make({ payload, globalHead: EventSequenceNumber.Client.ROOT }),
+            ),
+          ),
         push: (batch) => {
           pushCount++
           if (pushCount === 1) {
