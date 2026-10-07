@@ -8,7 +8,7 @@
 
 This work builds on Igor Gassmann's `MaterializationJournal` and role-specific SQLite Effect service extraction. It
 preserves that storage architecture and adds a more explicit orchestration model above it, with
-`LeaderSyncCommitter` providing the focused durable seam used by the leader processor.
+`LeaderPersistence` providing the focused durable seam used by the leader processor.
 
 ## In One Minute
 
@@ -21,15 +21,80 @@ Previously, their behaviour emerged from several queues, semaphores, long-runnin
 restart rules working together. To understand whether a push could run, a maintainer had to inspect all of them and
 reconstruct their timing.
 
-Now, named events enter one state-changing owner in each processor. The leader uses a serialized mailbox loop. It
-delegates durable SQLite work to `LeaderSyncCommitter` and only publishes or acknowledges after that work succeeds.
+Now, named messages enter one state-changing owner in each processor. The leader uses a serialized mailbox loop. It
+delegates durable SQLite work to `LeaderPersistence` and only publishes or acknowledges after that work succeeds.
 The session uses a synchronous owner: local commits, pull steps and network results all run through `owned`, which
 finishes each state change synchronously and fails the session loudly if one ever suspends. An asynchronous runner handles
 waiting and applies incoming history one complete SQLite/model step at a time, yielding between steps.
 
-This is not a framework-driven or fully pure state machine. The session owner is effectful and is not an input-FIFO
+This is not a framework-driven or fully pure state machine. The session owner is effectful and is not a FIFO
 mailbox. It finishes state changes synchronously, then releases notifications and commands. Both processors make
 ordering and the important states visible without introducing another production module.
+
+## Two Variations on a Classical State Machine
+
+Both processors run the same tiny machine. Something is either synced with its upstream, or it has local changes still
+waiting for it. A client session's upstream is the leader; the leader's upstream is the sync backend.
+
+```text
+              local change               upstream confirms
+  [ synced ] ─────────────► [ pending ] ───────────────────► [ synced ]
+```
+
+A classical state machine runs this with four rules. Both processors break some of them:
+
+| Classical rule                                      | Leader                                   | Client session                                   |
+| --------------------------------------------------- | ---------------------------------------- | ------------------------------------------------ |
+| Pure: a transition only computes the next state     | Breaks it: writes to disk itself         | Breaks it: writes to SQLite itself               |
+| Slow work is handed back as an output               | Starts background work itself            | Hands slow work to a helper, the runner          |
+| One message at a time, and a transition never waits | One at a time, but a transition may wait | One at a time, never waits, and there's no queue |
+| The sender gets no answer                           | The sender gets an acknowledgement later | The caller gets an answer immediately            |
+
+### Leader: the same machine behind a mailbox
+
+Messages queue up in a mailbox and are handled one at a time, as in a classical machine. The differences are what
+happens inside a turn.
+
+```text
+  messages ─► [ mailbox ] ─► handle one message
+                   ▲              │  writes to disk itself, and may wait for it:
+                   │              │  the mailbox waits too
+                   │              └─► starts "send #7 to the sync backend" in the background
+                   │                         │
+                   └──── "sync backend confirmed #7" arrives later, as a new message
+```
+
+- **It does the work itself:** a transition writes to disk and may wait for that write.
+- **Background work comes back as a message:** sending to the sync backend runs in the background and reports back
+  through the mailbox.
+- **Old answers are ignored:** if #7 was replaced in the meantime, its confirmation is thrown away.
+
+### Client session: the same machine without a mailbox
+
+The app is waiting on every local change: `store.commit` must return with the change already applied. A change
+therefore can't sit in a mailbox behind other work. It's handled the moment it arrives. That has one consequence:
+since nothing is queued, a turn must never wait, or it would block the app. Waiting is moved to a helper, the runner,
+which reports back with a new message when it's done.
+
+```text
+  local change ─► handle it right now (no mailbox)
+                     │  writes to SQLite itself, but may never wait
+                     │  answers the caller immediately
+                     └─► hands "send #7 to the leader" to the runner
+                                    │
+                         runner waits for the leader
+                                    │
+  "leader confirmed #7" ◄───────────┘  handled right now, like any other message
+```
+
+- **No mailbox:** every message is handled immediately, so a local change is visible as soon as `commit` returns.
+- **Never waits:** a turn must finish on the spot. All waiting happens in the runner.
+- **Background work comes back as a message,** as in the leader.
+- **Old answers are ignored,** as in the leader.
+- **Big incoming batches are applied in small pieces,** so local changes can get in between them.
+
+**In one line:** the leader is a classical mailbox machine whose turns can do slow work. The session has no mailbox,
+so its turns are instant, and a runner does the waiting for it.
 
 ## Coordination State We No Longer Have to Reconstruct
 
@@ -52,8 +117,8 @@ Before the refactor, the leader's control flow depended on all of these at once:
 | `ctxRef`                                                     | runtime dependencies needed by background effects   | explicit construction-time dependencies                                           |
 | an optional `syncStateSref` initialized during boot          | state shared between independent background workers | `model.syncState` for decisions and an initialized observable ref for subscribers |
 | a long-running local-apply worker                            | draining and batching local pushes                  | `ContinueWork` turns in the mailbox                                               |
-| a restartable backend-push worker                            | push progress, retry, and replacement after rebase  | tagged push states plus correlated completion events                              |
-| `Effect.retry`, schedule metadata, and a local retry counter | when and why a provider call would run again        | `retry-wait` states and retry events with identities                              |
+| a restartable backend-push worker                            | push progress, retry, and replacement after rebase  | tagged push states plus correlated completion messages                            |
+| `Effect.retry`, schedule metadata, and a local retry counter | when and why a provider call would run again        | `retry-wait` states and retry messages with identities                            |
 | one acknowledgement `Deferred` per event                     | completion of a caller's batch                      | one request-level acknowledgement with a remaining-event count                    |
 
 The queues and reservations have not disappeared as domain concepts. They are now fields in one model, changed by one
@@ -75,7 +140,7 @@ The session processor had a similar set of implicit controls:
 
 Some runtime machinery remains, but with narrower jobs:
 
-- the leader mailbox carries events; the session command queue schedules asynchronous work;
+- the leader mailbox carries messages; the session command queue schedules asynchronous work;
 - fiber handles own the lifetime of actual concurrent provider or leader calls;
 - deferred values let callers await an acknowledgement or let a pull stream apply backpressure;
 - shutdown state keeps repeated shutdown requests idempotent.
@@ -106,7 +171,7 @@ These are adapters around the model. They no longer compete with it as sources o
 │    └─ provider pull, push, and retry orchestration                     │
 │                  │                            │                        │
 │                  ▼                            ▼                        │
-│       LeaderSyncCommitter                  Sync backend                │
+│       LeaderPersistence                    Sync backend                │
 │       durable SQLite work                 pull / push                  │
 │          │           │                                                 │
 │          ▼           ▼                                                 │
@@ -121,23 +186,23 @@ The three modules have distinct responsibilities:
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `ClientSessionSyncProcessor` | optimistic session state, leader propagation, stepped reconciliation, pull refresh, session shutdown          | Store's local subscriber refresh, leader durability or backend retries |
 | `LeaderSyncProcessor`        | event ordering, in-memory sync state, session publication, acknowledgements, provider work, retries, shutdown | SQLite transition details                                              |
-| `LeaderSyncCommitter`        | materialization, rollback, journal maintenance, heads, eventlog writes, coordinated SQLite commits            | queues, publication, retries, acknowledgements, or lifecycle           |
+| `LeaderPersistence`          | materialization, rollback, journal maintenance, heads, eventlog writes, coordinated SQLite commits            | queues, publication, retries, acknowledgements, or lifecycle           |
 
-## One Owner, Two Execution Patterns
+## Message Handling in Detail
 
 ### Leader: a serialized mailbox
 
 ```text
-external input or async completion
+external request or async completion
               │
               ▼
-        tagged Event
+       tagged Message
               │
               ▼
          mailbox queue
               │
               ▼
-      handle one event fully
+      handle one message fully
               │
        ┌──────┴──────┐
        │             │
@@ -146,14 +211,14 @@ external input or async completion
                      │
                      ▼
               result returns as
-              a correlated Event
+              a correlated Message
 ```
 
 There is one important distinction between kinds of work:
 
 - durable leader work is awaited inside the mailbox turn, so nothing can observe a half-applied transition;
 - genuinely concurrent work, such as a provider request or retry timer, runs in a supervised fiber and reports its
-  outcome back to the mailbox as an event.
+  outcome back to the mailbox as a message.
 
 Every concurrent operation has an identity. A late completion is ignored when its identity no longer matches the
 current state.
@@ -164,7 +229,7 @@ current state.
 that owner, then enters it again using the current state.** Local commits and incoming history use the same owner, so
 neither can interrupt the other's unfinished SQLite/model work.
 
-The file uses five terms:
+The file uses six terms:
 
 - **Owner**: `owned(body)`, the only code allowed to write `model`. It is not a thread, a mailbox, or a lock held
   throughout a pull. Exclusion relies on the body being synchronous. A synchronous body always finishes before any
@@ -172,12 +237,17 @@ The file uses five terms:
   body then fails the session with a named defect, and callers that meet the held owner get the same defect.
   Running the body on a separate synchronous fiber (`Effect.runSyncExitWith`) would catch this earlier, but it
   measurably slowed a 10,000-event commit in the perf suite, so it was rejected.
-- **Event**: an input that changes the model without returning a result, entered through `dispatch(event)`.
-  `commit` and one pull step are the two owner calls that do return a result (`writeTables`, or a `StepResult`).
+- **Message**: a tagged `SessionMessage` that changes the model without returning a result, entered through
+  `dispatch(message)`. `commit` and one pull step are the two owner calls that do return a result (`writeTables`, or
+  a `StepResult`). Messages are never called events: "event" is reserved for LiveStore events.
 - **Command**: asynchronous work the owner stages for the runner (`Push`, `Reconcile`, shutdown steps).
 - **Notification**: a staged Queue offer or Deferred completion delivered after the owner is released.
 - **Runner**: the Effect code that consumes commands, manages asynchronous operations and advances reconciliation.
   It has no second model to write; its only loop state is the offset into the pull being applied.
+- **Savepoint**: a SQLite `SAVEPOINT` on the session's state database. Because the journal and the state head are
+  tables in that same database, one savepoint covers materialization, journal and head together; per-event savepoints
+  nest inside the batch or step savepoint. On failure it rolls back to where it started. The in-memory sync state is
+  not SQLite, so it is updated only after the savepoint is released. (The leader uses plain transactions instead.)
 
 This is close to an Elm-style `update` returning `(model, commands)`, except the owner stages commands imperatively
 with `stage(...)` instead of returning them. Updating in-memory sync state means assigning the new event heads,
@@ -190,57 +260,81 @@ client, not separate operating-system threads.
 #### 1. What does Store.commit wait for?
 
 ```text
-                     Store.commit(events)
-                              |
-                              v
-       +---------------------------------------------+
-       | OWNER: dispatch(Commit)                     |
-       |                                             |
-       | Check admission; encode; merge              |
-       | Apply local batch in savepoint              |
-       | Update in-memory sync state to match SQLite |
-       | Stage notifications / commands              |
-       +---------------------------------------------+
-                              |
-                        release owner
-                              |
-                   deliver notifications
-                              |
-             +----------------+ - - - - - - - - - - +
-             |                                       : eligible Push
-             v                                       v
-    Store refreshes subscribers             Runner starts leader push
-    (callbacks may commit again)                     :
-             |                                       : async result
-             v                                       v
-    Store.commit returns                    New dispatch handles result
-    LOCAL CHANGE APPLIED                    (operation identity checked)
+Store.commit(events)
+   |   Effect.runSync: returns or throws, never waits
+   v
++-- ONE SYNCHRONOUS CALL STACK: no event-loop turn until Store.commit returns --+
+|                                                                               |
+|  processor.commit(events)                                                     |
+|  +------------------------------------------------------------------------+   |
+|  | OWNER: owned(commitLocalEvents)                                        |   |
+|  |                                                                        |   |
+|  | Check admission; encode; merge                                         |   |
+|  | Savepoint: materialize batch, journal, state head                      |   |
+|  | Update in-memory sync state to match SQLite                            |   |
+|  | Stage notifications: sync-state update, Push command if eligible       |   |
+|  +------------------------------------------------------------------------+   |
+|  release owner                                                                |
+|  deliver notifications --> waiting fibers resume inline, in this stack:       |
+|                              - syncState subscribers                          |
+|                              - runner: starts the leader push                 |
+|                            each runs until it suspends or yields              |
+|  return writeTables                                                           |
+|                                                                               |
+|  Store refreshes subscribers (reactivityGraph.setRefs)                        |
+|    callbacks run here; one may call Store.commit again (nested, also sync)    |
+|                                                                               |
++-------------------------------------------------------------------------------+
+   |
+   v
+Store.commit returns: LOCAL CHANGE APPLIED (no leader or backend ack awaited)
 
-    No network acknowledgement awaited by Store.commit.
-    After owner release, the two paths have no fixed ordering.
+- - - - - - - - - - - - - - later, after the event loop runs - - - - - - - - - - -
+
+leader push completes (worker round trip)
+   |
+   v
+runner reports PushSucceeded | PushRejected | PushFailed
+   |
+   v
++------------------------------------------------------------+
+| OWNER: dispatch(message); a stale operation id is ignored  |
++------------------------------------------------------------+
 ```
 
-The solid path is the local call: `Store.commit` calls `dispatch(Commit)`, which checks admission, applies the local
-batch, updates in-memory sync state to match SQLite, and stages notifications. After releasing the owner, dispatch
-delivers those notifications. Store then refreshes local subscribers and returns. The local change does not wait for a leader or
-backend acknowledgement. This diagram shows the successful path; a local materialization failure rolls back the
-batch without updating in-memory sync state or scheduling its propagation.
+Everything inside the large box runs in one synchronous JavaScript call stack. `Store.commit` runs the whole commit
+through `Effect.runSync`, which returns or throws but never waits. Inside the owner, `PreventSchedulerYield` turns off
+Effect's automatic yields. Outside it, `runSync` drains any automatic yield before it returns. No browser input, timer
+or other task runs until `Store.commit` returns. If something on this path does suspend, such as an asynchronous Schema
+transform or materializer, `runSync` throws instead of waiting, and the owner's suspension check fails the session.
 
-The dashed branch shows eligible propagation. The owner reserves a push before releasing its command to the runner.
-The runner starts the leader call; its success, rejection, or failure enters a new dispatch. Operation identities
-prevent an obsolete command or result from advancing newer work. A push can be deferred, for example while
-reconciliation is active; committing locally still completes immediately.
+Synchronous does not mean that only this commit's code runs. Offering an Effect Queue or completing a Deferred resumes
+the waiting fiber inline: Effect calls `fiber.evaluate` in the caller's stack. Delivering the staged notifications
+therefore runs `syncState` subscribers and the command runner inside `Store.commit`, before Store refreshes its own
+tables. A resumed fiber keeps its own scheduler settings, so it runs until it suspends or reaches an automatic yield,
+and whatever remains continues after `Store.commit` returns. The leader push can therefore start inside
+`Store.commit`, but its result always arrives later. Because notifications are staged until the owner is released,
+this resumed code always sees finished state.
 
-**Owner release is earlier than dispatch return.** Offering an Effect Queue or completing a Deferred resumes the
-waiting fiber inline: Effect calls `fiber.evaluate` in the caller's stack. The resumed fiber uses its own scheduler
-settings, so the owner's `PreventSchedulerYield` does not carry over. The two branches therefore have no fixed ordering
-after release: a push can start before `Store.commit` returns, but the commit does not await its network result.
-Staging notifications ensures any resumed caller sees finished state.
+Store's subscriber callbacks run inside the same call. They, and code resumed by notifications, may commit again. A
+nested commit runs this whole path, including its own table refresh, before the outer commit continues. Model state
+stays coherent; only the order of reactive refreshes can be nested.
 
-This has a consequence for Store: code resumed by a notification, such as a `syncState` subscriber or the runner's
-next command, can run **inside** `Store.commit`, before that commit refreshes its own tables. If that code commits
-again, the nested commit refreshes its tables first. Model state stays coherent; only the order of reactive refreshes
-can be nested. Store's subscriber callbacks also run after owner release and can make another commit.
+Below the dashed line is the asynchronous part. The owner records the push as in flight before staging its command, so
+the runner only sends work the model already tracks. When the leader call completes, the runner reports
+`PushSucceeded`, `PushRejected` or `PushFailed` as a new message, and the owner ignores it if its operation id is stale.
+A push can also be deferred, for example during reconciliation; the local commit still completes immediately.
+
+Failures of asynchronous work take the same route back. A typed leader rejection becomes `PushRejected`, which is
+recoverable: the push waits in `awaiting-reconciliation` for the corrective pull. Any other push failure becomes
+`PushFailed`. A failing pull stream, a failing reconciliation step, or a failure while handling any of these messages
+is reported as `Failed`. Interrupts report nothing, because whoever interrupted the work (a rebase or shutdown) has
+already changed the model. `Failed` moves the lifecycle to `failed` and stages `NotifyFailure`, which stops the pull
+and push fibers and shuts down the Store. If even `Failed` cannot be recorded, because a suspended body still holds
+the owner, the processor logs both causes and shuts down the Store directly.
+
+The diagram shows the successful path. If materialization fails, the savepoint rolls back, in-memory sync state stays
+unchanged, the staged notifications are dropped, and Store shuts down with the error.
 
 #### 2. Where can a local commit run during a pull?
 
@@ -379,6 +473,22 @@ by the lifecycle/identity guard instead of applying a late step.
 match before permitting another caller to observe or change session state. Waiting, notifications and subscriber callbacks belong outside that
 boundary. The command queue schedules work; sequence numbers and `SyncState.merge` determine valid event history.
 
+**How in-memory sync state stays consistent with SQLite.** The in-memory `localHead` matches the state head table,
+and the pending events match their materialized rows and journal changesets. Three rules inside the owner keep them
+in agreement at every owner release, which is the only moment another caller can observe either:
+
+1. SQLite first, then memory: SQLite is written inside a savepoint, and `model.syncState` is assigned only after the
+   savepoint is released.
+2. Nobody can look in between: both happen in one synchronous owner body, and notifications are held back until the
+   owner is released.
+3. Failure leaves both untouched: the savepoint rolls back, and the in-memory assignment never runs.
+
+They also start in agreement: at boot, the adapter reads the head from the session's SQLite, and the processor starts
+from it with no pending events. They can only diverge when the session is already failing: a rollback that itself
+fails, or a body that breaks the synchronous contract. Both fail the session. Nothing else writes the session's
+SQLite after boot, though the types do not prevent it. Agreement is checked by tests that compare the SQLite head with
+`syncState.localHead` (`ClientSessionReconciliation.test.ts`), not at runtime.
+
 ## The States That Matter
 
 ### Leader
@@ -431,7 +541,7 @@ reconciliation (inside running / shutdown-requested):
 
 Transitions that change `lifecycle` or `push`, and what each stages for the runner:
 
-| Input               | From                            | To                                               | Staged                                           |
+| Message or call     | From                            | To                                               | Staged                                           |
 | ------------------- | ------------------------------- | ------------------------------------------------ | ------------------------------------------------ |
 | `Started`           | starting                        | running                                          |                                                  |
 | `commit`            | running (else defect)           | push `queued` grows (unless awaiting)            | sync-state update; `Push` if idle                |
@@ -453,7 +563,7 @@ Transitions that change `lifecycle` or `push`, and what each stages for the runn
 A failed session never re-enters `stopping`: nothing is drained after a fatal error, and push completions are ignored.
 
 `Store.commit` calls `processor.commit(events)`, which enters the same owner used by pull steps and completions.
-There is no session mailbox-ownership exception and no delayed `LocalPushAdmitted` event. Pull reconciliation yields
+There is no session mailbox-ownership exception and no delayed `LocalPushAdmitted` message. Pull reconciliation yields
 only after a complete SQLite/model step, and merges again from live pending events when it resumes. The runner handles
 one command at a time, so `BeginShutdown`, `FinishShutdown` and `NotifyFailure` wait behind an active `Reconcile`,
 including its cancellation wait and yields. A failure still takes effect at the next step, because it clears the
@@ -480,9 +590,10 @@ upstream prefix plus all current optimistic events, with matching SQLite state, 
    still finish during this wait. Recompute the merge afterward; the pre-cancellation result is not a durable plan.
 3. Normally apply up to 32 upstream events against the live pending suffix. An explicit leader rebase's first step
    must replace enough history to reach the old upstream head before yielding. Rollback, incoming materialization, pending replay,
-   and the state head share one savepoint. Suppress automatic Effect scheduler yields during this synchronous work.
+   and the state head share one savepoint (a SQLite `SAVEPOINT`; see the session terms in "Message Handling in
+   Detail"). Suppress automatic Effect scheduler yields during this synchronous work.
 4. After success, update in-memory sync state to match SQLite, release the owner, and deliver staged notifications.
-   The runner refreshes affected tables. Subscriber callbacks may commit at this point. Yield before the next step so other fibers and browser input can run.
+   The runner refreshes affected tables. Subscriber callbacks may commit at this point. Yield before the next step so other fibers and user input can run.
 5. Only the final step discards the journal through the payload's confirmed `globalHead`. Rebuild propagation from the
    final pending suffix after reconciliation completes. No replacement push starts during reconciliation, and there
    are no delayed admission messages to repair.
@@ -537,7 +648,7 @@ session command runner
                       └─ mailbox: ContinueWork
                            └─ processLocalBatch
                                 ├─ SyncState.merge
-                                ├─ LeaderSyncCommitter.commitLocal
+                                ├─ LeaderPersistence.persistLocal
                                 │    ├─ materialize into state DB
                                 │    ├─ update journal and heads
                                 │    └─ coordinate SQLite commits
@@ -563,7 +674,7 @@ provider pull fiber
             └─ mailbox: ContinueWork
                  └─ processUpstreamBatch
                       ├─ SyncState.merge
-                      ├─ LeaderSyncCommitter.commitUpstream
+                      ├─ LeaderPersistence.persistUpstream
                       │    ├─ rollback divergent pending state when needed
                       │    ├─ materialize the replacement history
                       │    ├─ update journal, eventlog, state head
@@ -629,12 +740,12 @@ leaderThread.events.push rejects
 A maintainer can now answer the main coordination questions in one place:
 
 - **What can happen now?** Read the tagged lifecycle, pull, and push states.
-- **What inputs can change it?** Read the closed `Event` union; in the session, add the two owner calls that return
-  results (`commit` and a pull step).
+- **What can change it?** Read the closed message unions (`SessionMessage`, `LeaderMessage`); in the session, add
+  the two owner calls that return results (`commit` and a pull step).
 - **In what order can changes happen?** Follow the leader mailbox, or session dispatch and the runner's safe yield points.
-- **What makes a transition durable?** Follow the two methods on `LeaderSyncCommitter`.
+- **What makes a transition durable?** Follow the two methods on `LeaderPersistence`.
 - **Can an old completion corrupt current work?** No; operation identities reject stale results.
-- **Can the leader publish or acknowledge before durability?** No; those actions follow a successful commit receipt.
+- **Can the leader publish or acknowledge before durability?** No; those actions follow a successful persist receipt.
   Session publication is optimistic and only promises a completed local SQLite/model transition.
 
 The processors still contain domain policy, because keeping that policy together is the point. The session's short
@@ -647,32 +758,34 @@ concepts, but they do not add another production module or a continuation-event 
 | Guarantee                                                                    | Status                                                             |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | One owner changes each processor's model                                     | leader mailbox; session synchronous dispatch                       |
-| Session inputs are processed in input-FIFO mailbox order                     | **not guaranteed or required**; dispatch is synchronous            |
+| Session messages are processed in FIFO mailbox order                         | **not guaranteed or required**; dispatch is synchronous            |
 | Local leader pushes are validated against committed plus reserved history    | guaranteed                                                         |
 | Upstream pagination takes precedence over new local durable work             | guaranteed                                                         |
-| Publication and acknowledgement happen only after a successful leader commit | guaranteed                                                         |
+| Publication and acknowledgement happen only after LeaderPersistence succeeds | guaranteed                                                         |
 | Late provider or leader-push completions cannot advance newer work           | guarded by operation identities                                    |
-| Upstream commit receipts match the merged local head                         | by DAG position; the rebase generation is local                    |
+| Session async failures return to the owner as messages                       | guaranteed; if the owner cannot record one, Store shuts down       |
+| Upstream persist receipts match the merged local head                        | by DAG position; the rebase generation is local                    |
 | A session commit is immediately visible to that session                      | guaranteed by the synchronous owner before the call returns        |
 | Session observers can reenter only after a completed transition              | owner released before staged notifications and subscriber refresh  |
 | Session owner work cannot suspend while holding the owner                    | detected; a suspending body fails the session with a named defect  |
 | Store refreshes a commit's tables before any code it resumes runs            | **not guaranteed**; resumed code can refresh (and commit) first    |
 | Session rows, journal and head agree at reconciliation yield points          | guaranteed for the synchronous SQLite/materializer implementations |
+| In-memory sync state matches session SQLite at every owner release           | guaranteed by ordering inside the owner                            |
 | A complete session pull payload is applied atomically                        | **not guaranteed**; complete prefixes may be visible               |
 | Backend head and matching event inserts use the same eventlog transaction    | guaranteed                                                         |
 | State DB and eventlog DB are crash-atomic together                           | **not guaranteed**                                                 |
 | A leader acknowledgement means backend acceptance                            | **not guaranteed**; it means durable and scheduled                 |
-| Browser input has a hard frame-time bound                                    | **not guaranteed**; a complete step can still be expensive         |
+| User input has a hard frame-time bound                                       | **not guaranteed**; a complete step can still be expensive         |
 
-The state and eventlog databases use separate SQLite connections. The committer coordinates their normal success and
+The state and eventlog databases use separate SQLite connections. `LeaderPersistence` coordinates their normal success and
 rollback paths, but it cannot make them atomic across a process crash. State is committed first so the eventlog does not
 claim a transition that never reached materialized state. A crash or eventlog commit failure after the state commit can
 still leave state ahead of eventlog truth and requires a separate recovery strategy.
 
 The backend confirms events without the leader's local rebase generation. When the leader rebases a pending event
 before the backend accepts it (for example `e1` becomes `e2` with generation 1), the eventlog row and `StateHead` keep
-generation 1 while the merged sync state adopts the backend's `e2`. The leader therefore checks upstream commit receipts
-by global and client position, the same way the committer matches confirmed events. Which of the two orderings occurs
+generation 1 while the merged sync state adopts the backend's `e2`. The leader therefore checks upstream persist receipts
+by global and client position, the same way `LeaderPersistence` matches confirmed events. Which of the two orderings occurs
 depends on fiber scheduling: Effect 4.0.0-rc.113 lets a local push reach the leader before concurrently forked backend
 events, where beta.99 happened to order them the other way.
 
@@ -681,14 +794,14 @@ events, where beta.99 happened to order them the other way.
 For a code review or architecture walkthrough, read the implementation in this order:
 
 1. [ClientSessionSyncProcessor.ts](../../packages/@livestore/common/src/sync/ClientSessionSyncProcessor.ts):
-   the `Model`, `Lifecycle` and `LeaderPushState` types at the bottom, then `transition` for the event map and `owned`
+   the `Model`, `Lifecycle` and `LeaderPushState` types at the bottom, then `transition` for the message map and `owned`
    for ownership and staged notifications.
    Follow `commitLocalEvents` and `applyPullStep` for updates, `applyPullToSqlite` for persistence, and
    `reconcile` / `runCommand` for waits, callbacks and yields. `boot` only acquires and starts the runtime.
    [Store.commit](../../packages/@livestore/livestore/src/store/store.ts) calls the processor and retains local refresh.
-2. `LeaderSyncProcessor.ts`: the system-wide orchestration model, event vocabulary, and mailbox handler.
-3. `LeaderSyncCommitter.ts`: the durable transition implementation.
-4. `ClientSessionSyncProcessor.test.ts`, `LeaderSyncProcessor.test.ts`, and `LeaderSyncCommitter.test.ts`: races,
+2. `LeaderSyncProcessor.ts`: the system-wide orchestration model, message vocabulary, and mailbox handler.
+3. `LeaderPersistence.ts`: the durable transition implementation.
+4. `ClientSessionSyncProcessor.test.ts`, `LeaderSyncProcessor.test.ts`, and `LeaderPersistence.test.ts`: races,
    transition invariants, and SQLite-backed behaviour.
 5. `ClientSessionReconciliation.test.ts`: real-Store cancellation, ordered replay, durable heads, failure cleanup,
    intermediate prefixes, rollback cache invalidation, and subscriber commits.
@@ -696,47 +809,69 @@ For a code review or architecture walkthrough, read the implementation in this o
 ## Choice, Alternatives and Evidence
 
 The fork chooses C: one synchronous session owner that reconciles in small, coherent, yielding steps, beside the
-leader's serialized mailbox and `LeaderSyncCommitter`. This is a readability and safety decision, not a measured
+leader's serialized mailbox and `LeaderPersistence`. This is a readability and safety decision, not a measured
 performance win over main, and it does not update accepted `context/` intent.
 
-| Tried                                                   | Why it was not chosen                                                                                                                   | Preserved at                                                               |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Split owner as on main (local commit path + mailbox)    | Unsafe: a local commit during an unfinished rebase could have its durable head overwritten (60 head failures in the browser run).       | `experiment/session-sync-latency` at `e2edfa693`                           |
-| Fixed split owner A (same coherent steps, two writers)  | As safe and as fast as C, but two writers to audit, and push completions wait for the whole mailbox turn.                               | `codex/split-owner-a` at `4ead601cd`                                       |
-| Whole-batch synchronous owner B                         | One owner, but applies an entire pull before yielding: input delay grows with batch size (about 430 ms vs 16 ms on 1,000 events).       | `experiment/session-sync-latency` at `e2edfa693`                           |
-| Owner body on its own fiber                             | Cleaner isolation, but about 4% slower on a 10,000-event commit; the body runs inline and a microtask check catches suspension.         | –                                                                          |
-| Effect Machine statecharts (leader and session)         | Adds a framework dependency and vocabulary, deeply nested specifications and duplicated schemas to critical synchronization code.       | `refactor/effect-machine-processors` at `db978b595`, spike at `18c0273a1`  |
-| Pure reducer + command interpreter                      | Represents every effect twice and separates a durable operation from the invariant it completes.                                        | –                                                                          |
-| Guarding the first pull step by rebase generation       | Head ordering deliberately ignores the local rebase generation; the guard would invent a monotonicity contract the protocol lacks.      | –                                                                          |
+| Tried                                                  | Why it was not chosen                                                                                                                  | Preserved at                                                              |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Split owner as on main (local commit path + mailbox)   | Unsafe: a local commit during an unfinished rebase could have its durable head overwritten (60 head failures in the browser run).      | `experiment/session-sync-latency` at `e2edfa693`                          |
+| Fixed split owner A (same coherent steps, two writers) | As safe and as fast as C, but two writers to audit, and push completions wait for the whole mailbox turn.                              | `codex/split-owner-a` at `4ead601cd`                                      |
+| Whole-batch synchronous owner B                        | One owner, but applies an entire pull before yielding: user-input delay grows with batch size (about 430 ms vs 16 ms on 1,000 events). | `experiment/session-sync-latency` at `e2edfa693`                          |
+| Owner body on its own fiber                            | Cleaner isolation, but about 4% slower on a 10,000-event commit; the body runs inline and a microtask check catches suspension.        | –                                                                         |
+| Effect Machine statecharts (leader and session)        | Adds a framework dependency and vocabulary, deeply nested specifications and duplicated schemas to critical synchronization code.      | `refactor/effect-machine-processors` at `db978b595`, spike at `18c0273a1` |
+| Pure reducer + command interpreter                     | Represents every effect twice and separates a durable operation from the invariant it completes.                                       | –                                                                         |
+| Guarding the first pull step by rebase generation      | Head ordering deliberately ignores the local rebase generation; the guard would invent a monotonicity contract the protocol lacks.     | –                                                                         |
 
 Evidence: a browser comparison of fixed A and C (130 samples, Effect beta.99) passed every correctness check for both,
-with comparable input delay and catch-up times; see [the measurement interpretation](../../tests/perf/session-sync/DECISION.md).
+with comparable user-input delay and catch-up times; see [the measurement interpretation](../../tests/perf/session-sync/DECISION.md).
 It does not compare against main and gives no frame-time bound. A known cost shared by A and C is replaying a large
 pending suffix at every step: heavy rebases took about 2 seconds, a candidate for follow-up optimization.
 
 ## Topics to Look Into After Meeting With Igor (September 25, 2026)
 
-1. **Rename the processors' "events".** The inputs that flow through the sync processors (the `Event` union, for
-   example `LocalPushRequested` and `UpstreamBatchReceived`) are easily confused with LiveStore events. Pick a
-   distinct term, such as "machine event", "processor message" or "command", and apply it consistently in code and in
-   this RFC. The name is not decided yet.
+1. **Rename the processors' "events".** _Done (October 7, 2026): renamed to **messages**._ The unions are now
+   `SessionMessage` and `LeaderMessage` (for example `LocalPushRequested` and `UpstreamBatchReceived`), handled by
+   `dispatch(message)` and `send(message)`. Of the 22 message types, only 3 are requests (`LocalPushRequested` and
+   the two `ShutdownRequested`). The rest are results of work the processor started, arriving data, lifecycle
+   reports, or the leader scheduling itself. "Message" covers all of them. It also completes the existing
+   vocabulary: the leader's mailbox holds messages, and the session mirrors Elm's Model / Msg / Cmd. Rejected:
+   "input" (too generic), "action" (only fits the 3 requests), "command", "notification" and "signal" (already
+   used in LiveStore). Wire-protocol and devtools messages also exist, so always use the qualified names
+   (`SessionMessage`, `LeaderMessage`, "mailbox message"), never a bare `Message`.
 2. **What does `store.commit` wait for? (owner box in the diagrams)**
-   - Left branch: confirm that the path from `store.commit` through `dispatch(Commit)` and the subscriber refresh until
-     `store.commit` returns is fully synchronous, with nothing on it able to suspend or yield.
+   - Left branch: confirm that the path from `store.commit` through the owner and the subscriber refresh until
+     `store.commit` returns is fully synchronous, with nothing on it able to suspend or yield. _Answered (October 7,
+     2026): yes, it is one synchronous call stack, enforced by `Effect.runSync` and the owner's suspension check.
+     Fibers woken by notifications and subscriber callbacks can run inside it. Diagram 1 was redrawn to show this,
+     and to replace the nonexistent `dispatch(Commit)` with `owned(commitLocalEvents)`._
    - Right branch: when the asynchronous follow-up work fails (for example the push to the leader), is the failure fed
-     back into the owner as a new input, or handled some other way? Trace each failure path.
+     back into the owner as a new message, or handled some other way? Trace each failure path. _Answered (October 7,
+     2026): every failure returns to the owner as a message (`PushRejected`, `PushFailed` or `Failed`); see the
+     paragraphs under diagram 1. The one exception, a `Failed` that the owner cannot record, used to die unobserved
+     and now logs and shuts down the Store directly._
 3. **Explain how these differ from conventional state machines.** Write a short primer for readers who know
    conventional synchronous state machines, focused on the client session's dispatcher: it makes synchronous
    transitions but coordinates asynchronous work (commands, runners, staged notifications). This needs a mental model
-   or analogy, not a full specification.
+   or analogy, not a full specification. _Answered (October 7, 2026): see "Two Variations on a Classical State
+   Machine" near the top._
 4. **Check what "savepoint" means in the diagrams.** Presumably a SQLite `SAVEPOINT`, a nested transaction that can
    roll back cleanly to the state before it. Confirm it means that, and whether it wraps materialization, journal and
-   state head together.
+   state head together. _Answered (October 7, 2026): yes to both. The journal and the state head are tables in the
+   same state database, so one savepoint covers all three, with per-event savepoints nested inside. See the
+   "Savepoint" term in "Message Handling in Detail"._
 5. **Sync state versus in-memory SQLite.** How is the in-memory sync state (pending events, heads) kept consistent
    with the session's SQLite state? Is it guaranteed today, and if so, by what mechanism and at which points (for
-   example yield points)? Where can the two diverge?
+   example yield points)? Where can the two diverge? _Answered (October 7, 2026): yes, at every owner release, by
+   writing SQLite first inside a savepoint and assigning memory only afterwards, in one synchronous owner body. They
+   diverge only in cases that fail the session. See "How in-memory sync state stays consistent with SQLite"._
 6. **Rename `LeaderSyncCommitter`.** Consider something like "Materialization Service" or "Leader Materialization
-   Service" to better describe its role. The name is not decided yet.
+   Service" to better describe its role. The name is not decided yet. _Decided (October 7, 2026): renamed to
+   **`LeaderPersistence`**, with `persistLocal` / `persistUpstream` and `LocalPersistReceipt` / `UpstreamPersistReceipt`.
+   The ontology already defines the leader as the role that owns "persistence and sync", so the leader now splits into
+   `LeaderSyncProcessor` (sync) and `LeaderPersistence` (persistence). "Materialization Service" was rejected because
+   half the work is eventlog writes, and the service calls a given `materializeEvent` rather than materializing
+   itself. "Commit" was dropped because in LiveStore it means `store.commit`, adding new events, whereas this service
+   durably writes events that were already committed or received._
 7. **Notifications and commands in the client session processor.** Clarify how these two concepts work and why both
    exist: what the owner stages as notifications versus commands, when each is delivered or executed relative to
    releasing the owner, and what problem the split solves (for example reentrant observers, and asynchronous work
