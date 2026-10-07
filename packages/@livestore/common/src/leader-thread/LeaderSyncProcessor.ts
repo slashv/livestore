@@ -115,7 +115,7 @@ export const make = Effect.fnUntraced(function* ({
   const syncCommitter = yield* LeaderSyncCommitter.LeaderSyncCommitter
   const { devtoolsLatch, shutdownChannel, span, syncBackend } = runtime
 
-  const mailbox = yield* Queue.unbounded<Event>()
+  const mailbox = yield* Queue.unbounded<LeaderMessage>()
   const syncStateRef = yield* SubscriptionRef.make(initialSyncState)
   const connectedSessions = yield* makePullQueueSet
   const bootDeferred = yield* Deferred.make<EventSequenceNumber.Client.Composite>()
@@ -145,10 +145,10 @@ export const make = Effect.fnUntraced(function* ({
   // operation startup which also run in this scope before their asynchronous work reports back through the mailbox.
   let model = initialModel(config, initialSyncState, isClientOnlyEvent)
 
-  const send = (event: Event) => Queue.offer(mailbox, event).pipe(Effect.asVoid)
+  const send = (message: LeaderMessage) => Queue.offer(mailbox, message).pipe(Effect.asVoid)
   const fork = (effect: Effect.Effect<void>) => FiberSet.run(backgroundFibers, effect).pipe(Effect.asVoid)
   const allocateOperationId = () => {
-    // Completion events carry this id so a late result from an interrupted provider call cannot affect newer work.
+    // Completion messages carry this id so a late result from an interrupted provider call cannot affect newer work.
     const operationId = model.nextOperationId
     model = { ...model, nextOperationId: operationId + 1 }
     return operationId
@@ -483,24 +483,24 @@ export const make = Effect.fnUntraced(function* ({
       }
     })
 
-  const handleEvent = (event: Event): Effect.Effect<boolean> =>
+  const handleMessage = (message: LeaderMessage): Effect.Effect<boolean> =>
     Effect.gen(function* () {
-      if (event._tag === 'ShutdownRequested') {
+      if (message._tag === 'ShutdownRequested') {
         return yield* stop({ lifecycle: 'stopping', notify: false })
       }
       if (model.lifecycle !== 'running') {
-        if (event._tag === 'LocalPushRequested') yield* interruptLocalRequests(localRequests, [event.requestId])
+        if (message._tag === 'LocalPushRequested') yield* interruptLocalRequests(localRequests, [message.requestId])
         return true
       }
 
-      switch (event._tag) {
+      switch (message._tag) {
         case 'LocalPushRequested': {
           // Reservations include admitted but not-yet-committed events. Validating against their tail prevents two
           // callers from being admitted with the same sequence number while they wait in the queue.
           const pushHead = model.reservations.at(-1)?.event.seqNum ?? model.syncState.localHead
-          const validationError = validatePushBatch(event.events, pushHead, isClientOnlyEvent)
-          const items = event.events.map((pushedEvent, index) => ({
-            requestId: event.requestId,
+          const validationError = validatePushBatch(message.events, pushHead, isClientOnlyEvent)
+          const items = message.events.map((pushedEvent, index) => ({
+            requestId: message.requestId,
             index,
             event: pushedEvent,
           }))
@@ -516,7 +516,7 @@ export const make = Effect.fnUntraced(function* ({
             localQueue: [...model.localQueue, ...items],
             reservations: [...model.reservations, ...items],
           }
-          yield* testing.hooks?.localPushAdmitted?.(event.events) ?? Effect.void
+          yield* testing.hooks?.localPushAdmitted?.(message.events) ?? Effect.void
           yield* send({ _tag: 'ContinueWork' })
           return true
         }
@@ -527,17 +527,17 @@ export const make = Effect.fnUntraced(function* ({
         case 'ContinueWork':
           return yield* processNextWork()
         case 'UpstreamBatchReceived': {
-          if (model.pull._tag !== 'streaming' || model.pull.pullId !== event.batch.pullId) {
+          if (model.pull._tag !== 'streaming' || model.pull.pullId !== message.batch.pullId) {
             // The provider fiber waits for every page to be released. Even a late page from an old pull must be
             // released, although it must not change the current model.
-            yield* completePullBatch(pullBatches, event.batch.batchId)
+            yield* completePullBatch(pullBatches, message.batch.batchId)
             return true
           }
-          if (event.batch.events.length === 0) {
-            if (event.batch.pageInfo._tag === 'NoMore') {
+          if (message.batch.events.length === 0) {
+            if (message.batch.pageInfo._tag === 'NoMore') {
               model = { ...model, pull: { ...model.pull, pagination: 'between-pages' } }
             }
-            yield* completePullBatch(pullBatches, event.batch.batchId)
+            yield* completePullBatch(pullBatches, message.batch.batchId)
             yield* send({ _tag: 'ContinueWork' })
             return true
           }
@@ -545,22 +545,22 @@ export const make = Effect.fnUntraced(function* ({
             ...model,
             pull: {
               ...model.pull,
-              pagination: event.batch.pageInfo._tag === 'NoMore' ? 'between-pages' : 'more-expected',
+              pagination: message.batch.pageInfo._tag === 'NoMore' ? 'between-pages' : 'more-expected',
             },
-            upstreamQueue: [...model.upstreamQueue, event.batch],
+            upstreamQueue: [...model.upstreamQueue, message.batch],
           }
           yield* send({ _tag: 'ContinueWork' })
           return true
         }
         case 'PullCompleted':
-          if (model.pull._tag === 'streaming' && model.pull.pullId === event.pullId) {
+          if (model.pull._tag === 'streaming' && model.pull.pullId === message.pullId) {
             model = { ...model, pull: { _tag: 'completed' } }
             yield* send({ _tag: 'ContinueWork' })
           }
           return true
         case 'PullFailed':
-          if (model.pull._tag !== 'streaming' || model.pull.pullId !== event.pullId) return true
-          if (event.error._tag === 'IsOfflineError') {
+          if (model.pull._tag !== 'streaming' || model.pull.pullId !== message.pullId) return true
+          if (message.error._tag === 'IsOfflineError') {
             const retryId = allocateOperationId()
             const attempt = model.pull.attempt + 1
             model = { ...model, pull: { _tag: 'retry-wait', retryId, attempt } }
@@ -571,19 +571,20 @@ export const make = Effect.fnUntraced(function* ({
             )
             return true
           }
-          if (event.error._tag === 'BackendIdMismatchError') return yield* handleBackendMismatch(event.error, 'pull')
+          if (message.error._tag === 'BackendIdMismatchError')
+            return yield* handleBackendMismatch(message.error, 'pull')
           if (config.onError === 'shutdown')
-            return yield* stop({ lifecycle: 'failed', error: event.error, notify: true })
+            return yield* stop({ lifecycle: 'failed', error: message.error, notify: true })
           model = { ...model, pull: { _tag: 'completed' } }
           yield* send({ _tag: 'ContinueWork' })
           return true
         case 'PullRetryElapsed':
-          if (model.pull._tag === 'retry-wait' && model.pull.retryId === event.retryId) {
+          if (model.pull._tag === 'retry-wait' && model.pull.retryId === message.retryId) {
             yield* startProviderPull(model.pull.attempt)
           }
           return true
         case 'PushSucceeded':
-          if (model.push._tag === 'in-flight' && model.push.operationId === event.operationId) {
+          if (model.push._tag === 'in-flight' && model.push.operationId === message.operationId) {
             model = {
               ...model,
               push: { _tag: 'idle', queued: model.push.queued },
@@ -592,8 +593,8 @@ export const make = Effect.fnUntraced(function* ({
           }
           return true
         case 'PushFailed':
-          if (model.push._tag !== 'in-flight' || model.push.operationId !== event.operationId) return true
-          if (event.error._tag === 'ServerAheadError') {
+          if (model.push._tag !== 'in-flight' || model.push.operationId !== message.operationId) return true
+          if (message.error._tag === 'ServerAheadError') {
             // Pulling first will either confirm or rebase these events. Keep them queued, but do not retry the same
             // stale batch until the pull has established the new durable plan.
             model = {
@@ -605,7 +606,8 @@ export const make = Effect.fnUntraced(function* ({
             }
             return true
           }
-          if (event.error._tag === 'BackendIdMismatchError') return yield* handleBackendMismatch(event.error, 'push')
+          if (message.error._tag === 'BackendIdMismatchError')
+            return yield* handleBackendMismatch(message.error, 'push')
           const retryId = allocateOperationId()
           const attempt = model.push.attempt + 1
           model = {
@@ -625,7 +627,7 @@ export const make = Effect.fnUntraced(function* ({
           )
           return true
         case 'PushRetryElapsed':
-          if (model.push._tag === 'retry-wait' && model.push.retryId === event.retryId) {
+          if (model.push._tag === 'retry-wait' && model.push.retryId === message.retryId) {
             const operationId = allocateOperationId()
             const push = model.push
             model = {
@@ -647,16 +649,16 @@ export const make = Effect.fnUntraced(function* ({
           }
           return true
         default:
-          return casesHandled(event)
+          return casesHandled(message)
       }
     })
 
   const run = Effect.gen(function* () {
-    // This is the only general event consumer and therefore the single owner of transition ordering.
+    // This is the only general message consumer and therefore the single owner of transition ordering.
     let running = true
     while (running === true) {
-      const event = yield* Queue.take(mailbox)
-      const exit = yield* handleEvent(event).pipe(Effect.exit)
+      const message = yield* Queue.take(mailbox)
+      const exit = yield* handleMessage(message).pipe(Effect.exit)
       if (Exit.isFailure(exit) === true) {
         running = yield* stop({ lifecycle: 'failed', error: Cause.squash(exit.cause), notify: true })
       } else {
@@ -768,7 +770,7 @@ interface UpstreamBatch {
 type ProviderPushError = IsOfflineError | BackendIdMismatchError | UnknownError | ServerAheadError
 type ProviderPullError = IsOfflineError | BackendIdMismatchError | UnknownError
 
-type Event =
+type LeaderMessage =
   | { readonly _tag: 'ContinueWork' }
   | { readonly _tag: 'LocalWorkEnabled' }
   | {
@@ -866,7 +868,7 @@ const runProviderPush = (
   operation: { readonly operationId: OperationId; readonly batch: EventBatch },
   syncBackend: SyncBackend.SyncBackend,
   devtoolsLatch: Latch.Latch | undefined,
-  send: (event: Event) => Effect.Effect<void>,
+  send: (message: LeaderMessage) => Effect.Effect<void>,
 ) =>
   Effect.gen(function* () {
     yield* SubscriptionRef.waitUntil(syncBackend.isConnected, (connected) => connected === true)
@@ -908,7 +910,7 @@ const runProviderPull = ({
   pullBatches: Ref.Ref<Map<PullBatchId, Deferred.Deferred<void>>>
   nextPullBatchId: Ref.Ref<number>
   initialBlockingSyncContext: InitialBlockingSyncContext
-  send: (event: Event) => Effect.Effect<void>
+  send: (message: LeaderMessage) => Effect.Effect<void>
 }) =>
   Effect.gen(function* () {
     const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: cursor.global })

@@ -92,6 +92,7 @@ For maintainers and contributors:
 
 - **Session sync:** Organize the processor into named owner workflows, a pull-persistence helper, and asynchronous execution functions with concise startup wiring. This structural refactor preserves the existing synchronous commit and yielding reconciliation contracts ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
 - **Session sync:** Make every session sync state explicit in the processor model: lifecycle is a tagged union (including `shutdown-requested` and a terminal `failed` that no longer re-enters draining), and a push stopped for a rebase is tracked as `cancelling` instead of a runner-local flag. A materializer or SQLite service that suspends inside the owner now fails the session with a named defect instead of leaving the owner held ([#1465](https://github.com/livestorejs/livestore/issues/1465)).
+- **Sync processors:** Rename the processors' internal input unions from `Event` to `SessionMessage` and `LeaderMessage`, so "event" only ever means a LiveStore event.
 
 - **CI composition:** Aligned the megarepo setup with the automatic CI worktree
   policy and consolidated devenv resolver from

@@ -53,15 +53,15 @@ export type RebaseBarrierPoint =
 /**
  * One synchronous owner for local commits, pulled state and propagation decisions.
  *
- * The owner has three entry points: `commit` and one pull step return results to their caller; every other input is
- * an `Event` sent through `dispatch`. All three go through `owned`, so a transition finishes its SQLite/model work
- * before returning and never waits on another fiber. Store retains its local subscriber refresh.
+ * The owner has three entry points: `commit` and one pull step return results to their caller; everything else arrives
+ * as a `SessionMessage` sent through `dispatch`. All three go through `owned`, so a transition finishes its
+ * SQLite/model work before returning and never waits on another fiber. Store retains its local subscriber refresh.
  *
  * The command runner does the waiting. Its reconciliation loop runs one complete pull step, refreshes subscribers,
  * then yields. Every state that affects a later decision, including a push being cancelled, lives in `Model`; the
  * runner's loop locals only track the traversal offset.
  *
- * Read transition for the event map, then commitLocalEvents or applyPullStep for state changes. Persistence details
+ * Read transition for the message map, then commitLocalEvents or applyPullStep for state changes. Persistence details
  * live in applyPullToSqlite; reconcile shows where cancellation, callbacks and yielding can interleave.
  */
 export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncProcessor')(function* ({
@@ -108,44 +108,44 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
   }
   const debugInfo = { rebaseCount: 0, advanceCount: 0, rejectCount: 0 }
 
-  /** Routes every asynchronous input to its workflow. Runs inside the owner. */
-  const transition = (event: Event): Effect.Effect<void, ProcessorError> =>
+  /** Routes every message to its workflow. Runs inside the owner. */
+  const transition = (message: SessionMessage): Effect.Effect<void, ProcessorError> =>
     Effect.gen(function* () {
-      switch (event._tag) {
+      switch (message._tag) {
         case 'Started':
           if (model.lifecycle._tag === 'starting') {
             model = { ...model, lifecycle: { _tag: 'running', reconciliation: undefined } }
           }
           break
         case 'PullReceived':
-          yield* acceptPull(event)
+          yield* acceptPull(message)
           break
         case 'PullFinished':
-          finishPull(event)
+          finishPull(message)
           break
         case 'PushCancelled':
-          finishPushCancellation(event)
+          finishPushCancellation(message)
           break
         case 'PushSucceeded':
         case 'PushRejected':
         case 'PushFailed':
-          completePush(event)
+          completePush(message)
           break
         case 'Failed':
-          failSession(event.cause)
+          failSession(message.cause)
           break
         case 'ShutdownRequested':
-          requestShutdown(event.exit)
+          requestShutdown(message.exit)
           break
         case 'DrainStarted':
-          startDrain(event.exit)
+          startDrain(message.exit)
           break
         case 'Stopped':
           model = { ...model, lifecycle: { _tag: 'stopped' } }
-          stage(Deferred.done(shutdownDone, event.exit))
+          stage(Deferred.done(shutdownDone, message.exit))
           break
         default:
-          casesHandled(event)
+          casesHandled(message)
       }
     })
 
@@ -195,7 +195,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       Effect.uninterruptible,
     )
 
-  const dispatch = (event: Event) => owned(transition(event))
+  const dispatch = (message: SessionMessage) => owned(transition(message))
 
   /**
    * A body that suspended may already have written the model and had its staged commands dropped, so the session can
@@ -235,7 +235,9 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
           counts[item.name] = (counts[item.name] ?? 0) + 1
           return counts
         }, {}),
-        ...(TRACE_VERBOSE === true ? { mergeResult: Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))(result) } : {}),
+        ...(TRACE_VERBOSE === true
+          ? { mergeResult: Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))(result) }
+          : {}),
       })
       const { writeTables } = yield* materializeEvents(encoded).pipe(
         SqliteDbHelper.withSavepoint(dbState),
@@ -255,21 +257,23 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       return { writeTables }
     })
 
-  const acceptPull = (event: Extract<Event, { _tag: 'PullReceived' }>): Effect.Effect<void, ProcessorError> =>
+  const acceptPull = (
+    message: Extract<SessionMessage, { _tag: 'PullReceived' }>,
+  ): Effect.Effect<void, ProcessorError> =>
     Effect.gen(function* () {
       if (model.lifecycle._tag !== 'running') {
-        stage(Deferred.succeed(event.completed, undefined))
+        stage(Deferred.succeed(message.completed, undefined))
         return
       }
       // Validate the whole payload before applying a prefix; never retain this as a materialization plan.
-      const result = yield* merge(event.item.payload)
+      const result = yield* merge(message.item.payload)
       if (result._tag === 'reject') return yield* Effect.die(new Error('Unexpected rejected pull'))
       if (model.lifecycle.reconciliation !== undefined)
         return yield* Effect.die(new Error('Pull backpressure was bypassed'))
       const id = model.nextOperationId
       const minimumEnd =
-        event.item.payload._tag === 'upstream-rebase'
-          ? event.item.payload.newEvents.findIndex((item) =>
+        message.item.payload._tag === 'upstream-rebase'
+          ? message.item.payload.newEvents.findIndex((item) =>
               EventSequenceNumber.Client.isGreaterThanOrEqual(item.seqNum, model.syncState.upstreamHead),
             ) + 1
           : 0
@@ -278,7 +282,9 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         nextOperationId: id + 1,
         lifecycle: { _tag: 'running', reconciliation: { id, rebased: false } },
       }
-      stage(Queue.offer(commands, { _tag: 'Reconcile', id, item: event.item, minimumEnd, completed: event.completed }))
+      stage(
+        Queue.offer(commands, { _tag: 'Reconcile', id, item: message.item, minimumEnd, completed: message.completed }),
+      )
     })
 
   const applyPullStep = (step: PullStep): Effect.Effect<StepResult, ProcessorError> =>
@@ -309,9 +315,9 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
       return { _tag: 'applied', writeTables }
     })
 
-  const finishPull = (event: Extract<Event, { _tag: 'PullFinished' }>): void => {
+  const finishPull = (message: Extract<SessionMessage, { _tag: 'PullFinished' }>): void => {
     const reconciliation = activeReconciliation()
-    if (reconciliation?.id !== event.id) return
+    if (reconciliation?.id !== message.id) return
     // A push can finish between steps now. Judge rejection recovery against its current state, not a
     // snapshot taken when the pull started (the later prefixes may have confirmed the rejected batch).
     const recovered =
@@ -326,26 +332,28 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
     reserveNextPush()
   }
 
-  const finishPushCancellation = (event: Extract<Event, { _tag: 'PushCancelled' }>): void => {
-    if (model.push._tag !== 'cancelling' || model.push.operationId !== event.operationId) return
+  const finishPushCancellation = (message: Extract<SessionMessage, { _tag: 'PushCancelled' }>): void => {
+    if (model.push._tag !== 'cancelling' || model.push.operationId !== message.operationId) return
     // The batch was never confirmed by this operation, so it goes back in front of the queue. The rebase step
     // that follows rebuilds the queue from live pending events anyway.
     model = { ...model, push: { _tag: 'idle', queued: [...model.push.batch, ...model.push.queued] } }
   }
 
-  const completePush = (event: Extract<Event, { _tag: 'PushSucceeded' | 'PushRejected' | 'PushFailed' }>): void => {
+  const completePush = (
+    message: Extract<SessionMessage, { _tag: 'PushSucceeded' | 'PushRejected' | 'PushFailed' }>,
+  ): void => {
     if (propagates(model.lifecycle) === false) return
     const push = model.push
-    if (event._tag === 'PushFailed') {
+    if (message._tag === 'PushFailed') {
       // A fatal leader failure still counts while the operation is being cancelled.
       const current =
-        (push._tag === 'in-flight' || push._tag === 'cancelling') && push.operationId === event.operationId
-      if (current === true) failSession(event.cause)
+        (push._tag === 'in-flight' || push._tag === 'cancelling') && push.operationId === message.operationId
+      if (current === true) failSession(message.cause)
       return
     }
     // A cancelling operation's success or rejection is superseded by the rebase that cancelled it.
-    if (push._tag !== 'in-flight' || push.operationId !== event.operationId) return
-    if (event._tag === 'PushSucceeded') {
+    if (push._tag !== 'in-flight' || push.operationId !== message.operationId) return
+    if (message._tag === 'PushSucceeded') {
       model = { ...model, push: { _tag: 'idle', queued: push.queued } }
     } else {
       debugInfo.rejectCount++
@@ -355,7 +363,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
         push:
           isRejectedBatchRecovered(push.batch, model.syncState.pending) === true
             ? { _tag: 'idle', queued: model.syncState.pending }
-            : { _tag: 'awaiting-reconciliation', rejectedEvents: push.batch, error: event.error },
+            : { _tag: 'awaiting-reconciliation', rejectedEvents: push.batch, error: message.error },
       }
       if (model.lifecycle._tag === 'stopping' && model.push._tag === 'awaiting-reconciliation') {
         stage(Queue.offer(commands, { _tag: 'FinishShutdown', exit: Exit.die(model.push.error) }))
@@ -582,7 +590,7 @@ export const makeClientSessionSyncProcessor = Effect.fn('makeClientSessionSyncPr
 
   const rebaseBarrier = (point: RebaseBarrierPoint) => params.rebaseBarriers?.[point] ?? Effect.void
   const reportFailure = (cause: Cause.Cause<ProcessorError>) => dispatch({ _tag: 'Failed', cause }).pipe(Effect.orDie)
-  const report = (event: Event) => dispatch(event).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
+  const report = (message: SessionMessage) => dispatch(message).pipe(Effect.catchCause(reportFailure), Effect.asVoid)
 
   const reconcile = (command: Extract<Command, { _tag: 'Reconcile' }>, pushHandle: RunnerHandles['push']) =>
     Effect.gen(function* () {
@@ -761,8 +769,8 @@ interface RunnerHandles {
 type ProcessorError = MaterializeError | MaterializationJournal.MaterializationJournalError | UnknownError
 type EventBatch = ReadonlyArray<LiveStoreEvent.Client.Encoded>
 type Pull = typeof PullItem.Type
-/** Inputs that change the model without returning a result to their sender. */
-type Event =
+/** Messages that change the model without returning a result to their sender. */
+type SessionMessage =
   | { readonly _tag: 'Started' }
   | { readonly _tag: 'PullReceived'; readonly item: Pull; readonly completed: Deferred.Deferred<void> }
   | { readonly _tag: 'PullFinished'; readonly id: number }
