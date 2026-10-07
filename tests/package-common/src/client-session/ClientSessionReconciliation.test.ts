@@ -83,7 +83,7 @@ Vitest.describe('Client session reconciliation through Store', () => {
         if (rows.length === 32) Effect.runSync(Deferred.succeed(failPush, undefined))
       })
       // Confirm the in-flight local event so the pull can advance without cancelling that push first.
-      yield* deliver([local, ...Array.from({ length: 63 }, (_, i) => remoteCreated(i + 2))])
+      yield* deliver([local, ...Array.from({ length: 63 }, (_, i) => remoteCreated(i + 2))]).pipe(Effect.asVoid)
       expect(Exit.isFailure(yield* Deferred.await(failed))).toBe(true)
       expect(observed).toEqual([1, 32])
       expect(readHead(store).global).toBe(32)
@@ -241,7 +241,7 @@ Vitest.describe('Client session reconciliation through Store', () => {
         })
         const published: number[] = []
         const unsubscribe = store.subscribe(tables.todos, (rows) => published.push(rows.length))
-        yield* deliver(batch)
+        yield* deliver(batch).pipe(Effect.asVoid)
         expect(Exit.isFailure(yield* Deferred.await(failed))).toBe(true)
         const prefix = failingEvent === 2 ? 0 : 32
         expect(store.query(tables.todos)).toHaveLength(prefix)
@@ -275,7 +275,7 @@ Vitest.describe('Client session reconciliation through Store', () => {
           ...remoteCreated(2),
           args: { id: 'local', text: 'duplicate' },
         }),
-      ])
+      ]).pipe(Effect.asVoid)
       yield* Deferred.await(cancelling)
       try {
         // Store may already mark itself disposed while reporting the defect. Inspect SQLite directly while
