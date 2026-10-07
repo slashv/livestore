@@ -223,6 +223,22 @@ There is one important distinction between kinds of work:
 Every concurrent operation has an identity. A late completion is ignored when its identity no longer matches the
 current state.
 
+The leader still makes every decision one message at a time; only waiting runs concurrently. Exactly three kinds of
+waiting have to happen outside a turn, because each could block the mailbox indefinitely:
+
+- **Pull from the sync backend** (at most one): a live stream that can sit idle for hours waiting for other clients'
+  changes. Pages within it stay serial: the stream waits until each page is durably written before delivering the
+  next.
+- **Push to the sync backend** (at most one): a network round trip that can hang or keep failing while offline.
+  Awaited inside a turn, sessions' local changes could not become durable and shutdown could not proceed.
+- **Retry timers** (at most one per direction): back-off sleeps of seconds.
+
+A fully serial leader would need a polling, non-live pull (a different sync-provider contract), would block on every
+push round trip, and would freeze while offline. A push rejected because the backend is ahead can only succeed after
+a pull, which a frozen leader cannot run. The cost of the concurrent waiting is modest and visible in the model:
+operation identities, the `awaiting-pull` push state, and interrupting an in-flight push when a rebase replaces its
+batch.
+
 ### Session: synchronous changes, asynchronous waiting
 
 **Every change to the session model completes synchronously inside the owner. Work that must wait happens outside
@@ -889,4 +905,7 @@ pending suffix at every step: heavy rebases took about 2 seconds, a candidate fo
 8. **Does the leader need concurrent work at all?** "Leader: a serialized mailbox" separates durable leader work
    (awaited inside the mailbox turn) from genuinely concurrent work (provider requests, retry timers) running in
    supervised fibers. What actually has to run concurrently, and why? Could the leader be fully serial, so that its
-   state machine never has to handle several things in flight at once?
+   state machine never has to handle several things in flight at once? _Answered (October 7, 2026): it needs
+   concurrent waiting, not concurrent decisions. Messages are still handled one at a time; only the live backend
+   pull, the backend push and retry timers wait outside a turn, each at most one at a time. Making these serial would
+   change the sync-provider contract and freeze the leader while offline. See "Leader: a serialized mailbox"._
