@@ -10,6 +10,11 @@
 
 ### Changed
 
+- **Effect dependencies:** Updated the aligned Effect 4 dependency cohort from
+  `4.0.0` to `4.0.3`, including its AI, OpenTelemetry, platform, SQLite, and
+  Vitest packages. Applications using Effect should align their dependencies
+  to `4.0.3` or a compatible later 4.x release
+  ([#1669](https://github.com/livestorejs/livestore/pull/1669)).
 - **Contributor meetings:** Added the canonical docs schedule for the next two
   fortnightly meetings at 19:00 Berlin, automatic Google Calendar publishing,
   and a stable Riverside room link
@@ -47,6 +52,15 @@
   behavior before hibernation. Completed and protocol-defected pulls are also
   removed from persisted fan-out state
   ([#1418](https://github.com/livestorejs/livestore/issues/1418)).
+- **Cloudflare sync:** Fixed live WebSocket pulls stopping permanently after a
+  disconnect. Pulls now resume after reconnect without reloading the client,
+  and HTTP transport failures also remain retryable. Offline pulls wait for
+  reconnection rather than spinning, and resume as soon as the backend reports
+  connected. Capped fallback probes cover stale connectivity signals and still
+  wake immediately on later disconnect/reconnect transitions.
+  Protocol failures stay terminal
+  ([#1650](https://github.com/livestorejs/livestore/issues/1650)).
+  For the root-cause analysis, thanks @bohdanbirdie.
 - **Cloudflare DO-RPC sync:** A temporary Durable Object RPC failure no longer
   stops replication for good. A call that Cloudflare marks `retryable` (and not
   `overloaded`) now surfaces as `IsOfflineError`, so the leader retries the pull
@@ -65,9 +79,23 @@
   rebase generation while stale epochs remain checked separately, avoiding
   duplicate materialization and ghost fences during multi-writer rebases
   ([#1530](https://github.com/livestorejs/livestore/pull/1530)).
+- **Expo getting-started docs:** The manual install command now installs
+  `@livestore/sync-cf` instead of the import subpath `@livestore/sync-cf/client`,
+  which package managers resolved as a git URL and failed to install
+  ([#1657](https://github.com/livestorejs/livestore/issues/1657),
+  [#1667](https://github.com/livestorejs/livestore/pull/1667)).
+- **State storage:** Rebases roll back state through a materialization journal table instead of SQLite changesets carried in event metadata. Because the state system tables changed, existing state databases are rebuilt from the eventlog once after upgrading ([#1658](https://github.com/livestorejs/livestore/pull/1658)).
+- **Query cache:** Cached query results are discarded when a journal or savepoint rollback changes the session database, so reads after a rebase no longer return rolled-back rows ([#1658](https://github.com/livestorejs/livestore/pull/1658)).
 
 ### Breaking Changes
 
+- **Effect 4 / LiveStore 0.5:** Upgrade application dependencies and schema APIs
+  from Effect 3 to stable Effect 4. Follow the
+  [0.4 to 0.5 upgrade guide](https://dev.docs.livestore.dev/misc/upgrading-0.4-to-0.5/)
+  for peer packages, schema substitutions, removed utilities, commit callbacks
+  and Cloudflare DO-RPC changes
+  ([#1310](https://github.com/livestorejs/livestore/issues/1310),
+  [#1647](https://github.com/livestorejs/livestore/pull/1647)).
 - **Cloudflare adapter:** `createStoreDo`, `createStoreDoPromise` and
   `makeDoRpcSync` take `getSyncBackendStub: () => stub` instead of
   `syncBackendStub`. LiveStore calls it for every sync call, because Cloudflare
@@ -94,20 +122,11 @@
   plan for the corresponding row-write usage
   ([#1555](https://github.com/livestorejs/livestore/issues/1555)).
 
-- **Effect v4 dependency cohort:** LiveStore now requires the stable Effect
-  `4.0.0` release or a later 4.x release. The Effect peer range is `^4.0.0`,
-  which no longer accepts `4.0.0-rc.*` prereleases. Upgrading Effect brings
-  Effect's own breaking changes to application code, such as the move of
-  `effect/unstable/*` modules to `effect/*` and renamed schema checks; see the
-  [Effect changelog](https://github.com/Effect-TS/effect/blob/main/packages/effect/CHANGELOG.md).
-  `@livestore/utils/effect` no longer re-exports `Encoding`, so replace
-  `Encoding.encodeBase64Url` with the re-exported `Base64Url.encode`. The
-  upgrade does not change state schema fingerprints. Event definitions get new
-  schema hashes, so the first rematerialization after upgrading can log schema
-  hash mismatch warnings
-  ([#63](https://github.com/livestorejs/livestore/issues/63)). SQLite column
-  inference preserves INTEGER and BLOB storage for refined
-  `Schema.DateFromMillis` and `Schema.Uint8Array`
+- **Effect dependency compatibility:** The peer range is `^4.0.0`, excluding
+  beta/RC releases. Effect-only upgrades preserve state schema fingerprints,
+  but changed event schema hashes can produce warnings on rematerialization
+  ([#63](https://github.com/livestorejs/livestore/issues/63)). Refined
+  `Schema.DateFromMillis` and `Schema.Uint8Array` retain INTEGER and BLOB storage
   ([#1557](https://github.com/livestorejs/livestore/issues/1557),
   [#1606](https://github.com/livestorejs/livestore/pull/1606),
   [#1647](https://github.com/livestorejs/livestore/pull/1647)).
@@ -116,6 +135,12 @@
 ### Internal Changes
 
 For maintainers and contributors:
+
+- **Unit-test tooling:** Local `mono test unit` and `devenv tasks run test:unit`
+  now fail when any package's Vitest process exits nonzero, matching CI.
+  Package output streams directly to the terminal instead of being buffered
+  ([#683](https://github.com/livestorejs/livestore/issues/683)).
+- **SQLite services:** Leader and client-session code reach SQLite through the `StateSqliteDb`, `EventlogSqliteDb`, `StateHead` and `MaterializationJournal` Effect services ([#1658](https://github.com/livestorejs/livestore/pull/1658)). Thanks [@IGassmann](https://github.com/IGassmann).
 
 - **CI composition:** Aligned the megarepo setup with the automatic CI worktree
   policy and consolidated devenv resolver from

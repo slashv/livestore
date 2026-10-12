@@ -2,14 +2,22 @@ import { assert, expect } from 'vitest'
 
 import {
   BackendIdMismatchError,
+  type ClientSessionLeaderThreadProxy,
+  EventlogSqliteDb,
   type IntentionalShutdownCause,
+  IsOfflineError,
   type MockSyncBackend,
   type MockSyncBackendOptions,
   makeMockSyncBackend,
+  MATERIALIZATION_JOURNAL_META_TABLE,
+  MaterializationJournal,
   NonContiguousBatchError,
   type RejectedPushError,
   ServerAheadError,
+  type SqliteDb,
+  sql,
   StateHead,
+  StateSqliteDb,
   StaleRebaseGenerationError,
   type SyncBackend,
   type SyncOptions,
@@ -25,6 +33,7 @@ import { sqliteDbFactory } from '@livestore/sqlite-wasm/node'
 import { omitUndefineds } from '@livestore/utils'
 import { Vitest } from '@livestore/utils-dev/node-vitest'
 import {
+  Clock,
   Context,
   Deferred,
   Duration,
@@ -42,6 +51,12 @@ import {
 import { PlatformNode } from '@livestore/utils/node'
 
 import { events, schema, tables } from './fixture.ts'
+
+const getStateHead = (dbState: SqliteDb) =>
+  StateHead.make.pipe(
+    Effect.provideService(StateSqliteDb.StateSqliteDb, dbState),
+    Effect.flatMap((stateHead) => stateHead.get),
+  )
 
 /*
 TODO:
@@ -65,9 +80,11 @@ const withTestCtx = (
     mockBackendOptions?: MockSyncBackendOptions
     seedMockBackend?: (mockBackend: MockSyncBackend) => Effect.Effect<void>
     mockBackendOverride?: (mock: MockSyncBackend) => SyncBackend.SyncBackendConstructor
+    timeout?: Duration.Input
   } = {},
 ) =>
   Vitest.makeWithTestCtx({
+    timeout: args.timeout,
     makeLayer: () =>
       Layer.provideMerge(
         LeaderThreadCtxLive({ ...args, syncProcessor: args.testing?.syncProcessor }),
@@ -92,6 +109,241 @@ const seedPaginatedBackendTodos = (mockBackend: MockSyncBackend) => {
 
 /** Verifies: LS.SYS.SYNC.PROC-R01, LS.SYS.SYNC.PROC-R02, LS.SYS.SYNC.PROC-R04, LS.SYS.SYNC.SS-R06, LS.SYS.SYNC-R03, LS.SYS.RT-R10 */
 Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
+  for (const reportsConnectivity of [true, false]) {
+    Vitest.live(
+      reportsConnectivity === true
+        ? 'waits for connectivity and immediately resumes pulls after an outage'
+        : 'uses bounded fallback probes when connection state is stale',
+      (test) => {
+        const disconnect = Deferred.makeUnsafe<void>()
+        let unavailable = false
+        let recovered = false
+        let pullAttempts = 0
+
+        return Effect.gen(function* () {
+          const leader = yield* LeaderThreadCtx
+          const context = yield* TestContext
+          unavailable = true
+          if (reportsConnectivity === true) yield* context.mockSyncBackend.disconnect
+          yield* Deferred.succeed(disconnect, undefined)
+          yield* Effect.sleep('20 seconds')
+          yield* Effect.logInfo('20-second leader outage retry counts', { pullAttempts })
+          expect(pullAttempts).toBeGreaterThan(1)
+          expect(pullAttempts).toBeLessThanOrEqual(12)
+
+          yield* context.mockSyncBackend.advance(
+            context.eventFactory.todoCreated.next({ id: 'after-outage', text: 'Recovered', completed: false }),
+          )
+          unavailable = false
+          recovered = true
+          const connectedAt = yield* Clock.currentTimeMillis
+          if (reportsConnectivity === true) yield* context.mockSyncBackend.connect
+          yield* leader.syncProcessor.syncState.changes.pipe(
+            Stream.takeUntil((state) => state.localHead.global === 1),
+            Stream.runDrain,
+            Effect.timeout(reportsConnectivity === true ? '2 seconds' : '40 seconds'),
+          )
+          const catchUpMs = (yield* Clock.currentTimeMillis) - connectedAt
+          yield* Effect.logInfo('Leader reconnect-to-catch-up latency', { reportsConnectivity, catchUpMs })
+          if (reportsConnectivity === true) expect(catchUpMs).toBeLessThanOrEqual(2_000)
+          expect(
+            (yield* StateSqliteDb.StateSqliteDb)
+              .select<{ id: string }>(tables.todos.asSql().query)
+              .map((row) => row.id),
+          ).toEqual(['after-outage'])
+        }).pipe(
+          withTestCtx({
+            timeout: '60 seconds',
+            syncOptions: { livePull: true },
+            mockBackendOverride: (mock) => () =>
+              Effect.gen(function* () {
+                const backend = yield* mock.makeSyncBackend
+                return {
+                  ...backend,
+                  pull: (cursor, options) =>
+                    options?.live === true
+                      ? Stream.suspend(() => {
+                          pullAttempts++
+                          if (pullAttempts > 1_000) return Stream.die('Pull retry loop exceeded 1,000 attempts')
+                          const offline = new IsOfflineError({ cause: new Error('Test backend unavailable') })
+                          if (unavailable === true) return Stream.fail(offline)
+                          if (recovered === true) return backend.pull(cursor, options)
+                          return backend
+                            .pull(cursor, options)
+                            .pipe(
+                              Stream.take(1),
+                              Stream.concat(
+                                Stream.fromEffect(Effect.andThen(Deferred.await(disconnect), Effect.fail(offline))),
+                              ),
+                            )
+                        })
+                      : backend.pull(cursor, options),
+                }
+              }),
+          })(test),
+        )
+      },
+    )
+  }
+
+  Vitest.live('wakes a stale-true fallback on a later disconnect and reconnect', (test) => {
+    const disconnect = Deferred.makeUnsafe<void>()
+    let unavailable = false
+    let recovered = false
+    let pullAttempts = 0
+
+    return Effect.gen(function* () {
+      const waits = yield* Queue.unbounded<{ isConnected: boolean; fallbackMs: number }>()
+      yield* Effect.gen(function* () {
+        const leader = yield* LeaderThreadCtx
+        const context = yield* TestContext
+        unavailable = true
+        yield* Deferred.succeed(disconnect, undefined)
+
+        // Await real fallback probes; exporter and cleanup fibers share the live clock.
+        let wait = yield* Queue.take(waits)
+        for (let attempt = 1; attempt < 5; attempt++) {
+          expect(wait.isConnected).toBe(true)
+          expect(pullAttempts).toBe(attempt)
+          wait = yield* Queue.take(waits)
+        }
+        expect(pullAttempts).toBe(5)
+        expect(wait.isConnected).toBe(true)
+        expect(wait.fallbackMs).toBe(400)
+        yield* context.mockSyncBackend.disconnect
+        yield* context.mockSyncBackend.advance(
+          context.eventFactory.todoCreated.next({ id: 'after-stale-true', text: 'Recovered', completed: false }),
+        )
+        unavailable = false
+        recovered = true
+        const connectedAt = yield* Clock.currentTimeMillis
+        yield* context.mockSyncBackend.connect
+        // The live deadline is shorter than the pending fallback, so timer-only retry cannot pass.
+        const result = yield* leader.syncProcessor.syncState.changes.pipe(
+          Stream.takeUntil((state) => state.localHead.global === 1),
+          Stream.runDrain,
+          Effect.andThen(Clock.currentTimeMillis),
+          Effect.timeout('200 millis'),
+          Effect.result,
+        )
+        expect(Result.isSuccess(result)).toBe(true)
+        if (Result.isSuccess(result) === true) expect(result.success - connectedAt).toBeLessThanOrEqual(200)
+        expect(
+          (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query).map((row) => row.id),
+        ).toEqual(['after-stale-true'])
+      }).pipe(
+        withTestCtx({
+          timeout: '10 seconds',
+          syncOptions: { livePull: true },
+          testing: {
+            syncProcessor: {
+              delays: { backendPullReconnect: (fallbackMs) => Math.min(fallbackMs / 20, 400) },
+              hooks: {
+                backendPullReconnectWait: (state) => Queue.offer(waits, state).pipe(Effect.as(undefined)),
+              },
+            },
+          },
+          mockBackendOverride: (mock) => () =>
+            Effect.gen(function* () {
+              const backend = yield* mock.makeSyncBackend
+              return {
+                ...backend,
+                pull: (cursor, options) =>
+                  options?.live === true
+                    ? Stream.suspend(() => {
+                        pullAttempts++
+                        if (pullAttempts > 1_000) return Stream.die('Pull retry loop exceeded 1,000 attempts')
+                        const offline = new IsOfflineError({ cause: new Error('Test backend unavailable') })
+                        if (unavailable === true) return Stream.fail(offline)
+                        if (recovered === true) return backend.pull(cursor, options)
+                        return backend
+                          .pull(cursor, options)
+                          .pipe(
+                            Stream.take(1),
+                            Stream.concat(
+                              Stream.fromEffect(Effect.andThen(Deferred.await(disconnect), Effect.fail(offline))),
+                            ),
+                          )
+                      })
+                    : backend.pull(cursor, options),
+              }
+            }),
+        })(test),
+      )
+    })
+  })
+
+  Vitest.live('resets offline backoff after a healthy fallback pull', (test) => {
+    let disconnect = Deferred.makeUnsafe<void>()
+    let unavailable = false
+    return Effect.gen(function* () {
+      const waits = yield* Queue.unbounded<{ isConnected: boolean; fallbackMs: number }>()
+      yield* Effect.gen(function* () {
+        const leader = yield* LeaderThreadCtx
+        const context = yield* TestContext
+        unavailable = true
+        yield* Deferred.succeed(disconnect, undefined)
+        for (let attempt = 0; attempt < 3; attempt++) {
+          expect((yield* Queue.take(waits)).isConnected).toBe(true)
+        }
+        // Keep connectivity stale-true: recovery must be discovered by the fallback timer.
+        disconnect = Deferred.makeUnsafe<void>()
+        yield* context.mockSyncBackend.advance(
+          context.eventFactory.todoCreated.next({ id: 'fallback-recovery', text: 'Recovered', completed: false }),
+        )
+        unavailable = false
+        yield* leader.syncProcessor.syncState.changes.pipe(
+          Stream.takeUntil((state) => state.localHead.global === 1),
+          Stream.runDrain,
+        )
+        unavailable = true
+        yield* Deferred.succeed(disconnect, undefined)
+        const nextWait = yield* Queue.take(waits)
+        expect(nextWait.isConnected).toBe(true)
+        // The test transform divides production's jittered one-second delay by twenty.
+        expect(nextWait.fallbackMs).toBeGreaterThanOrEqual(40)
+        expect(nextWait.fallbackMs).toBeLessThanOrEqual(60)
+      }).pipe(
+        withTestCtx({
+          timeout: '10 seconds',
+          syncOptions: { livePull: true },
+          testing: {
+            syncProcessor: {
+              delays: { backendPullReconnect: (fallbackMs) => Math.min(fallbackMs / 20, 400) },
+              hooks: {
+                backendPullReconnectWait: (state) => Queue.offer(waits, state).pipe(Effect.as(undefined)),
+              },
+            },
+          },
+          mockBackendOverride: (mock) => () =>
+            Effect.gen(function* () {
+              const backend = yield* mock.makeSyncBackend
+              return {
+                ...backend,
+                pull: (cursor, options) =>
+                  options?.live === true
+                    ? Stream.suspend(() => {
+                        const offline = new IsOfflineError({ cause: new Error('Test backend unavailable') })
+                        if (unavailable === true) return Stream.fail(offline)
+                        const currentDisconnect = disconnect
+                        return backend
+                          .pull(cursor, options)
+                          .pipe(
+                            Stream.merge(
+                              Stream.fromEffect(
+                                Effect.andThen(Deferred.await(currentDisconnect), Effect.fail(offline)),
+                              ),
+                            ),
+                          )
+                      })
+                    : backend.pull(cursor, options),
+              }
+            }),
+        })(test),
+      )
+    })
+  })
+
   Vitest.live('sync', (test) =>
     Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx
@@ -109,14 +361,14 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         Stream.runDrain,
       )
 
-      const result = leaderThreadCtx.dbState.select(tables.todos.asSql().query)
+      const result = (yield* StateSqliteDb.StateSqliteDb).select(tables.todos.asSql().query)
       const syncState = yield* leaderThreadCtx.syncProcessor.syncState.get
 
       expect(result).toEqual([
         { id: '1', text: 't1', completed: 0, deletedAt: null },
         { id: '2', text: 't2', completed: 0, deletedAt: null },
       ])
-      expect(yield* StateHead.make({ dbState: leaderThreadCtx.dbState }).get).toEqual(syncState.localHead)
+      expect(yield* getStateHead(yield* StateSqliteDb.StateSqliteDb)).toEqual(syncState.localHead)
 
       yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(2), Stream.runDrain)
     }).pipe(withTestCtx()(test)),
@@ -126,7 +378,6 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
     Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx
       const testContext = yield* TestContext
-      const sourceSessionChangeset = Uint8Array.from([255])
 
       yield* testContext.mockSyncBackend.disconnect
 
@@ -135,11 +386,6 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
           testContext.eventFactory.todoCreated.next({ id: 'local', text: 'local', completed: false }),
         ),
       })
-      localEvent.meta.sessionChangeset = {
-        _tag: 'sessionChangeset',
-        data: sourceSessionChangeset,
-        debug: undefined,
-      }
 
       yield* leaderThreadCtx.syncProcessor.push([localEvent])
 
@@ -148,12 +394,65 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       const retainedEvent = (yield* leaderThreadCtx.syncProcessor.syncState.get).pending[0]!
       const publishedEvent = downstreamItem.payload.newEvents[0]!
-      assert(retainedEvent.meta.sessionChangeset._tag === 'sessionChangeset')
-      assert(publishedEvent.meta.sessionChangeset._tag === 'sessionChangeset')
 
-      expect([...retainedEvent.meta.sessionChangeset.data]).toEqual([...publishedEvent.meta.sessionChangeset.data])
-      expect([...retainedEvent.meta.sessionChangeset.data]).not.toEqual([...sourceSessionChangeset])
+      expect(retainedEvent.meta.materializerHashLeader._tag).toEqual('Some')
       expect(retainedEvent.meta.materializerHashLeader).toEqual(publishedEvent.meta.materializerHashLeader)
+
+      const journalChangeset = (yield* StateSqliteDb.StateSqliteDb).select<{
+        changeset: Uint8Array<ArrayBuffer> | null
+      }>(
+        sql`SELECT changeset FROM ${MATERIALIZATION_JOURNAL_META_TABLE}
+            WHERE seqNumGlobal = ${retainedEvent.seqNum.global}
+              AND seqNumClient = ${retainedEvent.seqNum.client}
+              AND seqNumRebaseGeneration = ${retainedEvent.seqNum.rebaseGeneration}`,
+      )[0]?.changeset
+      expect(journalChangeset).toBeInstanceOf(Uint8Array)
+    }).pipe(withTestCtx()(test)),
+  )
+
+  Vitest.live('records explicit no-op journal rows for non-mutating materializations', (test) =>
+    Effect.gen(function* () {
+      const leaderThreadCtx = yield* LeaderThreadCtx
+      const testContext = yield* TestContext
+      yield* testContext.mockSyncBackend.disconnect
+
+      yield* testContext.pushEncoded(testContext.eventFactory.todoCompleted.next({ id: 'missing' }))
+
+      const downstreamItem = yield* Queue.take(testContext.pullQueue)
+      assert(downstreamItem.payload._tag === 'upstream-advance')
+      const pendingEvent = downstreamItem.payload.newEvents[0]!
+      const changeset = (yield* StateSqliteDb.StateSqliteDb).select<{
+        changeset: Uint8Array<ArrayBuffer> | null
+      }>(
+        sql`SELECT changeset FROM ${MATERIALIZATION_JOURNAL_META_TABLE}
+            WHERE seqNumGlobal = ${pendingEvent.seqNum.global}
+              AND seqNumClient = ${pendingEvent.seqNum.client}
+              AND seqNumRebaseGeneration = ${pendingEvent.seqNum.rebaseGeneration}`,
+      )[0]?.changeset
+      expect(changeset).toBeNull()
+    }).pipe(withTestCtx()(test)),
+  )
+
+  Vitest.live('prunes materialization journal rows after confirmed events materialize', (test) =>
+    Effect.gen(function* () {
+      const leaderThreadCtx = yield* LeaderThreadCtx
+      const testContext = yield* TestContext
+
+      yield* testContext.pushEncoded(
+        testContext.eventFactory.todoCreated.next({ id: 'confirmed-leader', text: 'confirmed', completed: false }),
+      )
+      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain)
+      yield* leaderThreadCtx.syncProcessor.syncState.changes.pipe(
+        Stream.filter((state) => state.pending.length === 0),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.timeout('5 seconds'),
+      )
+
+      const remainingJournalRows = (yield* StateSqliteDb.StateSqliteDb).select<{ count: number }>(
+        sql`SELECT COUNT(*) AS count FROM ${MATERIALIZATION_JOURNAL_META_TABLE}`,
+      )[0]!.count
+      expect(remainingJournalRows).toEqual(0)
     }).pipe(withTestCtx()(test)),
   )
 
@@ -192,7 +491,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain, Effect.timeout(5000))
 
-      const rows = leaderThreadCtx.dbState.select<{ id: string }>(tables.todos.asSql().query)
+      const rows = (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query)
       expect(rows.map((row) => row.id).toSorted()).toEqual(['backend-1', 'backend-2', 'backend-3', 'local-after-pull'])
     }).pipe(
       withTestCtx({
@@ -243,7 +542,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       yield* leaderThreadCtx.syncProcessor.push([localEvent])
 
-      const rows = leaderThreadCtx.dbState.select<{ id: string }>(tables.todos.asSql().query)
+      const rows = (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query)
       expect(rows.map((row) => row.id).toSorted()).toEqual(['backend-1', 'local-after-pull-failure'])
     }).pipe(
       withTestCtx({
@@ -308,7 +607,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       yield* leaderThreadCtx.syncProcessor.push([localEvent])
 
-      const rows = leaderThreadCtx.dbState.select<{ id: string }>(tables.todos.asSql().query)
+      const rows = (yield* StateSqliteDb.StateSqliteDb).select<{ id: string }>(tables.todos.asSql().query)
       expect(rows.map((row) => row.id).toSorted()).toEqual(['backend-1', 'local-after-pull-interrupt'])
     }).pipe(
       withTestCtx({
@@ -398,7 +697,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       yield* Effect.sleep(20).pipe(Effect.withSpan('@livestore/common-tests:sync:sleep'))
 
-      const result = leaderThreadCtx.dbState.select(tables.todos.asSql().query)
+      const result = (yield* StateSqliteDb.StateSqliteDb).select(tables.todos.asSql().query)
       expect(result).toEqual([{ id: '2', text: 't2', completed: 0, deletedAt: null }])
 
       // This will cause a rebase given mismatch: local insert(id: '2') vs remote insert(id: '1')
@@ -406,19 +705,63 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
 
       yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain)
 
-      const rebasedResult = leaderThreadCtx.dbState.select(tables.todos.asSql().query)
+      const rebasedResult = (yield* StateSqliteDb.StateSqliteDb).select(tables.todos.asSql().query)
       expect(rebasedResult).toEqual([
         { id: '1', text: 't1', completed: 0, deletedAt: null },
         { id: '2', text: 't2', completed: 0, deletedAt: null },
       ])
 
       const syncState = yield* leaderThreadCtx.syncProcessor.syncState.get
-      expect(yield* StateHead.make({ dbState: leaderThreadCtx.dbState }).get).toEqual(syncState.localHead)
+      expect(yield* getStateHead(yield* StateSqliteDb.StateSqliteDb)).toEqual(syncState.localHead)
 
       const queueResults = yield* Queue.clear(testContext.pullQueue)
       expect(queueResults[0]!.payload._tag).toEqual('upstream-advance')
       expect(queueResults[1]!.payload._tag).toEqual('upstream-rebase')
     }).pipe(withTestCtx()(test)),
+  )
+
+  Vitest.live('keeps rollback state, journal, and StateHead atomic when head persistence fails', (test) =>
+    Effect.gen(function* () {
+      const leaderThreadCtx = yield* LeaderThreadCtx
+      const testContext = yield* TestContext
+      const backendFactory = makeEventFactory({
+        client: EventFactory.clientIdentity('mock-backend', 'static-session-id'),
+      })
+
+      yield* testContext.mockSyncBackend.disconnect
+      yield* testContext.mockSyncBackend.advance(
+        backendFactory.todoCreated.next({ id: 'remote', text: 'remote', completed: false }),
+      )
+      yield* testContext.pushEncoded(
+        testContext.eventFactory.todoCreated.next({ id: 'local', text: 'local', completed: false }),
+      )
+
+      const dbState = yield* StateSqliteDb.StateSqliteDb
+      const headBeforeRollback = yield* getStateHead(dbState)
+      expect(dbState.select<{ id: string }>(tables.todos.asSql().query).map(({ id }) => id)).toEqual(['local'])
+
+      const SQLITE_OK = 0
+      const SQLITE_DENY = 1
+      const SQLITE_INSERT = 18
+      testContext.sqlite3.set_authorizer(
+        dbState.metadata.dbPointer,
+        (_userData, actionCode, tableName) =>
+          actionCode === SQLITE_INSERT && tableName === '__livestore_state_head' ? SQLITE_DENY : SQLITE_OK,
+        undefined,
+      )
+
+      yield* testContext.mockSyncBackend.connect
+      yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain, Effect.timeout(3000))
+      const shutdownError = yield* Deferred.await(testContext.shutdownDeferred).pipe(Effect.flip, Effect.timeout(3000))
+
+      expect(shutdownError._tag).toEqual('MaterializeError')
+      expect(yield* getStateHead(dbState)).toEqual(headBeforeRollback)
+      expect(dbState.select<{ id: string }>(tables.todos.asSql().query).map(({ id }) => id)).toEqual(['local'])
+      expect(
+        dbState.select<{ count: number }>(sql`SELECT COUNT(*) AS count FROM ${MATERIALIZATION_JOURNAL_META_TABLE}`)[0]!
+          .count,
+      ).toEqual(1)
+    }).pipe(withTestCtx({ syncOptions: { onSyncError: 'shutdown' }, captureShutdown: true })(test)),
   )
 
   Vitest.live('many local pushes', (test) =>
@@ -443,7 +786,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
         Stream.runDrain,
       )
 
-      const result = leaderThreadCtx.dbState.select(tables.todos.asSql().query)
+      const result = (yield* StateSqliteDb.StateSqliteDb).select(tables.todos.asSql().query)
       expect(result.length).toEqual(numberOfPushes)
 
       const queueResults = yield* Queue.clear(testContext.pullQueue)
@@ -766,7 +1109,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(4), Stream.runDrain, Effect.timeout(7000))
 
       // Verify they have been materialized locally as well
-      const result = leaderThreadCtx.dbState.select(tables.todos.asSql().query)
+      const result = (yield* StateSqliteDb.StateSqliteDb).select(tables.todos.asSql().query)
       expect(result.length).toEqual(4)
     }).pipe(
       withTestCtx({ params: { backendPushBatchSize: 2 }, syncOptions: { livePull: false, onSyncError: 'ignore' } })(
@@ -821,7 +1164,9 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       yield* testContext.mockSyncBackend.pushedEvents.pipe(Stream.take(1), Stream.runDrain, Effect.timeout(3000))
 
       // Verify data exists in eventlog before the error
-      const beforeRows = leaderThreadCtx.dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
+      const beforeRows = (yield* EventlogSqliteDb.EventlogSqliteDb).select<{ name: string }>(
+        `SELECT name FROM eventlog`,
+      )
       expect(beforeRows.length).toBeGreaterThan(0)
 
       // Fail the next push due to backend id mismatch
@@ -839,12 +1184,11 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       expect((shutdownMsg as IntentionalShutdownCause).reason).toEqual('backend-id-mismatch')
 
       // Verify databases were cleared
-      const afterEventlogRows = leaderThreadCtx.dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
+      const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
+      const afterEventlogRows = dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
       expect(afterEventlogRows.length).toBe(0)
 
-      const afterSyncStatusRows = leaderThreadCtx.dbEventlog.select<{ head: number }>(
-        `SELECT head FROM __livestore_sync_status`,
-      )
+      const afterSyncStatusRows = dbEventlog.select<{ head: number }>(`SELECT head FROM __livestore_sync_status`)
       expect(afterSyncStatusRows.length).toBe(0)
     }).pipe(
       withTestCtx({ syncOptions: { onBackendIdMismatch: 'reset', livePull: false }, captureShutdown: true })(test),
@@ -868,7 +1212,9 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       )
 
       // Verify data exists
-      const beforeRows = leaderThreadCtx.dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
+      const beforeRows = (yield* EventlogSqliteDb.EventlogSqliteDb).select<{ name: string }>(
+        `SELECT name FROM eventlog`,
+      )
       expect(beforeRows.length).toBeGreaterThan(0)
 
       // Fail the next push due to backend id mismatch
@@ -885,7 +1231,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       expect(shutdownMsg._tag).toEqual('BackendIdMismatchError')
 
       // Verify databases were NOT cleared
-      const afterRows = leaderThreadCtx.dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
+      const afterRows = (yield* EventlogSqliteDb.EventlogSqliteDb).select<{ name: string }>(`SELECT name FROM eventlog`)
       expect(afterRows.length).toBeGreaterThan(0)
     }).pipe(
       withTestCtx({ syncOptions: { onBackendIdMismatch: 'shutdown', livePull: false }, captureShutdown: true })(test),
@@ -920,7 +1266,7 @@ Vitest.describe.concurrent('LeaderSyncProcessor', { timeout: 60000 }, () => {
       yield* Effect.sleep(Duration.millis(500))
 
       // Verify data still exists (not cleared)
-      const afterRows = leaderThreadCtx.dbEventlog.select<{ name: string }>(`SELECT name FROM eventlog`)
+      const afterRows = (yield* EventlogSqliteDb.EventlogSqliteDb).select<{ name: string }>(`SELECT name FROM eventlog`)
       expect(afterRows.length).toBeGreaterThan(0)
 
       // Verify no shutdown happened (deferred should still be pending)
@@ -959,8 +1305,9 @@ class TestContext extends Context.Service<
   TestContext,
   {
     mockSyncBackend: MockSyncBackend
+    sqlite3: Awaited<ReturnType<typeof loadSqlite3Wasm>>
     shutdownDeferred: Deferred.Deferred<void, typeof Shutdown.All.Type>
-    pullQueue: Queue.Queue<{ payload: typeof SyncState.PayloadUpstream.Type }>
+    pullQueue: Queue.Queue<typeof ClientSessionLeaderThreadProxy.PullItem.Type>
     eventFactory: LeaderEventFactory
     /** Equivalent to the ClientSessionSyncProcessor calling `.push` on the LeaderThreadCtx */
     pushEncoded: (
@@ -1005,6 +1352,10 @@ const LeaderThreadCtxLive = ({
 
     const dbState = yield* makeSqliteDb({ _tag: 'in-memory' })
     const dbEventlog = yield* makeSqliteDb({ _tag: 'in-memory' })
+    const sqliteDbLayer = Layer.mergeAll(StateSqliteDb.layer(dbState), EventlogSqliteDb.layer(dbEventlog))
+    const stateServicesLayer = Layer.mergeAll(StateHead.layer, MaterializationJournal.layer).pipe(
+      Layer.provide(sqliteDbLayer),
+    )
     const leaderContextLayer = makeLeaderThreadLayer({
       schema,
       storeId: 'test',
@@ -1022,15 +1373,15 @@ const LeaderThreadCtxLive = ({
           initialSyncOptions: syncOptions?.initialSyncOptions,
         }),
       },
-      dbState,
-      dbEventlog,
       devtoolsOptions: { enabled: false },
       shutdownChannel: shutdownProxy?.webChannel ?? (yield* WebChannel.noopChannel<any, any>()),
       testing: {
         ...omitUndefineds({ syncProcessor }),
       },
       ...omitUndefineds({ params }),
-    }).pipe(Layer.provide(StateHead.layer({ dbState })), Layer.provide(FetchHttpClient.layer))
+    }).pipe(Layer.provide(Layer.mergeAll(sqliteDbLayer, stateServicesLayer, FetchHttpClient.layer)))
+
+    const runtimeLayer = Layer.mergeAll(leaderContextLayer, sqliteDbLayer)
 
     const testContextLayer = Effect.gen(function* () {
       const leaderThreadCtx = yield* LeaderThreadCtx
@@ -1066,13 +1417,14 @@ const LeaderThreadCtxLive = ({
         TestContext,
         TestContext.of({
           mockSyncBackend,
+          sqlite3,
           shutdownDeferred,
           pullQueue,
           eventFactory,
           pushEncoded,
         }),
       )
-    }).pipe(Layer.unwrap, Layer.provide(leaderContextLayer))
+    }).pipe(Layer.unwrap, Layer.provide(runtimeLayer))
 
-    return leaderContextLayer.pipe(Layer.merge(testContextLayer))
+    return runtimeLayer.pipe(Layer.merge(testContextLayer))
   }).pipe(Layer.unwrap)

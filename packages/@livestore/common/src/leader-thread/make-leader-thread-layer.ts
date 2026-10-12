@@ -25,9 +25,12 @@ import {
 } from '../adapter-types.ts'
 import type { MigrationsReport } from '../defs.ts'
 import type * as Devtools from '../devtools/mod.ts'
+import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
+import type * as MaterializationJournal from '../MaterializationJournal.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { EventSequenceNumber, LiveStoreEvent, SystemTables } from '../schema/mod.ts'
 import type * as StateHead from '../StateHead.ts'
+import * as StateSqliteDb from '../StateSqliteDb.ts'
 import type { SyncBackend, SyncOptions } from '../sync/sync.ts'
 import { SyncState } from '../sync/syncstate.ts'
 import { sql } from '../util.ts'
@@ -43,7 +46,6 @@ import type {
   DevtoolsOptions,
   InitialBlockingSyncContext,
   InitialSyncOptions,
-  LeaderSqliteDb,
   ShutdownState,
 } from './types.ts'
 import { LeaderThreadCtx } from './types.ts'
@@ -56,8 +58,6 @@ export interface MakeLeaderThreadLayerParams {
   schema: LiveStoreSchema
   makeSqliteDb: MakeSqliteDb
   syncOptions: SyncOptions | undefined
-  dbState: LeaderSqliteDb
-  dbEventlog: LeaderSqliteDb
   devtoolsOptions: DevtoolsOptions
   shutdownChannel: ShutdownChannel
   /** Boot warning to emit (e.g., OPFS unavailable in private browsing) */
@@ -71,9 +71,11 @@ export interface MakeLeaderThreadLayerParams {
     syncProcessor?: {
       delays?: {
         localPushProcessing?: Effect.Effect<void>
+        backendPullReconnect?: (fallbackMs: number) => number
       }
       hooks?: {
         localPushAdmitted?: (events: ReadonlyArray<LiveStoreEvent.Client.EncodedWithMeta>) => Effect.Effect<void>
+        backendPullReconnectWait?: (state: { isConnected: boolean; fallbackMs: number }) => Effect.Effect<void>
       }
     }
   }
@@ -87,8 +89,6 @@ export const makeLeaderThreadLayer = ({
   syncPayloadEncoded,
   makeSqliteDb,
   syncOptions,
-  dbState,
-  dbEventlog,
   devtoolsOptions,
   shutdownChannel,
   bootWarning,
@@ -97,9 +97,16 @@ export const makeLeaderThreadLayer = ({
 }: MakeLeaderThreadLayerParams): Layer.Layer<
   LeaderThreadCtx,
   UnknownError,
-  Scope.Scope | HttpClient.HttpClient | StateHead.StateHead
+  | EventlogSqliteDb.EventlogSqliteDb
+  | HttpClient.HttpClient
+  | MaterializationJournal.MaterializationJournal
+  | Scope.Scope
+  | StateHead.StateHead
+  | StateSqliteDb.StateSqliteDb
 > =>
   Effect.gen(function* () {
+    const dbState = yield* StateSqliteDb.StateSqliteDb
+    const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
     const syncPayloadDecoded =
       syncPayloadEncoded === undefined ? undefined : yield* Schema.decodeEffect(syncPayloadSchema)(syncPayloadEncoded)
 
@@ -178,15 +185,13 @@ export const makeLeaderThreadLayer = ({
       bootStatusQueue,
     })
 
-    const materializeEvent = yield* makeMaterializeEvent({ schema, dbState, dbEventlog })
+    const materializeEvent = yield* makeMaterializeEvent({ schema })
 
     // Recreate state database if needed BEFORE creating sync processor
     // This ensures all system tables exist before any queries are made
     const { migrationsReport } =
       stateNeedsRebuild === true
         ? yield* recreateDb({
-            dbState,
-            dbEventlog,
             schema,
             bootStatusQueue,
             materializeEvent,
@@ -208,15 +213,13 @@ export const makeLeaderThreadLayer = ({
     const syncProcessor = yield* LeaderSyncProcessor.make({
       schema,
       runtime: {
-        dbState,
-        dbEventlog,
         materializeEvent,
         syncBackend,
         shutdownChannel,
         devtoolsLatch: devtoolsContext.enabled === true ? devtoolsContext.syncBackendLatch : undefined,
         span,
       },
-      initialSyncState: getInitialSyncState({ dbEventlog, dbState, dbEventlogMissing }),
+      initialSyncState: getInitialSyncState({ dbEventlog, dbEventlogMissing }),
       initialBlockingSyncContext,
       onError: syncOptions?.onSyncError ?? 'ignore',
       onBackendIdMismatch: syncOptions?.onBackendIdMismatch ?? 'reset',
@@ -244,8 +247,6 @@ export const makeLeaderThreadLayer = ({
       bootStatusQueue,
       storeId,
       clientId,
-      dbState,
-      dbEventlog,
       makeSqliteDb,
       eventSchema: LiveStoreEvent.Client.makeSchema(schema),
       shutdownStateSubRef: yield* SubscriptionRef.make<ShutdownState>('running'),
@@ -287,11 +288,9 @@ const hasEventlogTables = (db: SqliteDb) => {
 
 const getInitialSyncState = ({
   dbEventlog,
-  dbState,
   dbEventlogMissing,
 }: {
   dbEventlog: SqliteDb
-  dbState: SqliteDb
   dbEventlogMissing: boolean
 }) => {
   const initialBackendHead =
@@ -318,7 +317,6 @@ const getInitialSyncState = ({
         ? []
         : Eventlog.getEventsSince({
             dbEventlog,
-            dbState,
             since: {
               global: initialBackendHead,
               client: EventSequenceNumber.Client.DEFAULT,
@@ -390,7 +388,11 @@ const bootLeaderThread = ({
 }): Effect.Effect<
   LeaderThreadCtx['Service']['initialState'],
   UnknownError | MaterializerHashMismatchError,
-  LeaderThreadCtx | Scope.Scope | HttpClient.HttpClient
+  | EventlogSqliteDb.EventlogSqliteDb
+  | LeaderThreadCtx
+  | Scope.Scope
+  | HttpClient.HttpClient
+  | StateSqliteDb.StateSqliteDb
 > =>
   Effect.gen(function* () {
     const { bootStatusQueue, syncProcessor } = yield* LeaderThreadCtx

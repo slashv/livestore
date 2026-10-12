@@ -9,9 +9,6 @@ exports[`useClientDocument > otel > should update the data based on component ke
   },
   "children": [
     {
-      "_name": "makeClientSessionSyncProcessor",
-    },
-    {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "
@@ -24,13 +21,15 @@ exports[`useClientDocument > otel > should update the data based on component ke
       },
     },
     {
+      "_name": "makeClientSessionSyncProcessor",
+    },
+    {
       "_name": "client-session-sync-processor:boot",
       "children": [
         {
           "_name": "client-session-sync-processor:pull",
           "attributes": {
-            "span.label": "⚠︎ Interrupted",
-            "status.interrupted": true,
+            "effect.fiber.interrupted": true,
           },
         },
         {
@@ -38,8 +37,7 @@ exports[`useClientDocument > otel > should update the data based on component ke
           "attributes": {
             "batch": "undefined",
             "batchSize": 1,
-            "span.label": "⚠︎ Interrupted",
-            "status.interrupted": true,
+            "effect.fiber.interrupted": true,
           },
         },
       ],
@@ -186,9 +184,9 @@ exports[`useClientDocument > otel > should update the data based on component ke
     "_name": "LiveStore:commit",
     "attributes": {
       "livestore.commitLabel": "UserInfo.set:u1",
-      "livestore.eventTags": "[
-  "UserInfoSet"
-]",
+      "livestore.eventTags": [
+        "UserInfoSet",
+      ],
       "livestore.eventsCount": 1,
     },
     "children": [
@@ -212,14 +210,27 @@ exports[`useClientDocument > otel > should update the data based on component ke
                 },
               },
               {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "0, 1, 2",
+                  "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                  "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                },
+              },
+              {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "$seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset",
+                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                },
+              },
+              {
                 "_name": "@livestore/common:execSql",
                 "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
+                  "bindValueKeys": "$id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration",
                   "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                   "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                 },
@@ -243,9 +254,9 @@ exports[`useClientDocument > otel > should update the data based on component ke
   {
     "_name": "LiveStore:commit",
     "attributes": {
-      "livestore.eventTags": "[
-  "UserInfoSet"
-]",
+      "livestore.eventTags": [
+        "UserInfoSet",
+      ],
       "livestore.eventsCount": 1,
     },
     "children": [
@@ -269,14 +280,27 @@ exports[`useClientDocument > otel > should update the data based on component ke
                 },
               },
               {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "0, 1, 2",
+                  "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                  "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                },
+              },
+              {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "$seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset",
+                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                },
+              },
+              {
                 "_name": "@livestore/common:execSql",
                 "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
+                  "bindValueKeys": "$id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration",
                   "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                   "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                 },
@@ -309,9 +333,6 @@ exports[`useClientDocument > otel > should update the data based on component ke
   },
   "children": [
     {
-      "_name": "makeClientSessionSyncProcessor",
-    },
-    {
       "_name": "livestore.in-memory-db:execute",
       "attributes": {
         "sql.query": "
@@ -324,13 +345,15 @@ exports[`useClientDocument > otel > should update the data based on component ke
       },
     },
     {
+      "_name": "makeClientSessionSyncProcessor",
+    },
+    {
       "_name": "client-session-sync-processor:boot",
       "children": [
         {
           "_name": "client-session-sync-processor:pull",
           "attributes": {
-            "span.label": "⚠︎ Interrupted",
-            "status.interrupted": true,
+            "effect.fiber.interrupted": true,
           },
         },
         {
@@ -338,8 +361,7 @@ exports[`useClientDocument > otel > should update the data based on component ke
           "attributes": {
             "batch": "undefined",
             "batchSize": 1,
-            "span.label": "⚠︎ Interrupted",
-            "status.interrupted": true,
+            "effect.fiber.interrupted": true,
           },
         },
       ],
@@ -424,9 +446,9 @@ exports[`useClientDocument > otel > should update the data based on component ke
     "_name": "LiveStore:commit",
     "attributes": {
       "livestore.commitLabel": "UserInfo.set:u1",
-      "livestore.eventTags": "[
-  "UserInfoSet"
-]",
+      "livestore.eventTags": [
+        "UserInfoSet",
+      ],
       "livestore.eventsCount": 1,
     },
     "children": [
@@ -450,14 +472,27 @@ exports[`useClientDocument > otel > should update the data based on component ke
                 },
               },
               {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "0, 1, 2",
+                  "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                  "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                },
+              },
+              {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "$seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset",
+                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                },
+              },
+              {
                 "_name": "@livestore/common:execSql",
                 "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
+                  "bindValueKeys": "$id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration",
                   "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                   "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                 },
@@ -481,9 +516,9 @@ exports[`useClientDocument > otel > should update the data based on component ke
   {
     "_name": "LiveStore:commit",
     "attributes": {
-      "livestore.eventTags": "[
-  "UserInfoSet"
-]",
+      "livestore.eventTags": [
+        "UserInfoSet",
+      ],
       "livestore.eventsCount": 1,
     },
     "children": [
@@ -507,14 +542,27 @@ exports[`useClientDocument > otel > should update the data based on component ke
                 },
               },
               {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "0, 1, 2",
+                  "span.label": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                  "sql": "DELETE FROM __livestore_materialization_journal
+                            WHERE (seqNumGlobal, seqNumClient, seqNumRebaseGeneration) IN ((?, ?, ?))",
+                },
+              },
+              {
+                "_name": "@livestore/common:execSqlPrepared",
+                "attributes": {
+                  "bindValueKeys": "$seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset",
+                  "span.label": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                  "sql": "INSERT INTO __livestore_materialization_journal (seqNumGlobal, seqNumClient, seqNumRebaseGeneration, changeset) VALUES ($seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration, $changeset)",
+                },
+              },
+              {
                 "_name": "@livestore/common:execSql",
                 "attributes": {
-                  "bindValueKeys": "[
-  "$id",
-  "$seqNumGlobal",
-  "$seqNumClient",
-  "$seqNumRebaseGeneration"
-]",
+                  "bindValueKeys": "$id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration",
                   "span.label": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                   "sql": "INSERT OR REPLACE INTO __livestore_state_head (id, seqNumGlobal, seqNumClient, seqNumRebaseGeneration) VALUES ($id, $seqNumGlobal, $seqNumClient, $seqNumRebaseGeneration)",
                 },
