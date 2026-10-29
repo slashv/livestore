@@ -51,9 +51,11 @@ behind a lag horizon, with a snapshot or reset fallback for lagging readers.
 6. **Hosting.** On Cloudflare, the sync Durable Object stores manifests next
    to the log (so it can enforce `backendId` and monotonic positions), blobs
    live in R2, and the checkpointer runs as its own Durable Object per
-   `(storeId, key)`. Node and tests use the same checkpointer loop with an
-   in-memory or file-system sink, which is also the fallback for stores too
-   large for a Durable Object (LS.SYS.SYNC.SNAP-DQ3).
+   `(storeId, key)`. Node and tests use the same checkpointer loop
+   (`makeCheckpointer`) with any sink; the repo ships the in-memory one.
+   (At decision time a Node checkpointer was also the planned fallback for
+   stores too large for a Durable Object; the streamed Durable Object export
+   later removed that need, see LS.SYS.SYNC.SNAP-DQ3.)
 7. **Placement.** The contract lives under `03-sync/` because its center is a
    sync-boundary concern: where a client's eventlog and backend cursor begin.
    Leader boot integration and the Cloudflare checkpointer host are realized

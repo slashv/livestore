@@ -25,7 +25,7 @@ LiveStore keeps the full event history. The sync backend's eventlog is never com
 ## How it works
 
 1. **Publishing.** The checkpointer is an ordinary LiveStore client of the store. It pulls new events but never commits or pushes. When replaying the events since the last snapshot would cost more than a fixed share of downloading a snapshot, it exports its state database and publishes it. It uploads the blob first and then updates a small manifest that points to it. A store without new events publishes nothing.
-2. **Booting.** On startup, a client with an empty local eventlog asks for the manifest that matches its schema, downloads the snapshot, and checks its size and SHA-256 hash. It then installs the snapshot as its state database and continues syncing from the snapshot's position.
+2. **Booting.** On startup, a client with an empty local eventlog asks for the manifest that matches its schema, downloads the snapshot, and checks its size and SHA-256 hash and that it holds complete state at the manifest's position. It then installs the snapshot as its state database and continues syncing from the snapshot's position. The install is crash-safe: if the process stops halfway, the next start cleans up and either retries or rebuilds.
 3. **Falling back.** If no snapshot exists, or the download fails, times out, or doesn't verify, the client logs the reason and boots the usual way by replaying the full history. A snapshot problem never prevents a boot.
 
 A client that already has local data keeps using it and never replaces it with a snapshot.
@@ -39,7 +39,7 @@ A snapshot can be installed only by clients whose schema matches the checkpointe
 - the same LiveStore storage format version,
 - and the same sync backend identity. Snapshots from before a [backend reset](/building-with-livestore/syncing#backend-reset-detection) are ignored.
 
-When you deploy a schema change, run a checkpointer for the new schema as well. Until it has published, new clients on the new schema fall back to a full replay.
+When you deploy a schema change, run a checkpointer for the new schema as well, and keep the old one running while clients on the old schema remain. Until the new checkpointer has published, new clients on the new schema fall back to a full replay. On Cloudflare, a checkpointer class created with `makeCheckpointerDurableObject` is bound to the schema you pass it, and the sync Durable Object wakes one checkpointer instance per key listed in `snapshotKeys`.
 
 ## Changing materializers
 
@@ -54,7 +54,7 @@ This convention keeps every client consistent, whether it booted from a snapshot
 
 - **Local history starts at the snapshot.** A client that booted from a snapshot only has the events after the snapshot locally. `store.events`, the events stream and the devtools eventlog view begin there.
 - **State schema changes need the network.** If such a client later needs to rebuild its state, for example after you change a table, it either installs a snapshot for the new schema or downloads the missing history from the sync backend. If it is offline at that moment, boot fails with a clear error instead of producing incorrect state.
-- **Snapshot size.** Exporting and installing a snapshot works on the whole state database. On Cloudflare the checkpointer streams snapshots from Durable Object storage to R2, so its memory stays flat; clients still load the snapshot into memory to install it, which limits practical state size to well under the 2 GB WebAssembly heap.
+- **Snapshot size.** On Cloudflare the checkpointer streams snapshots from Durable Object storage to R2 by default, so its memory stays flat as the state grows (measured up to 521 MB of state). Its `exportMode: 'buffered'` alternative holds the whole state in memory and only suits state up to a few tens of MB. Installing a snapshot always loads the whole state into the client's WebAssembly memory: about 1.6 GB works in Node, 2.16 GB does not, and a client inside a Durable Object is limited by its 128 MB of memory.
 
 ## Cloudflare setup
 
@@ -63,9 +63,9 @@ With the [Cloudflare sync provider](/sync-providers/cloudflare), snapshot boot u
 - the sync Durable Object to store the manifests, so it serves only snapshots that match the current backend identity,
 - an R2 bucket for the snapshot files,
 - two opt-in worker routes, `GET …/snapshot/manifest` and `GET …/snapshot/blob`, which check the client's sync payload in the same way as the sync endpoints,
-- a checkpointer Durable Object for each store and schema, which keeps itself awake while new events arrive.
+- a checkpointer Durable Object for each store and schema, which keeps itself awake while new events arrive and goes idle when the store is quiet.
 
-Snapshot files that have been replaced are kept for a short grace period, so that clients that are still downloading can finish.
+Snapshot files that have been replaced are kept for a grace period (5 minutes by default), so that clients that are still downloading can finish. The blob route only serves the files of the current and previous snapshot of each schema.
 
 In the worker, add the checkpointer Durable Object, point the sync Durable Object at it, and enable the snapshot routes:
 

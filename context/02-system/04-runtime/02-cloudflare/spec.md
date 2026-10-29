@@ -100,17 +100,59 @@ is already too full to rebuild.
 
 `@livestore/adapter-cloudflare` hosts the snapshot checkpointer
 ([`../../03-sync/04-snapshots/`](../../03-sync/04-snapshots/spec.md#checkpointer)):
-a Durable Object running a headless leader (no client session needed) that
-live-pulls from the sync Durable Object, never pushes, and publishes state
-exports through an R2 sink plus the sync DO's manifest RPC. It is named
-`${storeId}/${key}`, so each schema line gets its own checkpointer, and an
-alarm keeps it awake while the log moves.
+`makeCheckpointerDurableObject({ schema, syncBackendBinding, bucketBinding,
+bindingName, trigger?, pollInterval?, graceMs?, keepAlive?, exportMode?,
+logLevel? })` returns a Durable Object class. Each instance, named
+`${storeId}/${key}` (`getCheckpointerStub`), runs a headless leader
+(`makeDoLeaderThread({ headless: true })`, fixed client id
+`livestore-checkpointer`) that live-pulls from the sync Durable Object over
+DO RPC, never pushes, and runs `makeCheckpointer` with an R2 sink plus the sync
+DO's manifest RPC. Each schema line therefore gets its own checkpointer.
+
+- **RPC.** `ensureRunning(storeId, { backendId?, head? })` boots the leader if
+  needed and arms the alarm; a different `backendId` than the one it followed
+  (backend reset) stops it, resets its persistence and boots it fresh.
+  `stats(storeId)` returns the checkpointer stats plus runtime diagnostics
+  (boot time, wasm heap size, state database size) and boots if needed;
+  `status()` reports `{ storeId, running, ensureRunningCalls }` without
+  booting; `publishNow(storeId)` publishes inside the leader's scope,
+  bypassing the cost model. The first call persists the `storeId`, so alarms
+  can resume after eviction; a call for another store fails.
+- **Alarms and idling.** Live-pull callbacks and `ensureRunning` mark activity
+  (persisted, throttled to once per second) and arm an alarm every
+  `keepAlive.alarmIntervalMs` (default 5 seconds). The alarm re-arms while the
+  head moved within `keepAlive.idleTimeoutMs` (default 60 seconds), while a
+  streamed upload is in flight, or while the leader is behind the head a
+  wake-up reported; otherwise the instance idles out. A leftover alarm on an
+  idle, evicted instance does not boot a leader. A leader that stays behind a
+  reported head for more than two alarm intervals (a lost live-pull callback)
+  is restarted so it re-pulls from its persisted cursor.
+- **Lifecycle.** Shutdowns and restarts go through one transition that new
+  calls await, so no second leader boots on the same storage. When the leader
+  stops on its own (e.g. a backend reset cleared its storage), the instance
+  shuts the checkpointer down and the next call or alarm boots a fresh one.
+- **Export.** `exportMode: 'streamed'` (default) passes `stage` to the R2 sink:
+  under the persistence lock, `stageVfsFile` (`@livestore/sqlite-wasm/cf`)
+  copies the state file's pages (the pager's `page_count`) into a staging
+  table inside DO storage, and the sink streams them to R2 as a multipart
+  upload. Memory stays around one 5 MiB part (wasm heap ~17 MB at state sizes
+  measured up to 521 MB), at the cost of one extra DO row write per 8 KiB page
+  per snapshot. Missing pages are staged as zeros so the copy is dense; reads
+  fail on any missing row. Leftover staged copies of an evicted instance are
+  dropped (`dropStagedVfsFiles`) when a checkpointer leader boots.
+  `exportMode: 'buffered'` serializes the database into wasm and JS memory
+  (about twice the state size) and is viable to about 30–45 MB of state under
+  the 128 MB isolate limit.
 
 The export reads the VFS-backed state database, not `SqlStorage`, so the
-`export()`/`import()` no-ops above do not apply to it. Its state database must
-fit the Durable Object's memory (LS.SYS.SYNC.SNAP-DQ3). A client Durable
-Object can also opt into snapshot boot as a client; the install then imports
-into the same VFS-backed state database.
+`export()`/`import()` no-ops above do not apply to it. A client Durable Object
+can also opt into snapshot boot as a client (e.g. with
+`makeDoRpcSnapshotSource`); the install then deserializes the snapshot in the
+wasm heap and imports it into the same VFS-backed state database, so the
+installable state size is bounded by the isolate's memory
+(LS.SYS.SYNC.SNAP-DQ3). `makeAdapter` seeds its client session from
+`LeaderThreadCtx.exportState` (locked bytes plus head), and resetting
+persistence also clears `__livestore_eventlog_base`.
 
 ## Eviction and Resume
 

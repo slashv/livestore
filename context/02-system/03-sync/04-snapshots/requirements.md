@@ -14,8 +14,12 @@ state contract ([../../02-state/requirements.md](../../02-state/requirements.md)
 and its SQLite realization's schema management
 ([../../02-state/01-sqlite/02-schema-management/requirements.md](../../02-state/01-sqlite/02-schema-management/requirements.md)),
 and root LS-R04, LS-R05, LS-R06. Code: `packages/@livestore/common/src/snapshot/`
-(key, manifest, source/sink, trigger, in-memory store) and
-`SyncOptions.snapshot` in `packages/@livestore/common/src/sync/sync.ts`.
+(key, manifest, source/sink, trigger, in-memory store),
+`SyncOptions.snapshot` in `packages/@livestore/common/src/sync/sync.ts`, the
+leader side in `packages/@livestore/common/src/leader-thread/`
+(`snapshot-boot.ts`, `snapshot-rebuild.ts`, `checkpointer.ts`,
+`LeaderPersistence.ts`), and the Cloudflare realization in
+`@livestore/sync-cf` and `@livestore/adapter-cloudflare`.
 Proposal history: [RFC 0005](../../../../contributor-docs/rfcs/0005-snapshot-boot.md);
 decision: [.decisions/0001](./.decisions/0001-snapshot-boot-over-compaction.md).
 
@@ -114,8 +118,8 @@ decision: [.decisions/0001](./.decisions/0001-snapshot-boot-over-compaction.md).
   partially materialized events.
 - **LS.SYS.SYNC.SNAP-R14 Safe publication:** A sink makes a blob readable
   before it publishes the manifest that points to it, keeps a replaced blob
-  readable for a grace period, and only advances a key's manifest to a higher
-  position.
+  readable for a grace period, and never moves a key's manifest to a lower
+  position for the same backend identity.
 - **LS.SYS.SYNC.SNAP-R15 Cost-based trigger:** The checkpointer publishes a
   new snapshot only when replaying the tail would cost more than a fixed share
   of downloading the snapshot, subject to a minimum tail and a minimum

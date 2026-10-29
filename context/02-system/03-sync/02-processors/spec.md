@@ -184,6 +184,20 @@ reconnect, or receiving any page (even an empty one), resets the backoff
 otherwise the pull is marked `completed` (`:606-610`). The stream end sends
 `PullCompleted` (`:1053`).
 
+The backend log is a chain, so the pull stream checks continuity before a page
+reaches the owner: it drops events at or below the last delivered position
+(repeats) and fails with `IsOfflineError` when an event's parent is not the
+last delivered position (a gap). A gap therefore restarts the pull from the
+durable cursor instead of applying a batch with missing events.
+
+Pull restarts: with `livePull`, a stream that ends is treated like a lost
+connection and retried from the durable cursor. Otherwise, a pull that
+completes while a push waits in `awaiting-pull` starts another pull; a pull
+failure ignored under `onError: 'ignore'` is retried with backoff while a push
+waits; and a `ServerAheadError` that arrives when no pull runs starts one. A
+push parked in `awaiting-pull` is thus never left without a pull to release
+it.
+
 ### What waits concurrently, and why
 
 The leader makes every decision one message at a time; only waiting happens
@@ -479,11 +493,11 @@ checks it.
   over 1,000 pending events with a React list subscribed).
 - Every upstream page interrupts and rebuilds an in-flight backend push, even
   when the page does not touch the in-flight batch.
-- With `livePull: false`, nothing starts a new pull after `ServerAheadError`,
-  so `awaiting-pull` can persist until the next boot.
 - Suspension in the session owner is detected at runtime, not by types.
 - With `onError: 'ignore'` (the leader layer's default), a leader sync failure
   stops the processor without notifying the shutdown channel.
 - `cachedPullItems` in the leader's session pull path can grow without bound
-  (`:1243-1244`; issue #1423).
+  (about 430 B per applied event; issue #1423). Headless leaders
+  (`makeLeaderThreadLayer({ headless: true })`, e.g. a snapshot checkpointer)
+  serve no sessions and skip the cache.
 - Metrics for retry/queue health are not emitted (LS.SYS.OBS-DQ2).

@@ -10,6 +10,30 @@
 > shipped code differs from this text, the intent layer records the code. This RFC is retained as a historical record
 > (see the fold-in rule in `context/05-contributing/`).
 
+## Implementation Notes (2026-10-29)
+
+The implementation on the snapshot-boot branch differs from the proposal below in these points; the
+[spec](../../context/02-system/03-sync/04-snapshots/spec.md) is authoritative:
+
+- **Crash-safe install.** The state stays marked incomplete until the eventlog base is written, and only then is it
+  marked complete (a sixth step). A crash in between is wiped and repaired on the next boot.
+- **Rebuild.** Re-seed requires no client-only event below `p'` (one at `(p', c>0)` is replayed). Backfill first drops
+  rows left by an interrupted backfill, so it is idempotent, and treats a backend identity change as a reset.
+- **Export.** `LeaderThreadCtx.exportSnapshot` returns `{ bytes, seqNum, cursorMetadata, backendId, exportMs }` and is
+  refused for a leader that ever recorded a client-only event. `exportSnapshotWith(capture)` and the optional
+  `SnapshotSink.capture` add a streaming path. `exportState` gives every session-boot export the same lock.
+- **Ordering.** Manifests are ordered per backend identity: a sink rejects an older position of the same `backendId`,
+  and a new identity replaces the old manifest.
+- **Cloudflare.** Object keys URI-encode the store id and key:
+  `snapshots/<encodeURIComponent(storeId)>/<encodeURIComponent(key)>/<seqNum>-<id>.sqlite`. The blob route serves only
+  the current or previous manifest's blob. The checkpointer Durable Object streams its export from staged DO pages by
+  default (wasm heap ~17 MB at up to 521 MB of state); the buffered export is viable to about 30–45 MB. No Node host or
+  file-system sink ships; `makeCheckpointer` runs on any leader with any sink.
+- **Trigger.** The default `replayCostPerEventMs` is `0.5`, measured by the
+  [snapshot boot benchmarks](../perf/snapshot-boot-benchmarks.md).
+- **Remaining limit.** Client install still deserializes the whole snapshot in the wasm heap (~1.6 GB works, 2.16 GB
+  fails in Node).
+
 ## Context
 
 - A LiveStore client derives its state by materializing every event in its eventlog. A client with an empty eventlog
