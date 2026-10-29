@@ -277,6 +277,19 @@ export const make = Effect.fnUntraced(function* ({
       ).pipe(Effect.asVoid)
     })
 
+  /** Waits with backoff (or until reconnected), then restarts the pull from the durable cursor. */
+  const schedulePullRetry = (previousAttempt: number) =>
+    Effect.gen(function* () {
+      const retryId = allocateOperationId()
+      const attempt = previousAttempt + 1
+      model = { ...model, pull: { _tag: 'retry-wait', retryId, attempt } }
+      yield* fork(
+        awaitPullRetry(attempt).pipe(
+          Effect.flatMap((reconnected) => send({ _tag: 'PullRetryElapsed', retryId, reconnected })),
+        ),
+      )
+    })
+
   const replacePushPlan = (replacement: ReadonlyArray<LiveStoreEvent.Client.Encoded>) =>
     Effect.gen(function* () {
       if (model.push._tag === 'disabled') return
@@ -591,6 +604,20 @@ export const make = Effect.fnUntraced(function* ({
         }
         case 'PullCompleted':
           if (model.pull._tag === 'streaming' && model.pull.pullId === message.pullId) {
+            if (config.livePull === true) {
+              // A live pull is meant to run until interrupted. A stream that ends anyway (e.g. a transport that lost its
+              // subscription on reconnect) would otherwise leave the leader silently behind the backend, so treat it
+              // like a lost connection and pull again from the durable cursor.
+              yield* Effect.logDebug('Live pull ended; pulling again from the current cursor')
+              yield* schedulePullRetry(model.pull.attempt)
+              return true
+            }
+            if (model.push._tag === 'awaiting-pull') {
+              // A push was rejected while this pull ran, possibly after it had read the backend. Pull again so the
+              // queued events are confirmed or rebased instead of waiting for a pull that never comes.
+              yield* startProviderPull(0)
+              return true
+            }
             model = { ...model, pull: { _tag: 'completed' } }
             yield* send({ _tag: 'ContinueWork' })
           }
@@ -598,20 +625,19 @@ export const make = Effect.fnUntraced(function* ({
         case 'PullFailed':
           if (model.pull._tag !== 'streaming' || model.pull.pullId !== message.pullId) return true
           if (message.error._tag === 'IsOfflineError') {
-            const retryId = allocateOperationId()
-            const attempt = model.pull.attempt + 1
-            model = { ...model, pull: { _tag: 'retry-wait', retryId, attempt } }
-            yield* fork(
-              awaitPullRetry(attempt).pipe(
-                Effect.flatMap((reconnected) => send({ _tag: 'PullRetryElapsed', retryId, reconnected })),
-              ),
-            )
+            yield* schedulePullRetry(model.pull.attempt)
             return true
           }
           if (message.error._tag === 'BackendIdMismatchError')
             return yield* handleBackendMismatch(message.error, 'pull')
           if (config.onError === 'shutdown')
             return yield* stop({ lifecycle: 'failed', error: message.error, notify: true })
+          if (model.push._tag === 'awaiting-pull') {
+            // Queued events can only proceed after a pull; retry it with backoff rather than parking them forever.
+            yield* Effect.logWarning('Sync backend pull failed while local events wait for it; retrying', message.error)
+            yield* schedulePullRetry(model.pull.attempt)
+            return true
+          }
           model = { ...model, pull: { _tag: 'completed' } }
           yield* send({ _tag: 'ContinueWork' })
           return true
@@ -642,6 +668,9 @@ export const make = Effect.fnUntraced(function* ({
                 queued: [...model.push.batch, ...model.push.queued],
               },
             }
+            // Only a pulled batch releases `awaiting-pull`. Without a running pull (non-live mode, or a pull that
+            // completed after an ignored error) the queued events would wait forever.
+            if (model.pull._tag === 'completed') yield* startProviderPull(0)
             return true
           }
           if (message.error._tag === 'BackendIdMismatchError')
