@@ -236,7 +236,7 @@ other clients never reach it.
   `{ bytes, head, cursorMetadata, backendId }`. `head` comes from the state
   head row and must have client part `0`; `cursorMetadata` is the eventlog
   row's sync metadata at `head`.
-- **Loop:** `Checkpointer.make` (generic, in `@livestore/common`) evaluates
+- **Loop:** `makeCheckpointer` (generic, `leader-thread/checkpointer.ts`) evaluates
   the trigger after pulls, exports, and calls `sink.publish`. It runs one
   checkpointer per `(storeId, key)`: a schema deploy that changes the key
   starts a new checkpointer, and the old key's checkpointer keeps serving
@@ -286,14 +286,15 @@ not-found failure and falls back (LS.SYS.SYNC.SNAP-R08).
 
 Sync side (`@livestore/sync-cf`, on top of [03-cf](../03-cf/spec.md)):
 
-- The sync Durable Object stores manifests in a `snapshot_manifests` table
+- The sync Durable Object stores manifests in a `snapshot_manifests_<V>` table
   next to its eventlog. It serves only manifests whose `backendId` equals its
   current backend identity, and accepts a put only when the position advances
   for the key. RPC methods for the checkpointer's sink:
   `putSnapshotManifest(manifestJson)` (returns `Accepted { previousObjectKey }`
   or `Rejected { reason, message }` as a plain object so it survives DO RPC
   cloning) and `getSnapshotManifest({ storeId, key })`.
-- Blobs live in R2 under `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`
+- Blobs live in R2 under `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`,
+  written by `makeR2SnapshotSink`
   (content type `application/vnd.sqlite3`). Replaced blobs are deleted after
   the grace period.
 - Opt-in worker HTTP routes, matched as path suffixes so the sync endpoint can
@@ -304,6 +305,9 @@ Sync side (`@livestore/sync-cf`, on top of [03-cf](../03-cf/spec.md)):
   Both run the worker's `validatePayload` like the sync transports, and need
   an R2 binding. The blob route refuses object keys outside
   `snapshots/<storeId>/` and blobs whose size does not match the manifest.
+
+Client sources: `makeHttpSnapshotSource` (worker routes) and
+`makeDoRpcSnapshotSource` (for Durable Object clients).
 
 Checkpointer host (`@livestore/adapter-cloudflare`, see
 [04-runtime/02-cloudflare](../../04-runtime/02-cloudflare/spec.md#snapshot-checkpointer)):
@@ -317,7 +321,7 @@ must fit the Durable Object's memory (LS.SYS.SYNC.SNAP-DQ3).
 returns `{ sink, source, makeSource, testing }`. It follows the
 object-storage contract (blob before pointer, grace-period retention) and is
 used by tests and Node benchmarks; `testing` can corrupt or delete blobs to
-exercise fallback. A Node checkpointer runs the same `Checkpointer.make` loop
+exercise fallback. A Node checkpointer runs the same `makeCheckpointer` loop
 with an in-memory or file-system sink.
 
 ## Verification

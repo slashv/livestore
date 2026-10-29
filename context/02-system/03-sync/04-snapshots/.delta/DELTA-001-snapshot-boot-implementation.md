@@ -25,7 +25,7 @@ Close when all of the following hold on `main`:
   `rebuildFromEventlogBase` (re-seed and backfill) are implemented, with tests
   that a snapshot-booted client matches a full replay, falls back on every
   failure reason, and rebuilds through both strategies.
-- `LeaderThreadCtx.exportSnapshot` and `Checkpointer.make` exist, with a
+- `LeaderThreadCtx.exportSnapshot` and `makeCheckpointer` exist, with a
   consistency test against concurrent pulls.
 - The Cloudflare sync DO manifest RPC and HTTP routes, the R2 sink, and the
   checkpointer Durable Object exist with tests.

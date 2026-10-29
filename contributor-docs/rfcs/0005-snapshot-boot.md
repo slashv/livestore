@@ -51,15 +51,14 @@ makeWorker({
   sync: {
     backend: makeWsSync({ url }),
     snapshot: {
-      source: makeCfSnapshotSource({ url }), // experimental
+      source: makeHttpSnapshotSource({ url }), // experimental
       timeout: '30 seconds',
     },
   },
 })
 ```
 
-`SyncOptions.snapshot` is the only opt-in. Without it nothing changes. (`makeCfSnapshotSource` is illustrative; the
-final constructor name is set by the implementation.)
+`SyncOptions.snapshot` is the only opt-in. Without it nothing changes. (`makeHttpSnapshotSource` is the Cloudflare HTTP source; see the intent layer for the current API.)
 
 ### Snapshot key and manifest
 
