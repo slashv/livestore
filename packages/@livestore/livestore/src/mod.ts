@@ -13,6 +13,8 @@ export {
   type QueryBuilderAst,
   type RowQuery,
   SessionIdSymbol,
+  /** Experimental snapshot boot helpers (snapshot keys, manifests, sources and sinks). */
+  Snapshot,
   type SqliteDb,
   StoreInterrupted,
   type SyncState,

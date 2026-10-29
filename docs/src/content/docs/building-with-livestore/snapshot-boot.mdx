@@ -5,11 +5,12 @@ sidebar:
   order: 46
 ---
 
+import ClientWorkerSnippet from '../../_assets/code/reference/syncing/snapshot-boot/livestore.worker.ts?snippet'
+import CloudflareWorkerSnippet from '../../_assets/code/reference/syncing/snapshot-boot/worker.ts?snippet'
+
 :::caution[Experimental]
 Snapshot boot is an experimental, opt-in feature. Its APIs, route paths and storage layout may change between releases. Clients that don't configure it are not affected.
 :::
-
-{/* TODO(snapshot-boot): add type-checked snippets under docs/src/content/_assets/code/reference/syncing/snapshot-boot/ for the client `sync.snapshot` option, the Cloudflare worker routes with an R2 binding, and the checkpointer Durable Object, once their APIs are final. */}
 
 ## Why snapshot boot
 
@@ -53,7 +54,7 @@ This convention keeps every client consistent, whether it booted from a snapshot
 
 - **Local history starts at the snapshot.** A client that booted from a snapshot only has the events after the snapshot locally. `store.events`, the events stream and the devtools eventlog view begin there.
 - **State schema changes need the network.** If such a client later needs to rebuild its state, for example after you change a table, it either installs a snapshot for the new schema or downloads the missing history from the sync backend. If it is offline at that moment, boot fails with a clear error instead of producing incorrect state.
-- **Snapshot size.** On Cloudflare, the checkpointer holds the state database in a Durable Object's memory. Very large stores may exceed that limit.
+- **Snapshot size.** Exporting and installing a snapshot works on the whole state database. On Cloudflare the checkpointer streams snapshots from Durable Object storage to R2, so its memory stays flat; clients still load the snapshot into memory to install it, which limits practical state size to well under the 2 GB WebAssembly heap.
 
 ## Cloudflare setup
 
@@ -65,6 +66,16 @@ With the [Cloudflare sync provider](/sync-providers/cloudflare), snapshot boot u
 - a checkpointer Durable Object for each store and schema, which keeps itself awake while new events arrive.
 
 Snapshot files that have been replaced are kept for a short grace period, so that clients that are still downloading can finish.
+
+In the worker, add the checkpointer Durable Object, point the sync Durable Object at it, and enable the snapshot routes:
+
+<CloudflareWorkerSnippet class="my-6" />
+
+Declare `CHECKPOINTER_DO` as a SQLite-backed Durable Object class and `SNAPSHOT_BUCKET` as an R2 bucket binding in your Wrangler configuration, next to the existing `SYNC_BACKEND_DO`.
+
+On the client, opt in with the `snapshot` sync option:
+
+<ClientWorkerSnippet class="my-6" />
 
 ## Further reading
 
