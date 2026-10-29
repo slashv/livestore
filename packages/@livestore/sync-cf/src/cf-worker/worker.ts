@@ -6,7 +6,16 @@ import { CfDeclare } from '@livestore/common-cf/declare'
 import { Effect, Result, Schema } from '@livestore/utils/effect'
 
 import type { CfTypes, SearchParams } from '../common/mod.ts'
-import { type Env, type ForwardedHeaders, matchSyncRequest } from './shared.ts'
+import {
+  SNAPSHOT_BLOB_CONTENT_TYPE,
+  SNAPSHOT_ROUTES,
+  type SnapshotBlobSearchParams,
+  SnapshotBlobSearchParamsSchema,
+  type SnapshotManifestSearchParams,
+  SnapshotManifestSearchParamsSchema,
+  snapshotObjectPrefix,
+} from '../common/snapshot.ts'
+import { type Env, type ForwardedHeaders, matchSyncRequest, type SyncBackendRpcInterface } from './shared.ts'
 
 const Response = CfDeclare.Response
 
@@ -61,6 +70,21 @@ export type MakeWorkerOptions<TEnv extends Env = Env, TSyncPayload = Schema.Json
   validatePayload?: (payload: TSyncPayload, context: ValidatePayloadContext) => void | Promise<void>
   /** @default false */
   enableCORS?: boolean
+  /**
+   * Enables the read-only snapshot routes of the experimental snapshot boot (LS.SYS-R06):
+   *
+   * - `GET …/snapshot/manifest?storeId=…&key=…&payload=…` returns the current manifest of a snapshot key (404 if none)
+   * - `GET …/snapshot/blob?storeId=…&objectKey=…&payload=…` streams a snapshot blob from the R2 bucket
+   *
+   * Both apply {@link validatePayload} exactly like sync requests. Blobs are written by a checkpointer through
+   * `makeR2SnapshotSink`; clients read them with `makeHttpSnapshotSource` from `@livestore/sync-cf/client`.
+   *
+   * @experimental
+   */
+  snapshots?: {
+    /** Binding name of the R2 bucket holding snapshot blobs. */
+    bucketBinding: HelperTypes.ExtractR2BucketKeys<TEnv>
+  }
 }
 
 /**
@@ -95,6 +119,22 @@ export const makeWorker = <
           status: 204,
           headers: corsHeaders,
         })
+      }
+
+      if (options.snapshots !== undefined) {
+        const snapshotRequest = matchSnapshotRequest(request)
+        if (snapshotRequest !== undefined) {
+          return handleSnapshotRequest<TEnv, unknown, TSyncPayload>({
+            request,
+            snapshotRequest,
+            env,
+            syncBackendBinding: options.syncBackendBinding,
+            bucketBinding: options.snapshots.bucketBinding,
+            headers: corsHeaders,
+            validatePayload: options.validatePayload,
+            syncPayloadSchema: options.syncPayloadSchema,
+          })
+        }
       }
 
       const searchParams = matchSyncRequest(request)
@@ -193,39 +233,15 @@ export const handleSyncRequest = <
   syncPayloadSchema?: MakeWorkerOptions<TEnv, TSyncPayload>['syncPayloadSchema']
 }): Promise<CfTypes.Response> =>
   Effect.gen(function* () {
-    if (validatePayload !== undefined) {
-      // Convert request headers to a Map for the validation context
-      const requestHeaders = requestHeadersToMap(request)
-
-      // Always decode with the supplied schema when present, even if payload is undefined.
-      // This ensures required payloads are enforced by the schema.
-      if (syncPayloadSchema !== undefined) {
-        const decodedResult = Schema.decodeResult(syncPayloadSchema)(payload)
-        if (Result.isFailure(decodedResult) === true) {
-          const message = decodedResult.failure.toString()
-          console.error('Invalid payload (decode failed)', message)
-          return new Response(message, { status: 400, ...(headers !== undefined ? { headers } : {}) })
-        }
-
-        const result = yield* Effect.promise(async () =>
-          validatePayload(decodedResult.success, { storeId, headers: requestHeaders }),
-        ).pipe(UnknownError.mapToUnknownError, Effect.result)
-
-        if (Result.isFailure(result) === true) {
-          console.error('Invalid payload (validation failed)', result.failure)
-          return new Response(result.failure.toString(), { status: 400, ...(headers !== undefined ? { headers } : {}) })
-        }
-      } else {
-        const result = yield* Effect.promise(async () =>
-          validatePayload(payload as TSyncPayload, { storeId, headers: requestHeaders }),
-        ).pipe(UnknownError.mapToUnknownError, Effect.result)
-
-        if (Result.isFailure(result) === true) {
-          console.error('Invalid payload (validation failed)', result.failure)
-          return new Response(result.failure.toString(), { status: 400, ...(headers !== undefined ? { headers } : {}) })
-        }
-      }
-    }
+    const invalidPayloadResponse = yield* validateRequestPayload({
+      request,
+      storeId,
+      payload,
+      headers,
+      validatePayload,
+      syncPayloadSchema,
+    })
+    if (invalidPayloadResponse !== undefined) return invalidPayloadResponse
 
     const env = explicitlyProvidedEnv ?? (importedEnv as TEnv)
 
@@ -257,3 +273,212 @@ export const handleSyncRequest = <
 
     return yield* Effect.promise(() => durableObject.fetch(request))
   }).pipe(Effect.tapCauseLogPretty, Effect.runPromise)
+
+/** A request for one of the snapshot routes, see {@link MakeWorkerOptions.snapshots}. */
+export type SnapshotRequest =
+  | { readonly _tag: 'manifest'; readonly params: SnapshotManifestSearchParams }
+  | { readonly _tag: 'blob'; readonly params: SnapshotBlobSearchParams }
+
+/**
+ * Matches the snapshot routes (`GET …/snapshot/manifest`, `GET …/snapshot/blob`). Returns `undefined` for any other
+ * request (including malformed snapshot requests) so callers can fall back to custom routing.
+ *
+ * @experimental
+ */
+export const matchSnapshotRequest = (request: CfTypes.Request): SnapshotRequest | undefined => {
+  if (request.method !== 'GET') return undefined
+
+  const url = new URL(request.url)
+  if (url.pathname.endsWith(SNAPSHOT_ROUTES.manifest) === true) {
+    const result = decodeSnapshotManifestSearchParams(url.searchParams)
+    return Result.isSuccess(result) === true ? { _tag: 'manifest', params: result.success } : undefined
+  }
+  if (url.pathname.endsWith(SNAPSHOT_ROUTES.blob) === true) {
+    const result = decodeSnapshotBlobSearchParams(url.searchParams)
+    return Result.isSuccess(result) === true ? { _tag: 'blob', params: result.success } : undefined
+  }
+  return undefined
+}
+
+/**
+ * Serves the snapshot routes of the experimental snapshot boot. Use it from a custom `fetch` handler next to
+ * {@link handleSyncRequest}:
+ *
+ * ```ts
+ * const snapshotRequest = matchSnapshotRequest(request)
+ * if (snapshotRequest !== undefined) {
+ *   return handleSnapshotRequest({
+ *     request,
+ *     snapshotRequest,
+ *     env,
+ *     syncBackendBinding: 'SYNC_BACKEND_DO',
+ *     bucketBinding: 'SNAPSHOT_BUCKET',
+ *     validatePayload,
+ *   })
+ * }
+ * ```
+ *
+ * The manifest is read from the sync Durable Object, which only serves manifests of its current backend identity.
+ * Blobs are streamed from R2; object keys outside `snapshots/<storeId>/` are refused so a payload valid for one store
+ * cannot read another store's snapshots.
+ *
+ * @experimental
+ */
+export const handleSnapshotRequest = <TEnv extends Env = Env, CFHostMetada = unknown, TSyncPayload = Schema.Json>({
+  request,
+  snapshotRequest,
+  env: explicitlyProvidedEnv,
+  syncBackendBinding,
+  bucketBinding,
+  headers,
+  validatePayload,
+  syncPayloadSchema,
+}: {
+  request: CfTypes.Request<CFHostMetada>
+  snapshotRequest: SnapshotRequest
+  env?: TEnv | undefined
+  /** Binding name of the sync backend Durable Object */
+  syncBackendBinding: MakeWorkerOptions<TEnv, TSyncPayload>['syncBackendBinding']
+  /** Binding name of the R2 bucket holding snapshot blobs */
+  bucketBinding: HelperTypes.ExtractR2BucketKeys<TEnv>
+  headers?: CfTypes.HeadersInit | undefined
+  validatePayload?: MakeWorkerOptions<TEnv, TSyncPayload>['validatePayload']
+  syncPayloadSchema?: MakeWorkerOptions<TEnv, TSyncPayload>['syncPayloadSchema']
+}): Promise<CfTypes.Response> =>
+  Effect.gen(function* () {
+    const { storeId, payload } = snapshotRequest.params
+
+    const invalidPayloadResponse = yield* validateRequestPayload({
+      request,
+      storeId,
+      payload,
+      headers,
+      validatePayload,
+      syncPayloadSchema,
+    })
+    if (invalidPayloadResponse !== undefined) return invalidPayloadResponse
+
+    const env = explicitlyProvidedEnv ?? (importedEnv as TEnv)
+    const textResponse = (status: number, body: string) =>
+      makeResponse(body, { status, headers, extraHeaders: { 'Content-Type': 'text/plain' } })
+
+    if (snapshotRequest._tag === 'manifest') {
+      if (!(syncBackendBinding in env)) {
+        return textResponse(
+          424,
+          `Failed dependency: Required Durable Object binding '${syncBackendBinding as string}' not available`,
+        )
+      }
+
+      const namespace = env[syncBackendBinding as keyof TEnv] as CfTypes.DurableObjectNamespace<SyncBackendRpcInterface>
+      const stub = namespace.get(namespace.idFromName(storeId))
+      const manifestJson = yield* Effect.promise(() =>
+        stub.getSnapshotManifest({ storeId, key: snapshotRequest.params.key }),
+      )
+
+      if (manifestJson === null) return textResponse(404, 'No snapshot manifest')
+
+      return makeResponse(manifestJson, {
+        status: 200,
+        headers,
+        // The pointer moves whenever the checkpointer publishes, so it must never be served from a cache.
+        extraHeaders: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      })
+    }
+
+    const { objectKey } = snapshotRequest.params
+    if (objectKey.startsWith(snapshotObjectPrefix(storeId)) === false) {
+      return textResponse(403, 'Snapshot object key outside of the store prefix')
+    }
+
+    const bucket = (env as Record<string, CfTypes.R2Bucket | undefined>)[bucketBinding]
+    if (bucket === undefined) {
+      return textResponse(424, `Failed dependency: Required R2 bucket binding '${bucketBinding}' not available`)
+    }
+
+    const object = yield* Effect.promise(() => bucket.get(objectKey))
+    if (object === null) return textResponse(404, 'No snapshot blob')
+
+    return makeResponse(object.body, {
+      status: 200,
+      headers,
+      extraHeaders: {
+        'Content-Type': SNAPSHOT_BLOB_CONTENT_TYPE,
+        'Content-Length': String(object.size),
+        ETag: object.httpEtag,
+        // Object keys are never reused for different content, but access depends on the request payload.
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      },
+    })
+  }).pipe(Effect.tapCauseLogPretty, Effect.runPromise)
+
+/**
+ * Runs `validatePayload` (decoding with `syncPayloadSchema` first, when given) and returns a 400 response if the
+ * payload is rejected, or `undefined` when the request may proceed.
+ */
+const validateRequestPayload = <TEnv extends Env, TSyncPayload, CFHostMetada>({
+  request,
+  storeId,
+  payload,
+  headers,
+  validatePayload,
+  syncPayloadSchema,
+}: {
+  request: CfTypes.Request<CFHostMetada>
+  storeId: string
+  payload: Schema.Json | undefined
+  headers: CfTypes.HeadersInit | undefined
+  validatePayload: MakeWorkerOptions<TEnv, TSyncPayload>['validatePayload']
+  syncPayloadSchema: MakeWorkerOptions<TEnv, TSyncPayload>['syncPayloadSchema']
+}): Effect.Effect<CfTypes.Response | undefined> =>
+  Effect.gen(function* () {
+    if (validatePayload === undefined) return undefined
+
+    // Convert request headers to a Map for the validation context
+    const requestHeaders = requestHeadersToMap(request)
+
+    // Always decode with the supplied schema when present, even if payload is undefined.
+    // This ensures required payloads are enforced by the schema.
+    let decodedPayload: TSyncPayload
+    if (syncPayloadSchema !== undefined) {
+      const decodedResult = Schema.decodeResult(syncPayloadSchema)(payload)
+      if (Result.isFailure(decodedResult) === true) {
+        const message = decodedResult.failure.toString()
+        console.error('Invalid payload (decode failed)', message)
+        return new Response(message, { status: 400, ...(headers !== undefined ? { headers } : {}) })
+      }
+      decodedPayload = decodedResult.success
+    } else {
+      decodedPayload = payload as TSyncPayload
+    }
+
+    const result = yield* Effect.promise(async () =>
+      validatePayload(decodedPayload, { storeId, headers: requestHeaders }),
+    ).pipe(UnknownError.mapToUnknownError, Effect.result)
+
+    if (Result.isFailure(result) === true) {
+      console.error('Invalid payload (validation failed)', result.failure)
+      return new Response(result.failure.toString(), { status: 400, ...(headers !== undefined ? { headers } : {}) })
+    }
+
+    return undefined
+  })
+
+/** Applies caller headers (e.g. CORS) first, then route-specific ones, regardless of the `HeadersInit` shape. */
+const makeResponse = (
+  body: CfTypes.BodyInit | null,
+  {
+    status,
+    headers,
+    extraHeaders,
+  }: { status: number; headers: CfTypes.HeadersInit | undefined; extraHeaders: Record<string, string> },
+): CfTypes.Response => {
+  const response = new Response(body, { status, ...(headers !== undefined ? { headers } : {}) })
+  for (const [name, value] of Object.entries(extraHeaders)) response.headers.set(name, value)
+  return response
+}
+
+const decodeSnapshotManifestSearchParams = Schema.decodeResult(
+  Schema.fromURLSearchParams(SnapshotManifestSearchParamsSchema),
+)
+const decodeSnapshotBlobSearchParams = Schema.decodeResult(Schema.fromURLSearchParams(SnapshotBlobSearchParamsSchema))

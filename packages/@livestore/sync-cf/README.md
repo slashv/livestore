@@ -53,6 +53,30 @@
 - D1
 - Cloudflare Durable Objects SQLite
 
+## Snapshots (experimental)
+
+Opt-in realization of snapshot boot: fresh clients install a recent state snapshot and only pull the events after it.
+The sync backend stays schema-blind and only stores the small manifest pointer.
+
+```
+┌──────────────┐ blob (R2 put)  ┌───────────┐            ┌──────────┐ GET /snapshot/blob     ┌──────────┐
+│ Checkpointer │ ─────────────► │    R2     │ ◄───────── │  Worker  │ ◄───────────────────── │  Client  │
+│ (R2 sink)    │ ─────────────► │  Sync DO  │ ◄───────── │          │ ◄───────────────────── │          │
+└──────────────┘ manifest (RPC) └───────────┘   RPC      └──────────┘ GET /snapshot/manifest └──────────┘
+```
+
+- Sync DO: `putSnapshotManifest` / `getSnapshotManifest` RPC methods. A manifest is accepted only for the DO's store and
+  current `backendId`, with `seqNum` at or below the head and not older than the current one for the key. Manifests of
+  an earlier backend identity are never served.
+- Worker: `makeWorker({ snapshots: { bucketBinding } })` (or `matchSnapshotRequest` + `handleSnapshotRequest` in a
+  custom `fetch`) serves `GET …/snapshot/manifest?storeId&key&payload` and `GET …/snapshot/blob?storeId&objectKey&payload`.
+  Both run `validatePayload`; blob keys must start with `snapshots/<storeId>/`.
+- Checkpointer: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs })` uploads
+  `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`, then publishes the manifest, then deletes blobs of the key that were
+  replaced more than `graceMs` ago (the previous manifest's blob is always kept).
+- Clients: `makeHttpSnapshotSource({ url })` (same URL as the sync backend) or, inside Durable Objects,
+  `makeDoRpcSnapshotSource({ getSyncBackendStub, bucket })`.
+
 ## TODO (in readme)
 
 - possibly add a CF Queue based transport mechanism for pull streaming responses

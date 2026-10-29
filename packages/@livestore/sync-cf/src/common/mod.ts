@@ -5,6 +5,7 @@ export type { CfTypes } from '@livestore/common-cf'
 export * from './constants.ts'
 export { SyncDoRpc } from './do-rpc-schema.ts'
 export { SyncHttpRpc } from './http-rpc-schema.ts'
+export * from './snapshot.ts'
 export * as SyncMessage from './sync-message-types.ts'
 
 export const SearchParamsSchema = Schema.Struct({

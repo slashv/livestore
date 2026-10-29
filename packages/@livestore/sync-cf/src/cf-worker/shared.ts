@@ -5,6 +5,7 @@ import { Result, Schema } from '@livestore/utils/effect'
 
 import type { SearchParams } from '../common/mod.ts'
 import { SearchParamsSchema, SyncMessage } from '../common/mod.ts'
+import type { SnapshotManifestPutResult } from '../common/snapshot.ts'
 
 export type Env = {}
 
@@ -184,6 +185,20 @@ export const rpcSubscriptionKeyPrefix = 'rpc-sub:'
 export interface SyncBackendRpcInterface {
   __DURABLE_OBJECT_BRAND: never
   rpc(payload: Uint8Array): Promise<Uint8Array | CfTypes.ReadableStream>
+  /**
+   * Publishes a snapshot manifest (JSON-encoded `Snapshot.SnapshotManifest`) for the experimental snapshot boot.
+   * Called by the checkpointer's snapshot sink after the blob has been uploaded.
+   *
+   * @experimental
+   */
+  putSnapshotManifest(manifestJson: string): Promise<SnapshotManifestPutResult>
+  /**
+   * Returns the JSON-encoded current manifest for the snapshot key, or `null` when none applies to the current
+   * backend identity.
+   *
+   * @experimental
+   */
+  getSnapshotManifest(args: { storeId: string; key: string }): Promise<string | null>
 }
 
 export const WebSocketAttachmentSchema = Schema.fromJsonString(

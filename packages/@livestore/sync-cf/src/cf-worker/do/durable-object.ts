@@ -2,10 +2,12 @@
 
 import { DurableObject } from 'cloudflare:workers'
 
+import { UnknownError } from '@livestore/common'
 import { type CfTypes, setupDurableObjectWebSocketRpc } from '@livestore/common-cf'
 import { CfDeclare } from '@livestore/common-cf/declare'
-import { Effect, Layer, Logger, References, RpcMessage, Schema, type Scope } from '@livestore/utils/effect'
+import { Effect, Layer, Logger, Option, References, RpcMessage, Schema, type Scope } from '@livestore/utils/effect'
 
+import { decodeSnapshotManifestJson, type SnapshotManifestPutResult } from '../../common/snapshot.ts'
 import {
   type Env,
   extractForwardedHeaders,
@@ -16,6 +18,7 @@ import {
 } from '../shared.ts'
 import * as DoCtx from './layer.ts'
 import { makeObservability } from './observability.ts'
+import * as SnapshotManifests from './snapshot-manifests.ts'
 import { createDoRpcHandler } from './transport/do-rpc-server.ts'
 import { createHttpRpcHandler } from './transport/http-rpc-server.ts'
 import { makeRpcServer } from './transport/ws-rpc-server.ts'
@@ -198,6 +201,36 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
         input: { doSelf: this, doOptions: options },
         observability: this.observability,
       }).pipe(Effect.withSpan('@livestore/sync-cf:durable-object:rpc'), this.runEffectAsPromise)
+    }
+
+    /**
+     * Stores a snapshot manifest published by a checkpointer (experimental snapshot boot).
+     * See {@link SyncBackendRpcInterface.putSnapshotManifest}.
+     */
+    async putSnapshotManifest(manifestJson: string): Promise<SnapshotManifestPutResult> {
+      return decodeSnapshotManifestJson(manifestJson).pipe(
+        UnknownError.mapToUnknownError,
+        // The DO doesn't know its own name, so the store id is taken from the manifest; `putSnapshotManifest` then
+        // checks it against the id this instance was initialized with.
+        Effect.flatMap((manifest) =>
+          SnapshotManifests.putSnapshotManifest(manifest).pipe(
+            Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId: manifest.storeId } })),
+          ),
+        ),
+        this.runEffectAsPromise,
+      )
+    }
+
+    /**
+     * Returns the current snapshot manifest JSON for a key (experimental snapshot boot).
+     * See {@link SyncBackendRpcInterface.getSnapshotManifest}.
+     */
+    async getSnapshotManifest({ storeId, key }: { storeId: string; key: string }): Promise<string | null> {
+      return SnapshotManifests.getSnapshotManifest(key).pipe(
+        Effect.map(Option.getOrNull),
+        Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId } })),
+        this.runEffectAsPromise,
+      )
     }
 
     /**

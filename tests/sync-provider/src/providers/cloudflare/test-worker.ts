@@ -3,26 +3,32 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import { createStoreDoPromise } from '@livestore/adapter-cloudflare'
+import { Snapshot } from '@livestore/common'
 import { type ClientDoWithRpcCallback, setupDurableObjectWebSocketRpc } from '@livestore/common-cf'
 import type { CfDeclare } from '@livestore/common-cf/declare'
 import { type Store } from '@livestore/livestore'
 import { schema, tables } from '@livestore/livestore/internal/testing-utils'
 import {
   type CfTypes,
+  handleSnapshotRequest,
   handleSyncRequest,
   makeDurableObject,
+  makeR2SnapshotSink,
+  matchSnapshotRequest,
   matchSyncRequest,
+  PERSISTENCE_FORMAT_VERSION,
   rpcSubscriptionKeyPrefix,
   type SyncBackendRpcInterface,
   WebSocketAttachmentSchema,
 } from '@livestore/sync-cf/cf-worker'
-import { handleSyncUpdateRpc, makeDoRpcSync } from '@livestore/sync-cf/client'
+import { handleSyncUpdateRpc, makeDoRpcSnapshotSource, makeDoRpcSync } from '@livestore/sync-cf/client'
 import {
   Cache,
   Effect,
   FetchHttpClient,
   KeyValueStore,
   Layer,
+  Result,
   RpcServer,
   Schema,
   Scope,
@@ -58,6 +64,8 @@ interface SyncDoProbe {
   getPushProbe(storeId: string): { observed: boolean; payload: Schema.Json | null }
   getRpcSubscriptionCount(storeId: string): number
   closeWebSockets(): number
+  getSnapshotContextProbe(): { backendId: string; head: number }
+  markSnapshotManifestsStale(): number
 }
 
 interface TestClientDoProbe {
@@ -76,6 +84,8 @@ export interface Env {
   STORE_CLIENT_DO: CfTypes.DurableObjectNamespace<ClientDoWithRpcCallback & StoreClientDoProbe>
   /** Eventlog database */
   DB: CfTypes.D1Database
+  /** Snapshot blobs (experimental snapshot boot) */
+  SNAPSHOT_BUCKET: CfTypes.R2Bucket
 }
 
 export class SyncBackendDO extends makeDurableObject({
@@ -121,6 +131,23 @@ export class SyncBackendDO extends makeDurableObject({
       observed: observedPushPayloads.has(storeId),
       payload: observedPushPayloads.get(storeId) ?? null,
     }
+  }
+
+  /** Backend identity and head as persisted by the sync DO, so snapshot tests can build valid manifests. */
+  getSnapshotContextProbe(): { backendId: string; head: number } {
+    const row = this.#state.storage.sql
+      .exec<{ backendId: string; currentHead: number }>(
+        `SELECT backendId, currentHead FROM "context_${PERSISTENCE_FORMAT_VERSION}"`,
+      )
+      .one()
+    return { backendId: row.backendId, head: row.currentHead }
+  }
+
+  /** Simulates manifests left over from an earlier backend identity (e.g. before a backend reset). */
+  markSnapshotManifestsStale(): number {
+    return this.#state.storage.sql.exec(
+      `UPDATE "snapshot_manifests_${PERSISTENCE_FORMAT_VERSION}" SET backendId = 'stale-backend-id'`,
+    ).rowsWritten
   }
 
   /** DO-RPC live-pull subscriptions persisted for this store (all rows belong to this per-store DO). */
@@ -392,6 +419,26 @@ export default {
       return new Response(JSON.stringify(probe), { headers: { 'content-type': 'application/json' } })
     }
 
+    if (url.pathname.includes('/snapshot-test/') === true) {
+      return handleSnapshotTestRequest({ request, url, env })
+    }
+
+    const snapshotRequest = matchSnapshotRequest(request)
+    if (snapshotRequest !== undefined) {
+      return handleSnapshotRequest({
+        request,
+        snapshotRequest,
+        env,
+        syncBackendBinding: 'SYNC_BACKEND_DO',
+        bucketBinding: 'SNAPSHOT_BUCKET',
+        validatePayload: (payload) => {
+          if (typeof payload === 'object' && payload !== null && 'deny' in payload) {
+            throw new Error('Snapshot access denied by test validatePayload')
+          }
+        },
+      })
+    }
+
     const searchParams = matchSyncRequest(request)
     if (searchParams !== undefined) {
       const outage = webSocketOutages.get(searchParams.storeId)
@@ -425,4 +472,78 @@ type SyncBackendArgs = {
   clientId: string
   storeId: string
   payload: any
+}
+
+/**
+ * Test-only endpoints driving the snapshot sink and the DO-RPC snapshot source inside workerd, where the R2 and Durable
+ * Object bindings live. The sink normally runs in a checkpointer DO; a worker request exercises the same bindings.
+ */
+const handleSnapshotTestRequest = async ({
+  request,
+  url,
+  env,
+}: {
+  request: CfTypes.Request
+  url: URL
+  env: Env
+}): Promise<CfTypes.Response> => {
+  const storeId = url.searchParams.get('storeId')
+  if (storeId === null) return new Response('storeId required', { status: 400 })
+
+  const getSyncBackendStub = () => env.SYNC_BACKEND_DO.get(env.SYNC_BACKEND_DO.idFromName(storeId))
+  const json = (value: unknown, status = 200) =>
+    new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
+
+  if (url.pathname.endsWith('/snapshot-test/context') === true) {
+    return json(await getSyncBackendStub().getSnapshotContextProbe())
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/mark-stale') === true) {
+    return json({ rowsWritten: await getSyncBackendStub().markSnapshotManifestsStale() })
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/put-manifest') === true) {
+    return json(await getSyncBackendStub().putSnapshotManifest(await request.text()))
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/blobs') === true) {
+    const listed = await env.SNAPSHOT_BUCKET.list({ prefix: `snapshots/${storeId}/` })
+    return json(listed.objects.map((object) => object.key).toSorted())
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/publish') === true) {
+    const { manifest, bytesBase64 } = jsonParse(await request.text()) as {
+      manifest: Omit<Snapshot.SnapshotManifest, 'objectKey'>
+      bytesBase64: string
+    }
+    const sink = makeR2SnapshotSink({
+      bucket: env.SNAPSHOT_BUCKET,
+      storeId,
+      getSyncBackendStub,
+      graceMs: Number(url.searchParams.get('graceMs') ?? 60_000),
+    })
+    const bytes = Uint8Array.from(atob(bytesBase64), (char) => char.charCodeAt(0))
+    const result = await sink.publish({ manifest, bytes }).pipe(Effect.result, Effect.runPromise)
+    return Result.isSuccess(result) === true
+      ? json(result.success)
+      : json({ reason: result.failure.reason, message: result.failure.message }, 409)
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/do-rpc-source') === true) {
+    const key = url.searchParams.get('key') ?? ''
+    const result = await Effect.gen(function* () {
+      const source = yield* makeDoRpcSnapshotSource({ getSyncBackendStub, bucket: env.SNAPSHOT_BUCKET })({
+        storeId,
+        clientId: 'snapshot-test',
+        payload: undefined,
+      })
+      const manifest = yield* source.getManifest({ key })
+      if (manifest._tag === 'None') return { manifest: null, sha256: null }
+      const bytes = yield* source.download(manifest.value)
+      return { manifest: manifest.value, sha256: Snapshot.sha256Hex(bytes) }
+    }).pipe(Effect.scoped, Effect.provide(FetchHttpClient.layer), Effect.runPromise)
+    return json(result)
+  }
+
+  return new Response('Invalid snapshot test path', { status: 400 })
 }

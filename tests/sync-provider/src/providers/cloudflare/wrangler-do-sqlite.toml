@@ -20,3 +20,8 @@ class_name = "StoreClientDo"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SyncBackendDO", "TestClientDo", "StoreClientDo"]
+
+# Snapshot blobs (experimental snapshot boot); simulated locally by miniflare
+[[r2_buckets]]
+binding = "SNAPSHOT_BUCKET"
+bucket_name = "livestore-test-snapshots"

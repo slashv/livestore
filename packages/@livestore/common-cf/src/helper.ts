@@ -23,4 +23,11 @@ export namespace HelperTypes {
    *  });
    */
   export type ExtractDurableObjectKeys<TEnv> = DOKeys<TEnv> extends never ? string : DOKeys<TEnv> & string
+
+  type R2BucketKeys<T> = {
+    [K in keyof T]-?: T[K] extends CfTypes.R2Bucket ? K : never
+  }[keyof T]
+
+  /** Helper type to extract R2 bucket binding keys from Env (falls back to `string` for untyped envs). */
+  export type ExtractR2BucketKeys<TEnv> = R2BucketKeys<TEnv> extends never ? string : R2BucketKeys<TEnv> & string
 }
