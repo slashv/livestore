@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 
-import type { Duration, Effect, HttpClient, Option, Scope } from '@livestore/utils/effect'
-import { Schema } from '@livestore/utils/effect'
+import type { Duration, HttpClient, Option, Scope } from '@livestore/utils/effect'
+import { Effect, Schema } from '@livestore/utils/effect'
 
 import type { UnknownError } from '../errors.ts'
 import type { SqliteDb } from '../sqlite-types.ts'
@@ -129,9 +129,23 @@ export type SnapshotBootOptions<TPayload = Schema.Json> = {
   readonly timeout?: Duration.Input
 }
 
-/** Lowercase hex SHA-256, used for manifest integrity checks on every platform. */
-export const sha256Hex = (bytes: Uint8Array): string => {
-  const digest = sha256(bytes)
+/** Lowercase hex SHA-256, used for manifest integrity checks on every platform. Synchronous, pure JS. */
+export const sha256Hex = (bytes: Uint8Array): string => toHex(sha256(bytes))
+
+/**
+ * Lowercase hex SHA-256 using the platform's native WebCrypto (browsers, Node, workerd) when available, which is an
+ * order of magnitude faster than {@link sha256Hex} on snapshot-sized inputs. Falls back to the pure-JS hash.
+ */
+export const digestSha256Hex = (bytes: Uint8Array<ArrayBuffer>): Effect.Effect<string> => {
+  const subtle = globalThis.crypto?.subtle
+  if (subtle === undefined) return Effect.sync(() => sha256Hex(bytes))
+  return Effect.tryPromise(() => subtle.digest('SHA-256', bytes)).pipe(
+    Effect.map((digest) => toHex(new Uint8Array(digest))),
+    Effect.catch(() => Effect.sync(() => sha256Hex(bytes))),
+  )
+}
+
+const toHex = (digest: Uint8Array): string => {
   let hex = ''
   for (let i = 0; i < digest.length; i++) hex += digest[i]!.toString(16).padStart(2, '0')
   return hex

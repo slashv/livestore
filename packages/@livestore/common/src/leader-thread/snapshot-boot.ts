@@ -5,7 +5,7 @@ import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { EventSequenceNumber, SystemTables } from '../schema/mod.ts'
 import {
-  sha256Hex,
+  digestSha256Hex,
   SnapshotError,
   type SnapshotBootOptions,
   type SnapshotManifest,
@@ -165,7 +165,7 @@ export const fetchSnapshot = ({ source, key, storeId }: { source: SnapshotSource
         message: `Snapshot has ${bytes.byteLength} bytes, manifest says ${manifest.byteLength}`,
       })
     }
-    const digest = sha256Hex(bytes)
+    const digest = yield* digestSha256Hex(bytes)
     if (digest !== manifest.sha256) {
       return yield* new SnapshotError({ reason: 'integrity', message: `Snapshot checksum mismatch (${digest})` })
     }

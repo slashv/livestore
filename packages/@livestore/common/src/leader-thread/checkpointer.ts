@@ -13,7 +13,7 @@ import {
 import { UnknownError } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
-import { sha256Hex, type SnapshotManifest, type SnapshotSink } from '../snapshot/snapshot.ts'
+import { digestSha256Hex, type SnapshotManifest, type SnapshotSink } from '../snapshot/snapshot.ts'
 import * as SnapshotKey from '../snapshot/SnapshotKey.ts'
 import * as SnapshotTrigger from '../snapshot/trigger.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
@@ -148,7 +148,7 @@ export const makeCheckpointer = (
       if (exported.seqNum <= previousSeqNum) return Option.none()
 
       const hashStart = performance.now()
-      const digest = sha256Hex(exported.bytes)
+      const digest = yield* digestSha256Hex(exported.bytes)
       const hashMs = performance.now() - hashStart
 
       const uploadStart = performance.now()
