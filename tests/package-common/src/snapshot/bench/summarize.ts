@@ -95,9 +95,40 @@ for (const [, rows] of groupBy(snapshots, (r) => `${r.mix}/${r.events}/${r.tail}
     tail: first.tail,
   })
 }
+for (const r of prepareReplays) {
+  bootGroups.push({
+    mix: r.mix,
+    events: r.events,
+    mode: 'full replay',
+    n: 1,
+    wall: [r.clientMs],
+    cpu: [r.cpuUserMs + r.cpuSystemMs],
+    eventBytes: r.eventBytes,
+    snapshotBytes: 0,
+    tail: r.events,
+  })
+}
 bootGroups.sort((a, b) => a.mix.localeCompare(b.mix) || a.events - b.events || b.tail - a.tail)
 
+/**
+ * Full-replay CPU for (mix, events): measured runs when there are any, otherwise the per-event CPU of the closest
+ * longer prepare replay scaled to `events` (marked `~`).
+ */
+const fullReplayCpu = (mix: string, events: number): { ms: number; approx: boolean } | undefined => {
+  const measured = bootGroups.find((g) => g.mode === 'full replay' && g.mix === mix && g.events === events)
+  if (measured !== undefined) return { ms: median(measured.cpu), approx: false }
+  const reference = prepareReplays
+    .filter((r) => r.mix === mix)
+    .toSorted((a, b) => Math.abs(a.events - events) - Math.abs(b.events - events))[0]
+  if (reference === undefined) return undefined
+  return { ms: ((reference.cpuUserMs + reference.cpuSystemMs) / reference.events) * events, approx: true }
+}
+
 out.push('### Boot time and bytes (S1, S2, S3)\n')
+out.push(
+  'Local time on an idle machine is approximated by the CPU median. Network columns: local CPU time plus modelled ' +
+    'transfer (replay: `max(local, transfer)` since pages stream; snapshot: `transfer(blob) + max(local, transfer(tail))`).\n',
+)
 out.push(
   table(
     [
@@ -108,28 +139,31 @@ out.push(
       'wall median',
       'wall p95',
       'CPU median',
+      'speedup (CPU)',
       'event bytes',
       'snapshot bytes',
       '@100 Mbit/s',
       '@1 Gbit/s',
     ],
     bootGroups.map((g) => {
-      const wall = median(g.wall)
+      const local = median(g.cpu)
       const bytes = g.eventBytes + g.snapshotBytes
-      // Replay streams pages, so transfer overlaps processing; a snapshot is downloaded before it is installed and
-      // the tail pull then overlaps the tail replay.
       const total = (mbit: number) =>
         g.mode === 'full replay'
-          ? Math.max(wall, transferMs(bytes, mbit))
-          : transferMs(g.snapshotBytes, mbit) + Math.max(wall, transferMs(g.eventBytes, mbit))
+          ? Math.max(local, transferMs(bytes, mbit))
+          : transferMs(g.snapshotBytes, mbit) + Math.max(local, transferMs(g.eventBytes, mbit))
+      const full = fullReplayCpu(g.mix, g.events)
       return [
         g.mix,
         k(g.events),
         g.mode,
         String(g.n),
-        s(wall),
+        s(median(g.wall)),
         s(p95(g.wall)),
-        s(median(g.cpu)),
+        s(local),
+        g.mode === 'full replay' || full === undefined
+          ? '–'
+          : `${full.approx === true ? '~' : ''}${(full.ms / local).toFixed(0)}×`,
         mb(g.eventBytes),
         g.snapshotBytes > 0 ? mb(g.snapshotBytes) : '–',
         s(total(100)),
@@ -294,43 +328,72 @@ if (breakdowns.length > 0) {
       0,
     )
     const jsKnownMs = ((parseUs + decodeUs + buildUs) * events) / 1000
-    const rowsOut: string[][] = [
-      ['wire JSON parse (micro)', us((parseUs * events) / 1000), ''],
-      ['arg decoding (micro)', us((decodeUs * events) / 1000), ''],
-      ['materializer JS: building statements (micro)', us((buildUs * events) / 1000), ''],
-      ['state writes (SQLite, user tables)', us(m('stateWrites')), 'timed SqliteDb wrapper'],
-      ['journal: session create/changeset/finish', us(m('sessionOps')), 'timed SqliteDb wrapper'],
-      ['journal: changeset row writes', us(m('journalWrites')), 'timed SqliteDb wrapper'],
-      ['state head row + savepoints', us(m('stateHead') + m('stateTx')), 'timed SqliteDb wrapper'],
-      ['eventlog bookkeeping (inserts, sync status, tx)', us(m('eventlog')), 'timed SqliteDb wrapper'],
+    // The SQLite buckets are wall-clock; on a loaded machine they include time the process waited for a core. Shares
+    // of client wall time are robust to that, and scaling a share by the measured CPU per event gives µs of work.
+    const cpuPerEventUs = (median(full.map((r) => r.cpuUserMs + r.cpuSystemMs)) / events) * 1000
+    const micros = (ms: number) => (ms / events) * 1000
+    const sqlShare = (ms: number) => ms / clientMs
+    const rowsOut: Array<[string, number, string]> = [
+      ['wire JSON parse', micros((parseUs * events) / 1000), 'micro-benchmark (CPU)'],
+      ['arg decoding (Schema)', micros((decodeUs * events) / 1000), 'micro-benchmark (CPU)'],
+      ['materializer JS: building statements', micros((buildUs * events) / 1000), 'micro-benchmark (CPU)'],
+      ['state writes (SQLite, user tables)', sqlShare(m('stateWrites')) * cpuPerEventUs, 'timed SqliteDb wrapper'],
       [
-        'sync processor, Effect runtime, GC (remainder)',
-        us(clientMs - sqlMs - jsKnownMs),
-        'client time minus all of the above',
+        'journal: session create / changeset / finish',
+        sqlShare(m('sessionOps')) * cpuPerEventUs,
+        'timed SqliteDb wrapper',
       ],
-      ['**total client time**', us(clientMs), `n=${full.length}`],
+      ['journal: changeset row writes', sqlShare(m('journalWrites')) * cpuPerEventUs, 'timed SqliteDb wrapper'],
+      [
+        'state head row + savepoints',
+        sqlShare(m('stateHead') + m('stateTx')) * cpuPerEventUs,
+        'timed SqliteDb wrapper',
+      ],
+      [
+        'eventlog bookkeeping (inserts, sync status, tx)',
+        sqlShare(m('eventlog')) * cpuPerEventUs,
+        'timed SqliteDb wrapper',
+      ],
     ]
-    out.push(`\n${full[0]!.storage} storage, ${full[0]!.mix} mix, ${k(events)} events; µs per event (median):\n`)
+    const attributed = rowsOut.reduce((t, r) => t + r[1], 0)
+    rowsOut.push([
+      'sync processor, Effect runtime, GC (remainder)',
+      cpuPerEventUs - attributed,
+      'CPU per event minus the rows above',
+    ])
+    rowsOut.push(['**total (CPU per event)**', cpuPerEventUs, `n=${full.length}; wall ${us(clientMs)} µs/event`])
+    out.push(`\n${full[0]!.storage} storage, ${full[0]!.mix} mix, ${k(events)} events:\n`)
     out.push(
       table(
-        ['component', 'µs/event', 'method'],
-        rowsOut.map((r) => [r[0]!, r[1]!, r[2]!]),
+        ['component', 'µs/event', 'share', 'method'],
+        rowsOut.map((r) => [r[0], r[1].toFixed(1), `${((r[1] / cpuPerEventUs) * 100).toFixed(0)}%`, r[2]]),
       ),
     )
+    void sqlMs
+    void jsKnownMs
     const nosession = variantMs('nosession')
     const noop = variantMs('noop')
     if (nosession !== undefined || noop !== undefined) {
-      out.push('\nVariant runs (whole client time, µs per event):\n')
+      const cpuOf = (variant: string) => {
+        const vs = byVariant.get(variant) ?? []
+        return vs.length === 0 ? undefined : (median(vs.map((r) => r.cpuUserMs + r.cpuSystemMs)) / events) * 1000
+      }
+      out.push('\nVariant runs (whole client, per event):\n')
       out.push(
         table(
-          ['variant', 'µs/event', 'delta vs full'],
-          [
-            ['full', us(clientMs), ''],
-            ...(nosession === undefined
-              ? []
-              : [['no changeset recording (session no-op)', us(nosession), us(nosession - clientMs)]]),
-            ...(noop === undefined ? [] : [['no-op materializers (no state SQL)', us(noop), us(noop - clientMs)]]),
-          ],
+          ['variant', 'wall µs/event', 'CPU µs/event', 'CPU delta vs full'],
+          (['full', 'nosession', 'noop'] as const)
+            .filter((variant) => cpuOf(variant) !== undefined)
+            .map((variant) => [
+              variant === 'full'
+                ? 'full'
+                : variant === 'nosession'
+                  ? 'no changeset recording (no-op session)'
+                  : 'no-op materializers (no state SQL)',
+              us(variantMs(variant)!),
+              cpuOf(variant)!.toFixed(0),
+              variant === 'full' ? '' : (cpuOf(variant)! - cpuOf('full')!).toFixed(0),
+            ]),
         ),
       )
     }
@@ -364,9 +427,11 @@ if (micro.length > 0) {
 }
 
 // --- S6: checkpointer under load -------------------------------------------------------------------------------------
-const checkpointers = read('checkpointer')
+const allCheckpointers = read('checkpointer').filter((r) => r.label !== 'test')
+const checkpointers = allCheckpointers.filter((r) => r.clock !== 'virtual')
+const virtualCheckpointers = allCheckpointers.filter((r) => r.clock === 'virtual')
 if (checkpointers.length > 0) {
-  out.push('\n### Checkpointer under sustained load (S6)\n')
+  out.push('\n### Checkpointer under sustained load, wall clock (S6)\n')
   out.push(
     table(
       [
@@ -402,6 +467,47 @@ if (checkpointers.length > 0) {
           pubs.length > 0 ? s(median(pubs.map((p) => p.exportMs + p.hashMs))) : '–',
           k(Math.max(...samples.map((x) => x.snapshotLagEvents))),
           k(r.finalLeaderBehind),
+          `${(r.cpuShare * 100).toFixed(0)}%`,
+          samples.length > 1 ? `${(samples.at(-1)!.heapUsedMiB - samples[0]!.heapUsedMiB).toFixed(0)} MiB` : '–',
+        ]
+      }),
+    ),
+  )
+}
+
+if (virtualCheckpointers.length > 0) {
+  out.push('\n### Checkpointer under sustained load, event time (S6)\n')
+  out.push(
+    table(
+      [
+        'trigger',
+        'base',
+        'rate ev/s',
+        'duration',
+        'published',
+        'median tail/publish',
+        'median snapshot',
+        'export / hash / upload (median)',
+        'max snapshot lag',
+        'CPU ms/event',
+        'core share at rate',
+        'heap growth',
+      ],
+      virtualCheckpointers.map((r) => {
+        const pubs = r.publishes as Row[]
+        const samples = r.samples as Row[]
+        const med = (key: string) => median(pubs.map((p) => p[key] as number))
+        return [
+          r.label === 'default' ? 'default' : `${r.label} (replayCostPerEventMs ${r.trigger.replayCostPerEventMs})`,
+          k(r.base),
+          k(r.rate),
+          `${r.seconds} s`,
+          String(r.published),
+          pubs.length > 0 ? k(med('tailEvents')) : '–',
+          pubs.length > 0 ? mb(med('byteLength')) : '–',
+          pubs.length > 0 ? `${s(med('exportMs'))} / ${s(med('hashMs'))} / ${s(med('uploadMs'))}` : '–',
+          `${k(Math.max(...samples.map((x) => x.snapshotLagEvents)))} (${(Math.max(...samples.map((x) => x.snapshotLagEvents)) / r.rate).toFixed(0)} s)`,
+          r.cpuMsPerEvent.toFixed(2),
           `${(r.cpuShare * 100).toFixed(0)}%`,
           samples.length > 1 ? `${(samples.at(-1)!.heapUsedMiB - samples[0]!.heapUsedMiB).toFixed(0)} MiB` : '–',
         ]

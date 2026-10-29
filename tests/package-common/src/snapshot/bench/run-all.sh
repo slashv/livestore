@@ -3,7 +3,7 @@
 # results/*.jsonl next to this script (override with SNAPSHOT_BENCH_RESULTS). Databases and cached snapshots go to
 # SNAPSHOT_BENCH_DIR (default: $TMPDIR/livestore-snapshot-bench, ~15 GB for the 10M runs).
 #
-#   ./run-all.sh micro prepare snapshot replay breakdown checkpointer export-limits   # phases, in this order
+#   ./run-all.sh micro prepare snapshot replay breakdown checkpointer export-limits leak-probe   # phases
 #   ./run-all.sh prepare10m                                              # ~2-3 h per mix
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -27,8 +27,9 @@ phase() {
       ;;
     replay)
       for mix in append update; do
-        for rep in 1 2 3 4 5; do node boot.ts replay --mix "$mix" --events 100000 --rep "$rep"; done
-        for rep in 1 2; do node segmented.ts replay --mix "$mix" --events 1000000 --segment 250000 --rep "$rep"; done
+        for rep in 1 2 3; do node boot.ts replay --mix "$mix" --events 100000 --rep "$rep"; done
+        # 1M+ full replays come from `prepare` (segmented.ts records them in results/prepare-replay.jsonl). More reps:
+        # node segmented.ts replay --mix "$mix" --events 1000000 --segment 250000 --rep 1
       done
       ;;
     snapshot)
@@ -56,15 +57,26 @@ phase() {
       done
       for rep in 1 2 3; do node boot.ts replay --mix append --events 100000 --storage fs --breakdown full --rep "$rep"; done
       ;;
+    leak-probe)
+      node --expose-gc leak-probe.ts --calls 200000
+      ;;
     export-limits)
       for mib in 256 512 1024 1536 2048; do node export-limits.ts --mib "$mib" || true; done
       ;;
     checkpointer)
+      # Wall clock: events arrive in real time (needs a machine that grants the process a full core).
       for base in 100000 1000000; do
         for rate in 100 1000 10000; do
           node checkpointer.ts --mix append --base "$base" --rate "$rate" --seconds 120
         done
       done
+      # Event time: CPU per virtual second = core share needed for the rate, independent of machine load.
+      calibrated='{"replayCostPerEventMs":0.5}'
+      node checkpointer.ts --clock virtual --mix append --base 100000 --rate 100 --seconds 120 --label default
+      node checkpointer.ts --clock virtual --mix append --base 100000 --rate 1000 --seconds 60 --label default
+      node checkpointer.ts --clock virtual --mix append --base 100000 --rate 1000 --seconds 60 --label calibrated --trigger "$calibrated"
+      node checkpointer.ts --clock virtual --mix append --base 100000 --rate 10000 --seconds 10 --label default
+      node checkpointer.ts --clock virtual --mix append --base 1000000 --rate 1000 --seconds 30 --label calibrated --trigger "$calibrated"
       ;;
     *)
       echo "unknown phase $1" >&2

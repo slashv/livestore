@@ -1,7 +1,7 @@
 /**
  * Checkpointer under sustained write load: one measurement per process.
  *
- *   node checkpointer.ts --mix append --base 100000 --rate 1000 --seconds 120 [--trigger '{"alpha":0.5}']
+ *   node checkpointer.ts --mix append --base 100000 --rate 1000 --seconds 120 [--clock virtual] [--trigger '{"alpha":0.5}']
  *
  * The checkpointer leader boots from the cached snapshot at `base` (written by `boot.ts prepare`), then the benchmark
  * backend appends `rate` events per second while the default `makeCheckpointer` loop publishes into an in-memory
@@ -26,6 +26,7 @@ import {
   makeSqlite,
   memorySnapshot,
   parseArgs,
+  type Storage,
   waitForHead,
   writeResult,
 } from './lib.ts'
@@ -40,6 +41,9 @@ const seconds = Number(args.seconds ?? 120)
 const trigger =
   args.trigger === undefined ? {} : (fromJson(args.trigger) as Partial<Snapshot.SnapshotTrigger.TriggerParams>)
 const label = args.label ?? 'default'
+const storage = (args.storage ?? 'fs') as Storage
+/** `wall`: events arrive on the wall clock. `virtual`: event time, see below. */
+const clock = (args.clock ?? 'wall') as 'wall' | 'virtual'
 const TICK_MS = 100
 
 const program = Effect.gen(function* () {
@@ -57,7 +61,7 @@ const program = Effect.gen(function* () {
   yield* publishStore.sink.publish({ manifest: unpublished, bytes })
 
   const backend = yield* makeGeneratorBackend({ mix, initialHead: base })
-  const dbs = yield* makeClientDbs({ makeSqliteDb, storage: 'fs', name: `checkpointer-load-${mix}-${base}-${rate}` })
+  const dbs = yield* makeClientDbs({ makeSqliteDb, storage, name: `checkpointer-load-${mix}-${base}-${rate}` })
   const leader = yield* bootBenchLeader({
     makeSqliteDb,
     dbs,
@@ -68,10 +72,85 @@ const program = Effect.gen(function* () {
   })
   yield* waitForHead(leader, base)
 
-  const checkpointer = yield* makeCheckpointer({ schema, storeId, sink: publishStore.sink, trigger }).pipe(
+  let virtualNow = Date.now()
+  const checkpointer = yield* makeCheckpointer({
+    schema,
+    storeId,
+    sink: publishStore.sink,
+    trigger,
+    ...(clock === 'virtual' ? { now: () => virtualNow, pollInterval: 10 } : {}),
+  }).pipe(
     Effect.provideService(LeaderThreadCtx, leader.ctx),
     Effect.provideService(StateSqliteDb.StateSqliteDb, dbs.dbState),
   )
+
+  if (clock === 'virtual') {
+    /**
+     * Event time instead of wall time: every virtual second appends `rate` events, waits until the checkpointer has
+     * applied them and evaluated the trigger (publishing if it decides to), then advances the trigger's clock by one
+     * second. The CPU used per virtual second is the share of a dedicated core this rate needs, independent of how
+     * much CPU the machine actually granted the process.
+     */
+    const cpuStart = process.cpuUsage()
+    const wallStart = performance.now()
+    const vSamples: Array<Record<string, unknown>> = []
+    const vPublishes: Array<Record<string, unknown>> = []
+    let head = base
+    for (let t = 1; t <= seconds; t++) {
+      const cpuBefore = process.cpuUsage()
+      yield* backend.advance(rate)
+      head += rate
+      yield* waitForHead(leader, head)
+      virtualNow += 1000
+      // Wait for an evaluation that saw this head under the new clock, and for the publication it may have started.
+      while (true) {
+        const stats = yield* SubscriptionRef.get(checkpointer.stats)
+        if (stats.head >= head && stats.lastDecision !== undefined) {
+          const publishing = stats.lastDecision._tag === 'publish'
+          const published = Option.match(stats.latestManifest, { onNone: () => 0, onSome: (m) => m.seqNum }) >= head
+          if (publishing === false || published === true) break
+        }
+        yield* Effect.sleep(5)
+      }
+      const stats = yield* SubscriptionRef.get(checkpointer.stats)
+      const cpu = process.cpuUsage(cpuBefore)
+      if (stats.publishedCount > vPublishes.length && Option.isSome(stats.lastPublish) === true) {
+        vPublishes.push({ tSec: t, ...stats.lastPublish.value })
+      }
+      vSamples.push({
+        tSec: t,
+        backendHead: head,
+        snapshotLagEvents: head - Option.match(stats.latestManifest, { onNone: () => base, onSome: (m) => m.seqNum }),
+        published: stats.publishedCount,
+        cpuMs: (cpu.user + cpu.system) / 1000,
+        ...memorySnapshot(),
+      })
+    }
+    const cpu = process.cpuUsage(cpuStart)
+    const final = yield* SubscriptionRef.get(checkpointer.stats)
+    writeResult('checkpointer', {
+      command: 'checkpointer',
+      clock,
+      label,
+      storage,
+      mix,
+      base,
+      rate,
+      seconds,
+      trigger: { ...Snapshot.SnapshotTrigger.defaultTriggerParams, ...trigger },
+      appended: head - base,
+      published: final.publishedCount,
+      failed: final.failedCount,
+      /** CPU per virtual second: the share of one dedicated core needed to follow `rate`. */
+      cpuShare: (cpu.user + cpu.system) / 1000 / (seconds * 1000),
+      cpuMsPerEvent: (cpu.user + cpu.system) / 1000 / (head - base),
+      wallMs: performance.now() - wallStart,
+      publishes: vPublishes,
+      samples: vSamples,
+      hardware: hardware(),
+    })
+    return yield* leader.shutdown
+  }
 
   const publishes: Array<Record<string, unknown>> = []
   const samples: Array<Record<string, unknown>> = []
@@ -124,7 +203,9 @@ const program = Effect.gen(function* () {
   const final = yield* SubscriptionRef.get(checkpointer.stats)
   writeResult('checkpointer', {
     command: 'checkpointer',
+    clock,
     label,
+    storage,
     mix,
     base,
     rate,

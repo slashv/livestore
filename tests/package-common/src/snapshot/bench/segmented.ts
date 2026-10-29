@@ -6,7 +6,7 @@
  *   node segmented.ts prepare --mix update --events 10000000 --segment 250000 --tails 0,1000,10000,100000
  *
  * Why processes and not one leader: a leader retains about 6 KB of JS heap per pulled event (V8's 4 GiB default heap
- * fills at ~650k events) and every SQLite `prepare` leaks its SQL text in the wasm heap (about 1.4 KB per event,
+ * fills at ~700k events) and every SQLite `prepare` leaks its SQL text in the wasm heap (about 1.4 KB per event,
  * 2 GiB cap at ~1.4M events). Restarting the process resets both. Each segment process warms up before its timed
  * part; the aggregate is the sum of the segments' boot-to-head times.
  */
