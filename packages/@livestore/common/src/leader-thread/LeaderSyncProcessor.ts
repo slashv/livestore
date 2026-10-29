@@ -94,6 +94,8 @@ interface Options {
   readonly onBackendIdMismatch: 'reset' | 'shutdown' | 'ignore'
   readonly params: { readonly localPushBatchSize?: number; readonly backendPushBatchSize?: number }
   readonly livePull: boolean
+  /** No client sessions will ever connect (e.g. a checkpointer), so pull items are not retained for them. */
+  readonly headless?: boolean
   readonly testing: {
     readonly delays?: {
       readonly localPushProcessing?: Effect.Effect<void>
@@ -124,6 +126,7 @@ export const make = Effect.fnUntraced(function* ({
   onError,
   onBackendIdMismatch,
   livePull,
+  headless = false,
   params,
   testing,
 }: Options) {
@@ -134,7 +137,7 @@ export const make = Effect.fnUntraced(function* ({
 
   const mailbox = yield* Queue.unbounded<LeaderMessage>()
   const syncStateRef = yield* SubscriptionRef.make(initialSyncState)
-  const connectedSessions = yield* makePullQueueSet
+  const connectedSessions = yield* makePullQueueSet({ retainPullItems: headless === false })
   const bootDeferred = yield* Deferred.make<EventSequenceNumber.Client.Composite>()
   const startedDeferred = yield* Deferred.make<void>()
   const stoppedDeferred = yield* Deferred.make<void>()
@@ -1258,11 +1261,13 @@ interface PullQueueSet {
   }) => Effect.Effect<void, never>
 }
 
-const makePullQueueSet = Effect.gen(function* () {
+const makePullQueueSet = Effect.fnUntraced(function* ({ retainPullItems }: { retainPullItems: boolean }) {
   const set = new Set<Queue.Queue<typeof PullItem.Type>>()
 
   type StringifiedSeqNum = string
-  // NOTE this could grow unbounded for long running sessions
+  // Lets a session that connects later catch up from its cursor.
+  // NOTE this grows unbounded for long running leaders that serve sessions. Headless leaders (no sessions, e.g. a
+  // checkpointer) disable it via `retainPullItems`.
   const cachedPullItems = new Map<StringifiedSeqNum, (typeof PullItem.Type)[]>()
 
   yield* Effect.addFinalizer(() =>
@@ -1349,7 +1354,9 @@ const makePullQueueSet = Effect.gen(function* () {
         globalHead: item.globalHead,
         materializerHashes: item.materializerHashes,
       })
-      if (cachedPullItems.has(seqNumStr) === true) {
+      if (retainPullItems === false) {
+        // Nothing to retain for sessions that will never connect.
+      } else if (cachedPullItems.has(seqNumStr) === true) {
         cachedPullItems.get(seqNumStr)!.push(pullItem)
       } else {
         cachedPullItems.set(seqNumStr, [pullItem])

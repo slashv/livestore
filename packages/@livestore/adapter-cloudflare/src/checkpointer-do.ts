@@ -391,6 +391,8 @@ export const makeCheckpointerDurableObject = <TEnv>(
           storeId,
           // The checkpointer never pushes, so a fixed client id is fine and keeps the persisted eventlog stable.
           clientId: 'livestore-checkpointer',
+          // No session ever connects, so the leader must not retain pull items for one.
+          headless: true,
           resetPersistence,
           syncOptions: {
             backend: makeDoRpcSync({

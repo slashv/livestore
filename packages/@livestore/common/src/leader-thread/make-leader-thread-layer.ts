@@ -65,6 +65,13 @@ export interface MakeLeaderThreadLayerParams {
   shutdownChannel: ShutdownChannel
   /** Boot warning to emit (e.g., OPFS unavailable in private browsing) */
   bootWarning?: BootStatus
+  /**
+   * The leader serves no client sessions (e.g. a checkpointer). Skips retaining pull items for sessions that could
+   * connect later, which otherwise grows memory with every applied event.
+   *
+   * @default false
+   */
+  headless?: boolean
   params?: {
     localPushBatchSize?: number
     backendPushBatchSize?: number
@@ -96,6 +103,7 @@ export const makeLeaderThreadLayer = ({
   devtoolsOptions,
   shutdownChannel,
   bootWarning,
+  headless = false,
   params,
   testing,
 }: MakeLeaderThreadLayerParams): Layer.Layer<
@@ -265,6 +273,7 @@ export const makeLeaderThreadLayer = ({
       onError: syncOptions?.onSyncError ?? 'ignore',
       onBackendIdMismatch: syncOptions?.onBackendIdMismatch ?? 'reset',
       livePull: syncOptions?.livePull ?? true,
+      headless,
       params: {
         ...omitUndefineds({
           localPushBatchSize: params?.localPushBatchSize,

@@ -184,6 +184,7 @@ export const bootLeader = ({
   storeId = 'snapshot-test-store',
   syncOptions,
   leaderSchema = schema,
+  headless,
 }: {
   makeSqliteDb: MakeSqliteDb
   dbs: ClientDbs
@@ -191,6 +192,8 @@ export const bootLeader = ({
   storeId?: string
   syncOptions: SyncOptions | undefined
   leaderSchema?: LiveStoreSchema
+  /** The leader serves no sessions (checkpointers). */
+  headless?: boolean
 }): Effect.Effect<BootedLeader, UnknownError, Scope.Scope> =>
   Effect.gen(function* () {
     const outer = yield* Effect.scope
@@ -213,6 +216,7 @@ export const bootLeader = ({
         makeSqliteDb,
         syncOptions,
         devtoolsOptions: { enabled: false },
+        ...(headless !== undefined ? { headless } : {}),
         shutdownChannel: shutdownChannel.webChannel,
       }).pipe(Layer.provide(makeSqliteServicesLayer(dbs)), Layer.provide(FetchHttpClient.layer)),
       scope,

@@ -51,6 +51,8 @@ export interface MakeDoLeaderThreadOptions {
    * Defaults to a channel that drops them.
    */
   shutdownChannel?: ShutdownChannel.ShutdownChannel
+  /** No client session will connect (e.g. a checkpointer). See `MakeLeaderThreadLayerParams.headless`. */
+  headless?: boolean
 }
 
 export type DoLeaderThreadServices =
@@ -94,6 +96,7 @@ export const makeDoLeaderThread = ({
   syncPayloadSchema,
   params,
   shutdownChannel,
+  headless,
 }: MakeDoLeaderThreadOptions): Effect.Effect<DoLeaderThread, UnknownError, Scope.Scope | HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const sqlite3 = yield* Effect.promise(() => loadSqlite3Wasm())
@@ -139,7 +142,7 @@ export const makeDoLeaderThread = ({
         shutdownChannel: shutdownChannel ?? (yield* WebChannel.noopChannel<any, any>()),
         syncPayloadEncoded,
         syncPayloadSchema,
-        ...omitUndefineds({ params }),
+        ...omitUndefineds({ params, headless }),
       }).pipe(Layer.provideMerge(Layer.mergeAll(sqliteDbLayer, stateServicesLayer))),
     )
 
