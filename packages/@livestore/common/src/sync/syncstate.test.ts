@@ -488,6 +488,63 @@ Vitest.describe('syncstate', () => {
     })
 
     Vitest.describe('upstream-advance: rebase', () => {
+      Vitest.it.effect('should only roll back the divergent suffix when client-only events lead the pending set', () =>
+        Effect.gen(function* () {
+          // The client-only event shifts the pending indices. Divergence must still be found at e2_0, not one earlier,
+          // and only the incoming events after the confirmed prefix are new.
+          const e2_0_other = makeTestEvent({
+            seqNum: { global: 2, client: 0 },
+            parentSeqNum: e1_0.seqNum,
+            payload: 'other',
+            isClientOnly: false,
+          })
+          const syncState = new SyncState.SyncState({
+            pending: [e0_1, e1_0, e2_0],
+            upstreamHead: EventSequenceNumber.Client.ROOT,
+            localHead: e2_0.seqNum,
+          })
+          const result = yield* merge({
+            syncState,
+            payload: SyncState.PayloadUpstreamAdvance.make({ newEvents: [e1_0, e2_0_other] }),
+            ignoreClientOnlyEvents: true,
+          })
+          const e2_0_e3_0 = rebaseTestEvent({ event: e2_0, parentSeqNum: e2_0_other.seqNum, rebaseGeneration: 1 })
+
+          expectRebase(result)
+          expectEventArraysEqual(result.rollbackEvents, [e2_0])
+          expectEventArraysEqual(result.newEvents, [e2_0_other, e2_0_e3_0])
+          expectEventArraysEqual(result.newSyncState.pending, [e2_0_e3_0])
+          expect(result.newSyncState.upstreamHead).toMatchObject(e2_0_other.seqNum)
+        }),
+      )
+
+      Vitest.it.effect('findDivergencePoint maps the filtered divergence index back to the original list', () =>
+        Effect.sync(() => {
+          const e2_0_other = makeTestEvent({
+            seqNum: { global: 2, client: 0 },
+            parentSeqNum: e1_0.seqNum,
+            payload: 'other',
+            isClientOnly: false,
+          })
+          const args = { isEqualEvent, isClientOnlyEvent, ignoreClientOnlyEvents: true }
+          expect(
+            SyncState.findDivergencePoint({
+              existingEvents: [e0_1, e1_0, e2_0],
+              incomingEvents: [e1_0, e2_0_other],
+              ...args,
+            }),
+          ).toBe(2)
+          // Reverse direction (incoming upstream events against pending with client-only events).
+          expect(
+            SyncState.findDivergencePoint({
+              existingEvents: [e1_0, e2_0_other],
+              incomingEvents: [e0_1, e1_0, e2_0],
+              ...args,
+            }),
+          ).toBe(1)
+        }),
+      )
+
       Vitest.it.effect('should rebase single client event to end', () =>
         Effect.gen(function* () {
           const syncState = new SyncState.SyncState({

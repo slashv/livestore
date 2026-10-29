@@ -467,10 +467,13 @@ export const findDivergencePoint = ({
   ignoreClientOnlyEvents: boolean
 }): number => {
   if (ignoreClientOnlyEvents === true) {
+    // Both sides are compared without client-only events (the pending side may be either argument), and the
+    // divergence index refers to the filtered list, so it is mapped back to the original one by sequence number.
     const filteredExistingEvents = existingEvents.filter((event) => !isClientOnlyEvent(event))
+    const filteredIncomingEvents = incomingEvents.filter((event) => !isClientOnlyEvent(event))
     const divergencePointWithoutClientOnlyEvents = findDivergencePoint({
       existingEvents: filteredExistingEvents,
-      incomingEvents,
+      incomingEvents: filteredIncomingEvents,
       isEqualEvent,
       isClientOnlyEvent,
       ignoreClientOnlyEvents: false,
@@ -478,7 +481,7 @@ export const findDivergencePoint = ({
 
     if (divergencePointWithoutClientOnlyEvents === -1) return -1
 
-    const divergencePointEventSequenceNumber = existingEvents[divergencePointWithoutClientOnlyEvents]!.seqNum
+    const divergencePointEventSequenceNumber = filteredExistingEvents[divergencePointWithoutClientOnlyEvents]!.seqNum
     // Now find the divergence point in the original array
     return existingEvents.findIndex((event) =>
       EventSequenceNumber.Client.isEqual(event.seqNum, divergencePointEventSequenceNumber),
