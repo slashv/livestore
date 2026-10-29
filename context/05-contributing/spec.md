@@ -50,7 +50,11 @@ where the implementation diverged from the proposal (e.g. `dispose()` vs the
 RFC's `clear()`, longest-wins cache-time); the RFC is retained as a historical
 record. RFC 0004 (serialized sync processors) is accepted and folded into
 [`02-system/03-sync/02-processors/`](../02-system/03-sync/02-processors/spec.md)
-(decision 0003 there); the RFC is retained as a historical record. RFC 0002
+(decision 0003 there); the RFC is retained as a historical record. RFC 0005
+(snapshot boot) is accepted as an experiment and folded into
+[`02-system/03-sync/04-snapshots/`](../02-system/03-sync/04-snapshots/spec.md)
+(decision 0001 there); its not-yet-implemented parts are tracked by that node's
+DELTA-001, and the RFC is retained as a historical record. RFC 0002
 (command replay) is an active proposal (root LS-DQ1).
 
 ## Contribution Scope Tiers (LS.CONTRIB-R04)

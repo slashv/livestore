@@ -111,6 +111,11 @@ row completeness contracted by LS.SYS.EVT-R09):
   `syncMetadataJson`; indexed on `seqNumGlobal` and the full triple.
 - **`__livestore_sync_status`** — the upstream head plus `backendId`, used
   to detect a changed backend identity (`BackendIdMismatchError` handling).
+- **`__livestore_eventlog_base`** (experimental, snapshot boot only) — an
+  optional single row marking where the local eventlog begins when the client
+  booted from a state snapshot; no row means the eventlog starts at the root.
+  Additive, so it needs no storage format bump. Owned by
+  [`../03-sync/04-snapshots/`](../03-sync/04-snapshots/spec.md#eventlog-base).
 
 Properties:
 
@@ -121,7 +126,8 @@ Properties:
   (`eventlog.ts:89`), which physically `DELETE`s every rebase generation at
   each rolled-back `(global, client)` position, before the re-parented events
   are appended. The append-only contract holds for events at or below the
-  upstream head.
+  upstream head. Nothing compacts or truncates confirmed history; a
+  snapshot-booted client's eventlog merely starts at its base.
 - Each row is self-decoding: name, encoded args, composite position, and
   per-row schema hash — sufficient for drift detection and full rebuild
   (LS.SYS.EVT-R08). Unknown schema hashes are tolerated on read

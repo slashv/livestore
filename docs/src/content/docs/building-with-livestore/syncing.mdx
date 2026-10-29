@@ -120,8 +120,8 @@ Client -> Client: "Client is in sync"
 
 ### Compaction
 
-- Compaction isn't implemented yet (see [this issue](https://github.com/livestorejs/livestore/issues/136))
-- Compaction will be based on the upcoming [facts system functionality](https://github.com/livestorejs/livestore/issues/254).
+- LiveStore keeps the full event history; the sync backend's eventlog isn't compacted (see [this issue](https://github.com/livestorejs/livestore/issues/136)).
+- To keep the first boot of a fresh client fast as the history grows, LiveStore offers the experimental [snapshot boot](/building-with-livestore/snapshot-boot): fresh clients start from a recent state snapshot and pull only the newer events.
 
 ### Partitioning
 

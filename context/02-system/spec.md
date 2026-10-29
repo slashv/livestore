@@ -56,7 +56,7 @@ sourcing) and
 | --- | --- |
 | `01-event-model/` | Event definitions, event shapes, sequence numbers, eventlog semantics, facts (experimental) |
 | `02-state/` | Read-model dimension contract; children: `01-sqlite/` realization (+ `02-schema-management/`) |
-| `03-sync/` | Provider contract boundary; children: `01-syncstate/` (pure merge core), `02-processors/`, `03-cf/` realization |
+| `03-sync/` | Provider contract boundary; children: `01-syncstate/` (pure merge core), `02-processors/`, `03-cf/` realization, `04-snapshots/` (snapshot boot, experimental) |
 | `04-runtime/` | Leader/session topology, adapter + proxy contracts; children: `01-web/` (+ persistence/topology/leadership), `02-cloudflare/`, `03-webmesh/` |
 | `05-store/` | App-facing Store, commit path, lifecycle, multi-store; child: `01-reactivity/` |
 | `06-observability/` | Instrumentation contract, telemetry semantics |

@@ -55,5 +55,5 @@ Builds on the root requirements (notably LS-R04…R14). Child nodes:
   realizations depend on the contract, never the reverse. `refines: LS-R07,
   LS-R08, LS-R09, LS-R10`
 - **LS.SYS-R06 Experimental isolation:** Experimental subsystems (facts,
-  next-gen sync) must not change shipping behavior unless explicitly opted
-  into.
+  next-gen sync, snapshot boot) must not change shipping behavior unless
+  explicitly opted into.

@@ -163,6 +163,7 @@ Pick `'warn'` (default) to log every occurrence, `'ignore'` to silently drop new
     - for structs ...
       - you can add new fields if they have default values or are optional
       - you can remove fields
+- Changing what an event does to your state is done by adding a new, versioned event (e.g. `v2.TodoCreated`) with its own materializer, not by changing the materializer of an existing event. Events already in the eventlog keep the effect they had when they were written. LiveStore doesn't detect materializer code changes: an edited materializer doesn't trigger a state rebuild, so clients that replayed history at different times could end up with different state. [Snapshot boot](/building-with-livestore/snapshot-boot) relies on this convention.
 
 ## Event format
 

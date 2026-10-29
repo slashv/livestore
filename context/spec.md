@@ -38,6 +38,8 @@ context/                     root: LiveStore the product (this node)
       02-processors/         leader/session processors: queues, batching,
                              retry, pull precedence, cursors
       03-cf/                 Cloudflare provider realization
+      04-snapshots/          state snapshots for boot: key, manifest,
+                             eventlog base, checkpointer (experimental)
     04-runtime/              leader ⇄ client-session topology, adapter
                              contract + realizations, proxy contract,
                              persistence substrate (SQLite builds)
@@ -119,7 +121,7 @@ questions `DQ`, deltas `DELTA`, decisions by number):
 | `LS.SYS-*` | `02-system/` |
 | `LS.SYS.EVT-*` | `02-system/01-event-model/` |
 | `LS.SYS.STATE-*` / `LS.SYS.STATE.SQLITE-*`, `LS.SYS.STATE.SQLITE.SM-*` | `02-system/02-state/` and children |
-| `LS.SYS.SYNC-*` / `LS.SYS.SYNC.SS-*`, `LS.SYS.SYNC.PROC-*`, `LS.SYS.SYNC.CF-*` | `02-system/03-sync/` and children |
+| `LS.SYS.SYNC-*` / `LS.SYS.SYNC.SS-*`, `LS.SYS.SYNC.PROC-*`, `LS.SYS.SYNC.CF-*`, `LS.SYS.SYNC.SNAP-*` | `02-system/03-sync/` and children |
 | `LS.SYS.RT-*` / `LS.SYS.RT.WEB-*`, `LS.SYS.RT.CF-*`, `LS.SYS.RT.MESH-*`, `LS.SYS.RT.WEB.PERSIST-*`, `LS.SYS.RT.WEB.TOPO-*`, `LS.SYS.RT.WEB.LEAD-*` | `02-system/04-runtime/` and children |
 | `LS.SYS.STORE-*` / `LS.SYS.STORE.RX-*` | `02-system/05-store/` and children |
 | `LS.SYS.OBS-*` | `02-system/06-observability/` |
@@ -223,6 +225,9 @@ suite's failures reach its exit code.
   [decision 0004](./.decisions/0004-rfc-vrs-boundary.md); the open part is
   whether to accept and fold it in. See
   [open-questions.md](./open-questions.md).
+- **LS-DQ3 Offline rebuild of a snapshot-booted client** — a client whose
+  local eventlog starts at a snapshot base cannot rebuild state offline after
+  a state schema change. See [open-questions.md](./open-questions.md).
 
 (LS-DQ2 was resolved 2026-07-16 into
 [.decisions/0003-contrib-referencing.md](./.decisions/0003-contrib-referencing.md).)

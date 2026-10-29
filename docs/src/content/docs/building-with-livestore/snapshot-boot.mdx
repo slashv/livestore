@@ -1,0 +1,73 @@
+---
+title: Snapshot boot (experimental)
+description: Let fresh clients start from a recent state snapshot instead of replaying the whole event history.
+sidebar:
+  order: 46
+---
+
+:::caution[Experimental]
+Snapshot boot is an experimental, opt-in feature. Its APIs, route paths and storage layout may change between releases. Clients that don't configure it are not affected.
+:::
+
+{/* TODO(snapshot-boot): add type-checked snippets under docs/src/content/_assets/code/reference/syncing/snapshot-boot/ for the client `sync.snapshot` option, the Cloudflare worker routes with an R2 binding, and the checkpointer Durable Object, once their APIs are final. */}
+
+## Why snapshot boot
+
+A LiveStore client builds its state by replaying events. A client that starts with an empty local eventlog, such as a new device, a new browser profile, or an AI agent in a fresh sandbox, first pulls the store's entire history from the sync backend and materializes every event. As the history grows, that first boot gets slower, even when the resulting state stays small.
+
+Snapshot boot makes the first boot depend on the size of the state instead of the length of the history. A **checkpointer** next to your sync backend regularly publishes a **state snapshot**, a complete copy of the state database at a known position in the eventlog. A fresh client downloads the latest snapshot, installs it, and pulls only the events after it.
+
+This helps most when many clients start from scratch often, for example a fleet of AI agents that restart in new sandboxes.
+
+LiveStore keeps the full event history. The sync backend's eventlog is never compacted or truncated, and snapshots are only a faster way to reach the same state.
+
+## How it works
+
+1. **Publishing.** The checkpointer is an ordinary LiveStore client of the store. It pulls new events but never commits or pushes. When replaying the events since the last snapshot would cost more than a fixed share of downloading a snapshot, it exports its state database and publishes it. It uploads the blob first and then updates a small manifest that points to it. A store without new events publishes nothing.
+2. **Booting.** On startup, a client with an empty local eventlog asks for the manifest that matches its schema, downloads the snapshot, and checks its size and SHA-256 hash. It then installs the snapshot as its state database and continues syncing from the snapshot's position.
+3. **Falling back.** If no snapshot exists, or the download fails, times out, or doesn't verify, the client logs the reason and boots the usual way by replaying the full history. A snapshot problem never prevents a boot.
+
+A client that already has local data keeps using it and never replaces it with a snapshot.
+
+## Which snapshot a client can use
+
+A snapshot can be installed only by clients whose schema matches the checkpointer's:
+
+- the same state schema (SQLite tables),
+- the same event definitions (names, argument schemas and client-only flags),
+- the same LiveStore storage format version,
+- and the same sync backend identity. Snapshots from before a [backend reset](/building-with-livestore/syncing#backend-reset-detection) are ignored.
+
+When you deploy a schema change, run a checkpointer for the new schema as well. Until it has published, new clients on the new schema fall back to a full replay.
+
+## Changing materializers
+
+A snapshot contains the result of the materializers that produced it. LiveStore does not detect changes to materializer code, so snapshot boot relies on the [versioned event names convention](/building-with-livestore/events#schema-evolution):
+
+- When an event should start doing something different to your state, add a **new event** with a new name (for example `v2.TodoCreated`) and its own materializer, and commit the new event from then on.
+- Don't change what an existing event's materializer does. Events that are already in the log keep the effect they had when they were written.
+
+This convention keeps every client consistent, whether it booted from a snapshot, replayed the full history, or has had its data for a long time.
+
+## Limitations
+
+- **Local history starts at the snapshot.** A client that booted from a snapshot only has the events after the snapshot locally. `store.events`, the events stream and the devtools eventlog view begin there.
+- **State schema changes need the network.** If such a client later needs to rebuild its state, for example after you change a table, it either installs a snapshot for the new schema or downloads the missing history from the sync backend. If it is offline at that moment, boot fails with a clear error instead of producing incorrect state.
+- **Snapshot size.** On Cloudflare, the checkpointer holds the state database in a Durable Object's memory. Very large stores may exceed that limit.
+
+## Cloudflare setup
+
+With the [Cloudflare sync provider](/sync-providers/cloudflare), snapshot boot uses:
+
+- the sync Durable Object to store the manifests, so it serves only snapshots that match the current backend identity,
+- an R2 bucket for the snapshot files,
+- two opt-in worker routes, `GET …/snapshot/manifest` and `GET …/snapshot/blob`, which check the client's sync payload in the same way as the sync endpoints,
+- a checkpointer Durable Object for each store and schema, which keeps itself awake while new events arrive.
+
+Snapshot files that have been replaced are kept for a short grace period, so that clients that are still downloading can finish.
+
+## Further reading
+
+- [Syncing](/building-with-livestore/syncing)
+- [Events: schema evolution](/building-with-livestore/events#schema-evolution)
+- Design and rationale: [RFC 0005](https://github.com/livestorejs/livestore/blob/main/contributor-docs/rfcs/0005-snapshot-boot.md) and the [intent-layer node](https://github.com/livestorejs/livestore/tree/main/context/02-system/03-sync/04-snapshots)

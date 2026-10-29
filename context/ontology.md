@@ -134,6 +134,27 @@
   change, folded into release notes.
 - **BDFL** — Benevolent Dictator For Life: the project creator holds final
   decision authority; governance detail in `05-contributing/`.
+- **State snapshot** _(experimental)_ — A complete export of a store's state
+  database at a known global eventlog position, published so fresh clients can
+  boot from it. A cache of derived state: never synced, merged, or used to
+  replace history. _Avoid:_ unqualified "snapshot" (collides with the
+  session's recreate snapshot and the web fast path's persisted-state read),
+  compaction.
+- **Snapshot key** _(experimental)_ — The identity of the clients that can
+  install a state snapshot: state schema fingerprint, event-definition hash,
+  and storage format version.
+- **Snapshot manifest** _(experimental)_ — The small pointer to a state
+  snapshot blob: store, snapshot key, backend identity, global position,
+  cursor metadata, size, and SHA-256.
+- **Snapshot boot** _(experimental)_ — The leader boot path in which a client
+  with an empty eventlog installs a state snapshot and pulls only the events
+  after it, falling back to full replay on any failure.
+- **Eventlog base** _(experimental)_ — The global position at which a
+  snapshot-booted client's local eventlog begins; it stands in for the
+  missing event at that position for heads, cursors, and parent checks.
+- **Checkpointer** _(experimental)_ — A LiveStore client of a store that
+  pulls but never pushes, and publishes state snapshots when a cost model
+  says the tail has grown enough.
 - **Facts** _(experimental)_ — Declarative constraints an event sets,
   unsets, requires, or reads; input to ordering, compaction, and conflict
   detection.
@@ -146,7 +167,7 @@ them, derives from them, or observes the result.
 | --------------------- | ----------------------------------------------------------------------------- |
 | Produce | Store (commit), Client session |
 | Order | Eventlog, Event sequence number, Sync backend, Rebase, Facts _(experimental)_ |
-| Derive | Materializer, State, Client document |
+| Derive | Materializer, State, Client document, State snapshot _(experimental)_ |
 | Observe | Live query, Reactivity graph, Devtools |
 
 ### Term families and leitwörter
@@ -156,7 +177,7 @@ in their name:
 
 - **Event family** (leitwort "event") — anchor **Event**; followers Event
   definition, Eventlog, Event sequence number, Synced event, Client-only
-  event, Pending event, Derived event.
+  event, Pending event, Derived event, Eventlog base _(experimental)_.
 - **Client family** (leitwort "client") — anchor **Client**; followers
   Client session, Client document.
 - **Sync family** (leitwort "sync") — no single anchor noun; Sync provider,
@@ -170,6 +191,9 @@ in their name:
 - **State family** — anchor **State**; Materializer, Materialization
   journal, Changeset (SQLite session), Schema hash, and Storage format version
   are its derivation and versioning vocabulary (mechanism names, no shared leitwort).
+  **State snapshot** _(experimental)_ anchors a sub-family with leitwort
+  "snapshot": Snapshot key, Snapshot manifest, Snapshot boot; Checkpointer is
+  its producer (a client role, no leitwort).
 - **Store family** (leitwort "store") — anchor **Store**; followers storeId,
   Store registry. Live query, Query definition, Query instance, Result
   cache, and Reactivity graph are its observation vocabulary.

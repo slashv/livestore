@@ -35,7 +35,9 @@
   not the source of truth.
 - **Histories, not snapshots.** (Problem 3) Syncing merges event histories
   instead of reconciling states. Every change is recorded; concurrent work
-  converges deterministically.
+  converges deterministically. A derived state snapshot may speed up a fresh
+  client's start, but it is never what gets synced or merged, and the history
+  is kept in full.
 - **Rebuildable state.** (Problem 5) All queryable state is derived from the
   log and can be rebuilt or reshaped at any time — evolving the read model
   does not require migrating source data.

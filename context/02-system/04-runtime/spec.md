@@ -116,6 +116,18 @@ session's own storage probe, not from leader boot info; Cloudflare hardcodes
 in principle disagree (two probes, one reported mode) — violating
 LS.SYS.RT-R16 ([DELTA-002](./.delta/DELTA-002-dual-storage-probes.md)).
 
+### Snapshot Install
+
+**Maturity: experimental**
+
+With `syncOptions.snapshot`
+configured and an empty local eventlog, the leader may install a state
+snapshot before it constructs the sync backend client, then boot as usual
+with its upstream head at the snapshot's position. Any failure falls back to
+the full-replay boot. The contract is owned by
+[`../03-sync/04-snapshots/`](../03-sync/04-snapshots/spec.md#client-boot);
+this node only places it in leader boot.
+
 ## Transport Substrate (webmesh)
 
 Owned by [03-webmesh/](./03-webmesh/spec.md): mesh nodes, edges, and the
@@ -152,6 +164,10 @@ Leader boot rehydrates sync state entirely from the persisted eventlog
   `../03-sync/` calls `upstreamHead`);
 - pending events are re-derived as all persisted events after the upstream
   head (`Eventlog.getEventsSince`);
+- for a snapshot-booted client (experimental), the eventlog base stands in
+  for the missing event at the base: local head and backend cursor fall back
+  to it when no event row exists
+  ([`../03-sync/04-snapshots/`](../03-sync/04-snapshots/spec.md#eventlog-base));
 - pending non-client-only events are re-enqueued to the backend push queue.
 
 A new leader therefore continues from persisted state alone; no state is

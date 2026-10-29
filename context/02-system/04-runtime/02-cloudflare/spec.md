@@ -94,6 +94,24 @@ consumes billed row writes and does not explicitly compact the underlying DO
 database. Because it follows successful boot, it cannot recover a database that
 is already too full to rebuild.
 
+## Snapshot Checkpointer
+
+**Maturity: experimental**
+
+`@livestore/adapter-cloudflare` hosts the snapshot checkpointer
+([`../../03-sync/04-snapshots/`](../../03-sync/04-snapshots/spec.md#checkpointer)):
+a Durable Object running a headless leader (no client session needed) that
+live-pulls from the sync Durable Object, never pushes, and publishes state
+exports through an R2 sink plus the sync DO's manifest RPC. It is named
+`${storeId}/${key}`, so each schema line gets its own checkpointer, and an
+alarm keeps it awake while the log moves.
+
+The export reads the VFS-backed state database, not `SqlStorage`, so the
+`export()`/`import()` no-ops above do not apply to it. Its state database must
+fit the Durable Object's memory (LS.SYS.SYNC.SNAP-DQ3). A client Durable
+Object can also opt into snapshot boot as a client; the install then imports
+into the same VFS-backed state database.
+
 ## Eviction and Resume
 
 The DO adapter has no eviction-specific handling (no alarms, no hibernation

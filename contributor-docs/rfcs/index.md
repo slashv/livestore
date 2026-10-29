@@ -70,3 +70,13 @@ implementation against that canonical intent and close each delta as the
 implementation and its required evidence land. See
 [`context/05-contributing/spec.md`](../../context/05-contributing/spec.md)
 for the normative rule.
+
+## RFCs
+
+| RFC                                                                     | Status                                                                           |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [0001 Multi-store API](./0001-multi-store-api-design.md)                | implemented, folded into `context/02-system/05-store/`                           |
+| [0002 Command replay](./0002-command-replay.md)                         | open proposal (root `LS-DQ1`)                                                    |
+| [0003 Remove client document API](./0003-remove-client-document-api.md) | proposal                                                                         |
+| [0004 Serialized sync processors](./0004-serialized-sync-processors.md) | accepted, folded into `context/02-system/03-sync/02-processors/`                 |
+| [0005 Snapshot boot](./0005-snapshot-boot.md)                           | accepted as an experiment, folded into `context/02-system/03-sync/04-snapshots/` |

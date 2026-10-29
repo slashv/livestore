@@ -12,6 +12,21 @@ Builds on [../requirements.md](../requirements.md). Code:
 `common/src/rematerialize-from-eventlog.ts`. Schema change and migration:
 [02-schema-management](./02-schema-management/requirements.md).
 
+## Assumptions
+
+- **LS.SYS.STATE.SQLITE-A01 Materializer changes ship under new event
+  names:** Changing what an event does to state is done by adding a new event
+  definition with a new (versioned) name, e.g. `v2.TodoCreated`, and keeping
+  the old name's materializer unchanged. Materializer changes are therefore
+  forward-only: events already in the eventlog keep the effect they had. No
+  schema hash covers materializer code. The state fingerprint covers only
+  table ASTs, and the per-event-definition hash covers only the args schema
+  (see [schema management](./02-schema-management/spec.md#state-fingerprint-contract)).
+  A materializer-only edit therefore neither rebuilds persisted state nor
+  changes a state snapshot's key, and would make clients that replayed history
+  at different times diverge. Experimental snapshot boot relies on this
+  assumption (LS.SYS.SYNC.SNAP-A02).
+
 ## Requirements
 
 - **LS.SYS.STATE.SQLITE-R01 Typed table DSL:** Tables and columns are declared

@@ -76,7 +76,7 @@ A realization supplies (LS.SYS.STATE-R05):
 | --- | --- |
 | Mutation format | What a `MaterializerResult` is (e.g. SQL statement) |
 | Query surface | Typed read-only queries for app + live queries |
-| Rebuild | Recreate state from the full eventlog |
+| Rebuild | Recreate state from the full eventlog (or, for a client booted from a state snapshot, from a snapshot plus the events after it — experimental, [04-snapshots](../03-sync/04-snapshots/spec.md#rebuild-with-a-partial-eventlog)) |
 | Rollback | Undo recent materializations for rebase (e.g. SQLite's materialization journal) |
 | Schema drift handling | Detect definition changes, trigger rebuild |
 

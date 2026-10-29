@@ -82,6 +82,15 @@ rebasing and enable log compaction. Carries a parallel rebase/compaction
 stack duplicating core concepts; not part of the shipping contract
 (LS.SYS-R06).
 
+## Snapshot Boot
+
+**Maturity: experimental**. Owned by [04-snapshots](./04-snapshots/spec.md):
+a fresh client installs a state snapshot published by a checkpointer and pulls
+only the events after it. Snapshots use a separate source/sink contract, so
+the provider contract above is unchanged; the backend log is never compacted
+([decision 0001](./04-snapshots/.decisions/0001-snapshot-boot-over-compaction.md)
+chose snapshots over event compaction for boot cost).
+
 ## Realizations
 
 Full registry (in-repo + contrib, with conformance status):
@@ -96,4 +105,6 @@ Full registry (in-repo + contrib, with conformance status):
   confirmation stages.
 - **LS.SYS.SYNC-DQ2 next/ graduation:** What evidence graduates the history
   DAG + compaction design (couples with LS.SYS.EVT-DQ2 facts and root
-  LS-DQ1 command replay).
+  LS-DQ1 command replay). Boot cost is no longer a motivation for compaction:
+  it is addressed by snapshot boot, which keeps the full history
+  ([04-snapshots decision 0001](./04-snapshots/.decisions/0001-snapshot-boot-over-compaction.md)).

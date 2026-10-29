@@ -109,6 +109,14 @@ Server-side embedding of a LiveStore client inside Cloudflare (Durable
 Object hosting a store) is `04-runtime/`'s adapter concern
 (`adapter-cloudflare`), not part of this provider node.
 
+## Snapshot Serving
+
+**Maturity: experimental**. When snapshot boot is enabled, the Durable Object
+also stores snapshot manifests and the worker serves opt-in manifest and blob
+routes backed by R2. That extension builds on this node and is specified in
+[04-snapshots](../04-snapshots/spec.md#cloudflare); without it, nothing here
+changes.
+
 ## Optional telemetry
 
 The existing `makeDurableObject` option `otel` accepts either an Effect tracer

@@ -12,7 +12,8 @@ Builds on [../requirements.md](../requirements.md) (LS.SYS-R01, LS.SYS-R03)
 and root LS-R03, LS-R05, LS-R08, LS-A02. Code:
 `packages/@livestore/common/src/sync/`,
 `leader-thread/{LeaderSyncProcessor,RejectedPushError}.ts`. Realization:
-[03-cf](./03-cf/requirements.md).
+[03-cf](./03-cf/requirements.md). Snapshot boot (experimental):
+[04-snapshots](./04-snapshots/requirements.md).
 
 ID note: former LS.SYS.SYNC-R02…R05 moved to LS.SYS.SYNC.SS-R01…R04 when
 `01-syncstate/` was created; former R06…R08 renumbered to R02…R04.

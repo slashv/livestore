@@ -20,8 +20,11 @@ LS-R04…R06, LS-R10, LS-T04. Realization:
   state yields the same mutations on every client and platform. Non-determinism
   is a defect and is detected. `refines: LS-R05, LS.SYS-R01`
 - **LS.SYS.STATE-R03 Rebuildable and rollbackable:** The full state is
-  reproducible by replaying the eventlog, and recent materializations can be
-  rolled back to support rebase. `refines: LS-R06, LS-T04`
+  reproducible by replaying the eventlog, or by installing a state snapshot
+  taken at a known eventlog position and replaying the events after it
+  (experimental snapshot boot, `../03-sync/04-snapshots/`). Recent
+  materializations can be rolled back to support rebase.
+  `refines: LS-R06, LS-T04`
 - **LS.SYS.STATE-R04 Total materializer coverage:** Every non-derived event
   type has exactly one user-defined materializer; derived events must not have
   a user-defined one, though the framework may wire implicit materializers for

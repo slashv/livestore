@@ -93,6 +93,15 @@ application-configurable schema version, algorithm, override, or opt-out. The
 base64url encoding retains all 256 digest bits while keeping Cloudflare state
 filenames within its SQLite VFS limit.
 
+Materializer code is never fingerprint input, and the event-definition hashes
+in `__livestore_schema_event_defs` cover only each event's args schema. Editing
+a materializer without changing a table therefore selects the same state
+database and does not rebuild. The contract that makes this safe is the
+convention that changed behavior ships under a new event name
+(LS.SYS.STATE.SQLITE-A01). Experimental state snapshots are keyed by the same
+hashes and rely on the same convention
+([04-snapshots](../../../03-sync/04-snapshots/spec.md#snapshot-key)).
+
 This contract avoids Effect's private runtime AST shape, but it is not a
 complete identity for arbitrary Effect behavior. Effect's public representation
 does not identify transformation callbacks, so codecs with the same encoded and
@@ -182,6 +191,21 @@ The eventlog side is guarded only by a code comment
 `liveStoreStorageFormatVersion`") and a TODO for a proper versioning system.
 This asymmetry is the sharpest edge of the schema-management story and is
 captured honestly rather than as a guarantee.
+
+### Snapshot boot additions
+
+**Maturity: experimental**
+
+The snapshot-boot eventlog base table
+(`__livestore_eventlog_base`) is an exception to the bump rule above. It is a new,
+optional table created when missing; no existing table or column changes, so
+existing eventlogs open unchanged and older readers ignore it
+([04-snapshots](../../../03-sync/04-snapshots/spec.md#eventlog-base)).
+
+A state rebuild normally replays the full local eventlog. A client whose
+eventlog starts at a snapshot base instead re-seeds from a snapshot or
+backfills history from the backend first
+([04-snapshots](../../../03-sync/04-snapshots/spec.md#rebuild-with-a-partial-eventlog)).
 
 ## Open Design Questions
 

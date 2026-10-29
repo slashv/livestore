@@ -49,12 +49,21 @@ branch nodes refine them with scoped IDs (`refines:`). See
 
 ### Deterministic event-sourced core
 
-- **LS-R04 Canonical eventlog:** The append-only eventlog is the only source
-  of truth; all queryable state is derived from it.
+- **LS-R04 Canonical eventlog:** The append-only, totally ordered eventlog is
+  the only source of truth; all queryable state is derived from it. With a
+  sync backend, the canonical eventlog is the backend's log, which keeps the
+  full history and is never compacted. A client's local eventlog is its copy
+  of that history plus its pending events. It starts at the first event, or at
+  a snapshot base when the client booted from a state snapshot (experimental,
+  `02-system/03-sync/04-snapshots/`).
 - **LS-R05 Determinism:** The same eventlog produces identical state on every
   client and platform.
-- **LS-R06 Rebuildability:** State is fully rebuildable from the eventlog at
-  any time.
+- **LS-R06 Rebuildability:** State is fully rebuildable at any time, either
+  by replaying the full eventlog or by installing a state snapshot taken at a
+  known eventlog position and replaying the events after it. A client whose
+  local eventlog starts at a snapshot base rebuilds from a compatible snapshot
+  at or after its base, or from the full backend eventlog, never from its
+  partial local copy alone (open: offline rebuild, LS-DQ3).
 
 ### Pluggable boundaries
 
