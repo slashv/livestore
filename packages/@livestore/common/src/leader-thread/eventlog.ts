@@ -273,6 +273,18 @@ export const installEventlogBase = (
     })
   }).pipe(SqliteDbHelper.withSavepoint(dbEventlog))
 
+/** Drops all local history: events, backend position and identity, and the base. Used when the backend was reset. */
+export const resetEventlog = (dbEventlog: SqliteDb) =>
+  Effect.gen(function* () {
+    yield* execSql(dbEventlog, sql`DELETE FROM ${EVENTLOG_META_TABLE}`, {})
+    yield* execSql(
+      dbEventlog,
+      sql`UPDATE ${SYNC_STATUS_TABLE} SET head = ${EventSequenceNumber.Client.ROOT.global}, backendId = NULL`,
+      {},
+    )
+    yield* execSql(dbEventlog, sql`DELETE FROM ${EVENTLOG_BASE_TABLE}`, {})
+  }).pipe(SqliteDbHelper.withSavepoint(dbEventlog), UnknownError.mapToUnknownError)
+
 /** Removes the base, e.g. after the events below it were backfilled or the local databases were reset. */
 export const clearEventlogBase = (dbEventlog: SqliteDb) =>
   Effect.try({

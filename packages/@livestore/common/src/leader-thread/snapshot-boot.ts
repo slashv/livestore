@@ -16,7 +16,7 @@ import * as StateSqliteDb from '../StateSqliteDb.ts'
 import { sql } from '../util.ts'
 import { configureConnection } from './connection.ts'
 import * as Eventlog from './eventlog.ts'
-import { hasCompletedState } from './recreate-db.ts'
+import { hasCompletedState, markStateAsCompleted } from './recreate-db.ts'
 
 /** Timings and identity of an installed snapshot, reported for diagnostics and benchmarks. */
 export interface SnapshotInstallResult {
@@ -66,13 +66,20 @@ export const bootFromSnapshot = ({
     const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
     const key = SnapshotKey.toString(SnapshotKey.make(schema))
 
-    const source = yield* options.source({ storeId, clientId, payload })
-    const fetched = yield* fetchSnapshot({ source, key, storeId }).pipe(
+    const fetched = yield* options.source({ storeId, clientId, payload }).pipe(
+      Effect.flatMap((source) => fetchSnapshot({ source, key, storeId })),
       Effect.timeout(options.timeout ?? DEFAULT_TIMEOUT),
       Effect.mapError((cause) =>
         cause._tag === 'SnapshotError'
           ? cause
-          : new SnapshotError({ reason: 'unavailable', message: 'Timed out fetching the snapshot', cause }),
+          : new SnapshotError({
+              reason: 'unavailable',
+              message:
+                cause._tag === 'TimeoutError'
+                  ? 'Timed out fetching the snapshot'
+                  : 'Failed to create the snapshot source',
+              cause,
+            }),
       ),
     )
     if (Option.isNone(fetched) === true) return Option.none()
@@ -91,6 +98,13 @@ export const bootFromSnapshot = ({
     }).pipe(
       Effect.mapError(
         (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to position the eventlog', cause }),
+      ),
+    )
+    // Only now is the install complete. A crash before this point leaves an incomplete state database, which the next
+    // boot wipes; the eventlog then either is still empty (snapshot boot retries) or has its base (rebuild path).
+    yield* markStateAsCompleted(dbState).pipe(
+      Effect.mapError(
+        (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to mark the state as complete', cause }),
       ),
     )
     const installMs = performance.now() - installStart
@@ -161,8 +175,12 @@ export const fetchSnapshot = ({ source, key, storeId }: { source: SnapshotSource
   })
 
 /**
- * Replaces the state database with the snapshot and checks that it is a completed state at the manifest's head.
- * Rollback records of the producer are dropped: they describe the producer's history, not this client's.
+ * Replaces the state database with the snapshot after checking that it is a completed state at the manifest's head.
+ *
+ * The snapshot is staged in a temporary in-memory database first: validation and clean-up (dropping the producer's
+ * rollback records and completion marker) happen there, and the target receives the prepared pages in one backup step.
+ * The target is therefore never observable in a half-prepared state, and it stays marked incomplete until the caller
+ * runs `markStateAsCompleted` after the rest of the install is durable. A crash in between makes the next boot wipe it.
  */
 export const installState = ({
   dbState,
@@ -176,45 +194,58 @@ export const installState = ({
   makeSqliteDb: MakeSqliteDb
 }) =>
   Effect.gen(function* () {
+    const staging = yield* Effect.acquireRelease(
+      makeSqliteDb({ _tag: 'in-memory' }).pipe(
+        Effect.mapError(
+          (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to open a staging database', cause }),
+        ),
+      ),
+      (db) => Effect.sync(() => db.close()),
+    )
+
     yield* Effect.try({
-      // `import` deserializes into memory and copies pages into the target with the backup API: one pass over the
-      // bytes regardless of the target VFS, without the devtools import's shutdown and reboot.
-      try: () => dbState.import(bytes),
+      try: () => staging.import(bytes),
       catch: (cause) => new SnapshotError({ reason: 'integrity', message: 'Snapshot is not a SQLite database', cause }),
     })
 
-    const fail = (message: string) =>
-      Effect.gen(function* () {
-        yield* wipeState(makeSqliteDb).pipe(Effect.orDie)
-        return yield* new SnapshotError({ reason: 'incompatible', message })
+    if (hasCompletedState(staging) === false) {
+      return yield* new SnapshotError({
+        reason: 'incompatible',
+        message: 'Snapshot does not contain a completed state database',
       })
-
-    if (hasCompletedState(dbState) === false) {
-      return yield* fail('Snapshot does not contain a completed state database')
     }
 
-    const head = dbState.select<{ seqNumGlobal: number; seqNumClient: number }>(
+    const head = staging.select<{ seqNumGlobal: number; seqNumClient: number }>(
       sql`SELECT seqNumGlobal, seqNumClient FROM ${SystemTables.STATE_HEAD_META_TABLE} WHERE id = 1`,
     )[0]
     if (head === undefined || head.seqNumGlobal !== manifest.seqNum || head.seqNumClient !== 0) {
-      return yield* fail(
-        `Snapshot state head ${head?.seqNumGlobal},${head?.seqNumClient} does not match manifest seqNum ${manifest.seqNum}`,
-      )
+      return yield* new SnapshotError({
+        reason: 'incompatible',
+        message: `Snapshot state head ${head?.seqNumGlobal},${head?.seqNumClient} does not match manifest seqNum ${manifest.seqNum}`,
+      })
     }
 
     yield* Effect.try({
-      try: () => dbState.execute(sql`DELETE FROM ${SystemTables.MATERIALIZATION_JOURNAL_META_TABLE}`),
-      catch: (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to reset the journal', cause }),
+      try: () => {
+        // The producer's rollback records describe its history, not this client's.
+        staging.execute(sql`DELETE FROM ${SystemTables.MATERIALIZATION_JOURNAL_META_TABLE}`)
+        // Completion is the caller's call, after the eventlog is positioned too.
+        staging.execute(sql`DELETE FROM ${SystemTables.REBUILD_META_TABLE}`)
+        // One backup step copies all pages; without the devtools import's shutdown and reboot.
+        dbState.import(staging)
+      },
+      catch: (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to install the snapshot', cause }),
     })
+
     yield* configureConnection(dbState, { foreignKeys: true }).pipe(
       Effect.mapError(
         (cause) => new SnapshotError({ reason: 'internal', message: 'Failed to configure the connection', cause }),
       ),
     )
-  })
+  }).pipe(Effect.scoped)
 
 /** Empties the state database in place, preserving the open connection (same approach as a state rebuild). */
-const wipeState = (makeSqliteDb: MakeSqliteDb) =>
+export const wipeState = (makeSqliteDb: MakeSqliteDb) =>
   Effect.gen(function* () {
     const dbState = yield* StateSqliteDb.StateSqliteDb
     yield* Effect.acquireUseRelease(

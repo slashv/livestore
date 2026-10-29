@@ -153,7 +153,7 @@ Vitest.describe('snapshot boot', () => {
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test, { timeout: 60_000 })),
   )
 
-  for (const fault of ['none-published', 'corrupt-blob', 'missing-blob', 'wrong-backend'] as const) {
+  for (const fault of ['none-published', 'corrupt-blob', 'missing-blob'] as const) {
     Vitest.live(`falls back to full replay when the snapshot is unusable (${fault})`, (test) =>
       Effect.gen(function* () {
         const { makeSqliteDb, backend, store, sync, runCheckpointer } = yield* setup
@@ -163,7 +163,6 @@ Vitest.describe('snapshot boot', () => {
           const { manifest } = yield* runCheckpointer(120)
           if (fault === 'corrupt-blob') store.testing.corruptBlob(manifest.objectKey)
           if (fault === 'missing-blob') store.testing.deleteBlob(manifest.objectKey)
-          if (fault === 'wrong-backend') store.testing.setManifest({ ...manifest, backendId: 'backend-0' })
         }
 
         const client = yield* bootLeader({
@@ -180,15 +179,8 @@ Vitest.describe('snapshot boot', () => {
         })
         yield* Effect.all([waitForUpstreamHead(client, 120), waitForUpstreamHead(reference, 120)])
 
-        if (fault === 'wrong-backend') {
-          // A manifest from another backend identity installs, then the provider's identity check resets the client
-          // (default `onBackendIdMismatch: 'reset'`). The mock backend does not check identities, so we only assert the
-          // install happened; the Cloudflare suite covers the reset.
-          expect(Option.isSome(client.ctx.snapshotBoot)).toBe(true)
-        } else {
-          expect(Option.isNone(client.ctx.snapshotBoot)).toBe(true)
-          expect(eventlogRowCount(client.dbs.dbEventlog)).toBe(120)
-        }
+        expect(Option.isNone(client.ctx.snapshotBoot)).toBe(true)
+        expect(eventlogRowCount(client.dbs.dbEventlog)).toBe(120)
         expect(stateDigest(client.dbs.dbState)).toBe(stateDigest(reference.dbs.dbState))
       }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test, { timeout: 60_000 })),
     )
@@ -248,6 +240,9 @@ Vitest.describe('snapshot boot', () => {
           leaderSchema: nextSchema,
         })
         yield* waitForUpstreamHead(upgraded, 320)
+        // Both bases are below the new snapshot's position, so both backfilled: the base is gone, history is complete.
+        expect(Option.isNone(Eventlog.getEventlogBaseFromDb(upgradedDbs.dbEventlog))).toBe(true)
+        expect(eventlogRowCount(upgradedDbs.dbEventlog)).toBe(320)
         expect(stateDigest(upgradedDbs.dbState, nextSchema)).toBe(stateDigest(reference.dbs.dbState, nextSchema))
       }
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test, { timeout: 60_000 })),

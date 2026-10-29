@@ -1,11 +1,13 @@
 import { type Scope, Duration, Effect, Option, Schedule, Semaphore, SubscriptionRef } from '@livestore/utils/effect'
 
 import { UnknownError } from '../adapter-types.ts'
+import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { sha256Hex, type SnapshotManifest, type SnapshotSink } from '../snapshot/snapshot.ts'
 import * as SnapshotKey from '../snapshot/SnapshotKey.ts'
 import * as SnapshotTrigger from '../snapshot/trigger.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
+import * as Eventlog from './eventlog.ts'
 import { LeaderThreadCtx } from './types.ts'
 
 /** @experimental */
@@ -110,9 +112,12 @@ export const makeCheckpointer = (
     const publish = Effect.gen(function* () {
       const totalStart = performance.now()
       const previous = (yield* SubscriptionRef.get(stats)).latestManifest
-      const previousSeqNum = Option.match(previous, { onNone: () => 0, onSome: (manifest) => manifest.seqNum })
-
       const exported = yield* exportSnapshot
+      // After a backend reset the log restarts, so the previous backend's snapshot says nothing about this one.
+      const previousSeqNum = Option.match(previous, {
+        onNone: () => 0,
+        onSome: (manifest) => (manifest.backendId === exported.backendId ? manifest.seqNum : 0),
+      })
       if (exported.seqNum <= previousSeqNum) return Option.none()
 
       const hashStart = performance.now()
@@ -175,7 +180,12 @@ export const makeCheckpointer = (
     const evaluate = Effect.gen(function* () {
       const head = yield* currentHead
       const current = yield* SubscriptionRef.get(stats)
-      const latestSeqNum = Option.match(current.latestManifest, { onNone: () => 0, onSome: (m) => m.seqNum })
+      // A head below the latest snapshot means the backend was reset and its log restarted. (`publish` compares backend
+      // identities exactly; this only keeps the trigger from waiting for the old position.)
+      const latestSeqNum = Option.match(current.latestManifest, {
+        onNone: () => 0,
+        onSome: (m) => (m.seqNum <= head ? m.seqNum : 0),
+      })
       const decision = SnapshotTrigger.decide(
         {
           tailEvents: head - latestSeqNum,

@@ -13,9 +13,10 @@ import * as SqliteDbHelper from '../sqlite-db-helper.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
 import type * as SyncBackend from '../sync/sync-backend.ts'
 import { sql } from '../util.ts'
+import { execSql } from './connection.ts'
 import * as Eventlog from './eventlog.ts'
 import { markStateAsCompleted, recreateDb } from './recreate-db.ts'
-import { fetchSnapshot, installState } from './snapshot-boot.ts'
+import { fetchSnapshot, installState, wipeState } from './snapshot-boot.ts'
 import type { MaterializeEvent } from './types.ts'
 
 /**
@@ -40,12 +41,14 @@ export const rebuildFromEventlogBase = ({
   bootStatusQueue,
   materializeEvent,
   stateRebuildBatchSize,
+  onBackendIdMismatch,
 }: {
   schema: LiveStoreSchema
   storeId: string
   clientId: string
   payload: unknown
   base: Eventlog.EventlogBase
+  onBackendIdMismatch: 'reset' | 'shutdown' | 'ignore'
   snapshotOptions: SnapshotBootOptions<any> | undefined
   syncBackend: SyncBackend.SyncBackend | undefined
   makeSqliteDb: MakeSqliteDb
@@ -78,7 +81,21 @@ export const rebuildFromEventlogBase = ({
       if (reseeded === true) return { migrationsReport: { migrations: [] } }
     }
 
-    yield* backfillEventlogBelowBase({ schema, base, syncBackend })
+    const backfill = yield* backfillEventlogBelowBase({ schema, base, syncBackend })
+
+    if (backfill === 'backend-reset') {
+      if (onBackendIdMismatch !== 'reset') {
+        return yield* UnknownError.make({
+          cause: `Cannot rebuild state: the sync backend was reset and \`onBackendIdMismatch\` is '${onBackendIdMismatch}'`,
+        })
+      }
+      // Same outcome as a runtime mismatch with 'reset': drop the local eventlog and start over from the new backend.
+      const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
+      yield* Effect.logWarning(
+        'Sync backend was reset while rebuilding a snapshot-booted client; resetting the eventlog',
+      )
+      yield* Eventlog.resetEventlog(dbEventlog)
+    }
 
     return yield* recreateDb({
       schema,
@@ -150,8 +167,14 @@ const reseedFromSnapshot = ({
 
     return true
   }).pipe(
-    // Any failure leaves the backfill strategy, which starts from an empty state database anyway.
-    Effect.catch((error) => Effect.logWarning('Re-seeding state from a snapshot failed', error).pipe(Effect.as(false))),
+    // Any failure falls back to the backfill strategy, which must start from an empty state database.
+    Effect.catch((error) =>
+      Effect.logWarning('Re-seeding state from a snapshot failed', error).pipe(
+        Effect.andThen(wipeState(makeSqliteDb)),
+        Effect.orDie,
+        Effect.as(false),
+      ),
+    ),
   )
 
 /** Client-only events below `seqNumGlobal` exist only locally, so a snapshot cannot stand in for them. */
@@ -164,6 +187,12 @@ const hasClientOnlyEventsBelow = (dbEventlog: SqliteDb, seqNumGlobal: number) =>
 /**
  * Pulls the backend events up to and including the base into the eventlog and removes the base, making the eventlog
  * complete again so the regular full replay applies.
+ *
+ * Idempotent: rows below the base can only stem from an earlier, interrupted backfill (a snapshot-booted eventlog starts
+ * above its base), so they are dropped first and pulled again.
+ *
+ * Returns `'backend-reset'` when the backend turns out to have a different identity than the one the eventlog was built
+ * against. The missing history then no longer exists; the caller resets the local eventlog like a mismatch at runtime.
  */
 const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:backfillEventlogBelowBase')(function* ({
   schema,
@@ -182,8 +211,16 @@ const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:bac
     })
   }
 
+  yield* execSql(
+    dbEventlog,
+    sql`DELETE FROM ${SystemTables.EVENTLOG_META_TABLE}
+        WHERE seqNumGlobal < $base OR (seqNumGlobal = $base AND seqNumClient = ${EventSequenceNumber.Client.DEFAULT})`,
+    { base: base.seqNumGlobal },
+  ).pipe(UnknownError.mapToUnknownError)
+
+  const backendIdBefore = Eventlog.getBackendIdFromDb(dbEventlog)
   let reachedBase = false
-  yield* syncBackend.pull(Option.none(), { live: false }).pipe(
+  const pulled = yield* syncBackend.pull(Option.none(), { live: false }).pipe(
     Stream.takeUntil(() => reachedBase),
     Stream.runForEach(({ batch }) =>
       Effect.gen(function* () {
@@ -208,6 +245,8 @@ const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:bac
         if (batch.some(({ eventEncoded }) => eventEncoded.seqNum >= base.seqNumGlobal) === true) reachedBase = true
       }),
     ),
+    Effect.as('done' as const),
+    Effect.catchTag('BackendIdMismatchError', () => Effect.succeed('backend-reset' as const)),
     Effect.mapError(
       (cause) =>
         new UnknownError({
@@ -217,6 +256,13 @@ const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:bac
     ),
   )
 
+  // A pull without a cursor carries no identity, so providers may silently adopt a new backend's identity instead of
+  // failing. Either way the history below the base belongs to a backend that no longer exists.
+  const backendIdAfter = Eventlog.getBackendIdFromDb(dbEventlog)
+  const identityChanged =
+    Option.isSome(backendIdBefore) === true && Option.getOrUndefined(backendIdAfter) !== backendIdBefore.value
+  if (pulled === 'backend-reset' || identityChanged === true) return 'backend-reset' as const
+
   if (reachedBase === false) {
     return yield* UnknownError.make({
       cause: `Sync backend did not return the events up to the snapshot base ${base.seqNumGlobal}`,
@@ -224,4 +270,5 @@ const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:bac
   }
 
   yield* Eventlog.clearEventlogBase(dbEventlog)
+  return 'complete' as const
 })

@@ -43,7 +43,8 @@ export const makeInMemorySnapshotStore = ({
           return yield* new SnapshotError({ reason: 'incompatible', message: `Wrong storeId ${manifest.storeId}` })
         }
         const previous = manifests.get(manifest.key)
-        if (previous !== undefined && previous.seqNum > manifest.seqNum) {
+        // A reset backend restarts its log, so only snapshots of the same backend are ordered.
+        if (previous !== undefined && previous.backendId === manifest.backendId && previous.seqNum > manifest.seqNum) {
           return yield* new SnapshotError({
             reason: 'conflict',
             message: `Snapshot at ${manifest.seqNum} is older than the published one at ${previous.seqNum}`,

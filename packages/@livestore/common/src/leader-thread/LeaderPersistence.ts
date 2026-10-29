@@ -5,6 +5,7 @@ import { MaterializeError, SqliteError, type SqliteDb, UnknownError } from '../a
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import * as MaterializationJournal from '../MaterializationJournal.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
+import { EVENTLOG_META_TABLE } from '../schema/state/sqlite/system-tables/eventlog-tables.ts'
 import * as StateHead from '../StateHead.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
 import * as Eventlog from './eventlog.ts'
@@ -92,6 +93,10 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
     // Serializes persist transactions with snapshot exports. Effect may yield to other fibers inside a transaction,
     // and an export taken then would include uncommitted writes.
     const lock = yield* Semaphore.make(1)
+    // Client-only events never reach the backend, yet their effects stay in state after they leave the pending set. A
+    // leader that recorded any can therefore never export a snapshot that equals synced history. Computed lazily (one
+    // eventlog scan on the first export) and kept current by `persistLocal`.
+    let hasClientOnlyEvents: boolean | undefined
 
     const materializeEvents = (
       events: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
@@ -113,6 +118,9 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         lock,
         { dbState, dbEventlog },
         Effect.gen(function* () {
+          if (events.some((event) => event.seqNum.client !== EventSequenceNumber.Client.DEFAULT) === true) {
+            hasClientOnlyEvents = true
+          }
           const materializerHashes = yield* materializeEvents(events)
           const persistedStateHead = yield* stateHead.get.pipe(
             Effect.mapError((cause) => MaterializeError.make({ cause })),
@@ -200,6 +208,17 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
       if (head.client !== EventSequenceNumber.Client.DEFAULT || head.global !== backendHead) {
         return yield* UnknownError.make({
           cause: `State head ${EventSequenceNumber.Client.toString(head)} is not the backend head ${backendHead}; only a client without local events can export a snapshot`,
+        })
+      }
+
+      hasClientOnlyEvents ??=
+        dbEventlog.select<{ found: number }>(
+          `SELECT 1 AS found FROM ${EVENTLOG_META_TABLE} WHERE seqNumClient > ${EventSequenceNumber.Client.DEFAULT} LIMIT 1`,
+        ).length > 0
+      if (hasClientOnlyEvents === true) {
+        return yield* UnknownError.make({
+          cause:
+            'This client recorded client-only events, so its state is not pure synced history and cannot be exported',
         })
       }
 

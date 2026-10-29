@@ -48,7 +48,9 @@ export class SnapshotError extends Schema.TaggedError<SnapshotError>('~@livestor
 ) {}
 
 /**
- * Read side used by booting clients. Implementations must never return a manifest whose blob they cannot serve.
+ * Read side used by booting clients. Implementations must never return a manifest whose blob they cannot serve, and
+ * should only return manifests whose `backendId` is the backend's current identity: a fresh client cannot check it
+ * before installing, and a stale one leads to a backend-id-mismatch reset on every boot.
  *
  * @experimental
  */

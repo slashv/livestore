@@ -223,6 +223,7 @@ export const makeLeaderThreadLayer = ({
               payload: syncPayloadDecoded,
               base: eventlogBase.value,
               snapshotOptions: syncOptions?.snapshot,
+              onBackendIdMismatch: syncOptions?.onBackendIdMismatch ?? 'reset',
               syncBackend,
               makeSqliteDb,
               bootStatusQueue,
