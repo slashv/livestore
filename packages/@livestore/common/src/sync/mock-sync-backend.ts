@@ -13,7 +13,7 @@ import {
 
 import { UnknownError } from '../errors.ts'
 import { EventSequenceNumber, type LiveStoreEvent } from '../schema/mod.ts'
-import type { BackendIdMismatchError, ServerAheadError } from './errors.ts'
+import { BackendIdMismatchError, type ServerAheadError } from './errors.ts'
 import * as SyncBackend from './sync-backend.ts'
 import { validatePushPayload } from './validate-push-payload.ts'
 
@@ -147,10 +147,27 @@ export const makeMockSyncBackend = (
 
       // Persist the identity on the first response, as real providers do, so snapshot exports know the backend.
       const kv = yield* Effect.serviceOption(KeyValueStore.KeyValueStore)
+      const mockBackendId = options?.backendId ?? 'mock-backend'
       const recordBackendId = Option.match(kv, {
         onNone: () => Effect.void,
-        onSome: (store) => store.set('backendId', options?.backendId ?? 'mock-backend').pipe(Effect.ignore),
+        onSome: (store) => store.set('backendId', mockBackendId).pipe(Effect.ignore),
       })
+      // Like real providers, a pull that continues from a cursor must come from a client of this backend identity.
+      const checkBackendId = (cursor: Option.Option<unknown>) =>
+        Option.match(kv, {
+          onNone: () => Effect.void,
+          onSome: (store) =>
+            Option.isNone(cursor) === true
+              ? Effect.void
+              : store.get('backendId').pipe(
+                  Effect.orDie,
+                  Effect.flatMap((stored) =>
+                    stored !== undefined && stored !== mockBackendId
+                      ? Effect.fail(new BackendIdMismatchError({ expected: mockBackendId, received: stored }))
+                      : Effect.void,
+                  ),
+                ),
+        })
 
       const pullLive = (cursor: Option.Option<{ eventSequenceNumber: EventSequenceNumber.Global.Type }>) => {
         const lastSeen = cursorPosition(cursor)
@@ -182,6 +199,7 @@ export const makeMockSyncBackend = (
               new UnknownError({ cause: new Error('MockSyncBackend: simulated pull failure') }),
             ),
           ).pipe(
+            Stream.tap(() => checkBackendId(cursor)),
             Stream.tap(() => recordBackendId),
             Stream.flatMap(() => (pullOptions?.live === true ? pullLive(cursor) : pullNonLive(cursor))),
             Stream.withSpan('MockSyncBackend:pull', { parent: span }),
