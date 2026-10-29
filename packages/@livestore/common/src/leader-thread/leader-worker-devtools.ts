@@ -133,6 +133,7 @@ const listenToDevtools = ({
       syncProcessor,
       clientId,
       devtools,
+      exportState,
     } = yield* LeaderThreadCtx
 
     type SubscriptionId = string
@@ -203,7 +204,8 @@ const listenToDevtools = ({
               return
             }
             case 'LSD.Leader.SnapshotReq': {
-              const snapshot = dbState.export()
+              // Exported between persist transactions, so devtools never sees a half-applied batch.
+              const { bytes: snapshot } = yield* exportState
 
               yield* sendMessage(Devtools.Leader.SnapshotRes.make({ snapshot, ...reqPayload }))
 

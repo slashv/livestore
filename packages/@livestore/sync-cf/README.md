@@ -75,7 +75,8 @@ The sync backend stays schema-blind and only stores the small manifest pointer.
   (`403` outside the store prefix, `404` otherwise). Storage failures answer `503`, and clients fall back to full replay.
 - Checkpointer: `makeCheckpointerDurableObject` from `@livestore/adapter-cloudflare` runs a headless leader per
   `${storeId}/${snapshotKey}` that follows the log via DO-RPC live pull. Pass
-  `makeDurableObject({ snapshots: { checkpointerBinding, snapshotKeys, wakeIntervalMs? } })` so pushes wake it (at most
+  `makeDurableObject({ snapshots: { checkpointerBinding, snapshotKeys, wakeIntervalMs? } })` (or
+  `{ checkpointers: [{ binding, snapshotKey }] }` for one checkpointer class per schema) so pushes wake it (at most
   once per `wakeIntervalMs`, default 10 s, with the current `backendId` and head, so a reset backend restarts it).
   Live-pull callbacks to subscriber DOs time out after 5 s, so a slow checkpointer never holds up pushes.
 - Sink: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs?, stage?, partSizeBytes? })` uploads

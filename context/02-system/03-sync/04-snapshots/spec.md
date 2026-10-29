@@ -309,9 +309,9 @@ other fibers between `BEGIN` and `COMMIT` (LS.SYS.SYNC.SNAP-R13). Exposed on
   `{ bytes, seqNum, cursorMetadata, backendId, exportMs }`.
 - `exportState` returns `{ bytes, head }` under the same lock without the
   snapshot validations. Session boot and the adapters' database export in the
-  web (worker and in-memory) and Cloudflare adapters use it, so they never
-  capture a half-applied persist transaction. The leader devtools
-  `SnapshotReq` handler still calls `dbState.export()` directly.
+  web (worker and in-memory) and Cloudflare adapters and the leader devtools
+  `SnapshotReq` handler use it, so they never capture a half-applied persist
+  transaction.
 
 ### Loop
 
@@ -443,16 +443,18 @@ graceMs?, now?, stage?, partSizeBytes? })` uploads the blob (single `put`
   rejection). Storage or RPC failures answer `503` with CORS headers, which
   clients treat as `unavailable` and fall back.
 
-- **Wake-ups.** `makeDurableObject({ snapshots: { checkpointerBinding,
-snapshotKeys, wakeIntervalMs? } })` calls the checkpointer's
+- **Wake-ups.** `makeDurableObject({ snapshots })` calls the checkpointer's
   `ensureRunning(storeId, { backendId, head })` after successful pushes,
   fire-and-forget and at most once per `wakeIntervalMs` (default 10 seconds)
-  per checkpointer and sync DO instance. Live-pull callbacks to subscriber
-  Durable Objects (checkpointers included) fan out concurrently, each bounded
-  by a 5-second timeout, so a slow subscriber never holds up push admission.
-  All `snapshotKeys` are woken through the one `checkpointerBinding`, while a
-  checkpointer class is bound to the one schema it was created with; nothing
-  checks that an instance's name matches its class's key.
+  per checkpointer and sync DO instance. `snapshots` takes either
+  `{ checkpointerBinding, snapshotKeys }` (all keys through one checkpointer
+  class) or `{ checkpointers: [{ binding, snapshotKey }] }`. A checkpointer
+  class is bound to the one schema it was created with, so a schema migration
+  that keeps the old and the new schema's checkpointers running side by side
+  uses the second form with one class (binding) per schema. Live-pull callbacks
+  to subscriber Durable Objects (checkpointers included) fan out concurrently,
+  each bounded by a 5-second timeout, so a slow subscriber never holds up push
+  admission. Nothing checks that an instance's name matches its class's key.
 
 Client sources (`@livestore/sync-cf/client`): `makeHttpSnapshotSource({ url,
 headers? })` reads the worker routes (`ws(s)://` is mapped to `http(s)://`; a

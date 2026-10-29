@@ -39,7 +39,7 @@ A snapshot can be installed only by clients whose schema matches the checkpointe
 - the same LiveStore storage format version,
 - and the same sync backend identity. Snapshots from before a [backend reset](/building-with-livestore/syncing#backend-reset-detection) are ignored.
 
-When you deploy a schema change, run a checkpointer for the new schema as well, and keep the old one running while clients on the old schema remain. Until the new checkpointer has published, new clients on the new schema fall back to a full replay. On Cloudflare, a checkpointer class created with `makeCheckpointerDurableObject` is bound to the schema you pass it, and the sync Durable Object wakes one checkpointer instance per key listed in `snapshotKeys`.
+When you deploy a schema change, run a checkpointer for the new schema as well, and keep the old one running while clients on the old schema remain. Until the new checkpointer has published, new clients on the new schema fall back to a full replay. On Cloudflare, a checkpointer class created with `makeCheckpointerDurableObject` is bound to the schema you pass it. To run both, declare one checkpointer class per schema and list each in the sync Durable Object's `snapshots: { checkpointers: [{ binding, snapshotKey }] }`.
 
 ## Changing materializers
 

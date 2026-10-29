@@ -40,13 +40,10 @@ resolved first:
   into the SQLite wasm heap (~1.6 GB works, 2.16 GB fails in the Node build;
   far less in a 128 MB Durable Object), see
   [spec.md Limits](../spec.md#limits) and LS.SYS.SYNC.SNAP-DQ3.
-- **Cloudflare wake-ups across schemas.** `makeDurableObject({ snapshots })`
-  wakes every key in `snapshotKeys` through a single `checkpointerBinding`,
-  but a checkpointer class is bound to one schema and does not check that the
-  instance name's key matches it. Running old- and new-schema checkpointers
-  side by side therefore has no supported wake-up wiring yet.
-- **Devtools leader export.** The leader devtools `SnapshotReq` handler reads
-  `dbState.export()` without the persistence lock that `exportState` takes.
+- **Checkpointer instance/key check.** A checkpointer class does not verify that
+  the instance name's snapshot key matches the schema it was created with;
+  wiring a key to the wrong class publishes nothing usable (its manifests carry
+  its own key) but wastes a Durable Object.
 
 ## VRS
 

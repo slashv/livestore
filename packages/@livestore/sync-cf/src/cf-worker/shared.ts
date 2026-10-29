@@ -120,11 +120,22 @@ export type MakeDurableObjectClassOptions = {
    *
    * @experimental
    */
-  snapshots?: {
-    /** Binding name of the checkpointer Durable Object namespace (e.g. `makeCheckpointerDurableObject`). */
-    checkpointerBinding: string
-    /** Snapshot keys to keep checkpointed: `SnapshotKey.toString(SnapshotKey.make(schema))`, one checkpointer each. */
-    snapshotKeys: ReadonlyArray<string>
+  snapshots?: (
+    | {
+        /** Binding name of the checkpointer Durable Object namespace (e.g. `makeCheckpointerDurableObject`). */
+        checkpointerBinding: string
+        /** Snapshot keys to keep checkpointed: `SnapshotKey.toString(SnapshotKey.make(schema))`, one checkpointer each. */
+        snapshotKeys: ReadonlyArray<string>
+      }
+    | {
+        /**
+         * One entry per schema to keep checkpointed, each with the binding of the checkpointer class built for that
+         * schema. A checkpointer class is bound to one schema, so this form is needed to run the old and the new
+         * schema's checkpointers side by side during a schema migration.
+         */
+        checkpointers: ReadonlyArray<{ readonly binding: string; readonly snapshotKey: string }>
+      }
+  ) & {
     /**
      * Minimum time between two wake-up calls to the same checkpointer from this Durable Object instance.
      *

@@ -294,18 +294,22 @@ const wakeCheckpointers = ({
   head: number
   snapshots: NonNullable<MakeDurableObjectClassOptions['snapshots']>
 }) => {
-  const namespace = (env as Record<string, CfTypes.DurableObjectNamespace | undefined>)[snapshots.checkpointerBinding]
-  if (namespace === undefined) {
-    console.warn(`Checkpointer binding '${snapshots.checkpointerBinding}' not found on env`)
-    return
-  }
+  const checkpointers =
+    'checkpointers' in snapshots
+      ? snapshots.checkpointers
+      : snapshots.snapshotKeys.map((snapshotKey) => ({ binding: snapshots.checkpointerBinding, snapshotKey }))
 
   const wakeIntervalMs = snapshots.wakeIntervalMs ?? 10_000
   const lastWakeAt = lastCheckpointerWakeAt.get(ctx) ?? new Map<string, number>()
   lastCheckpointerWakeAt.set(ctx, lastWakeAt)
   const now = Date.now()
 
-  for (const key of snapshots.snapshotKeys) {
+  for (const { binding, snapshotKey: key } of checkpointers) {
+    const namespace = (env as Record<string, CfTypes.DurableObjectNamespace | undefined>)[binding]
+    if (namespace === undefined) {
+      console.warn(`Checkpointer binding '${binding}' not found on env`)
+      continue
+    }
     const name = checkpointerDurableObjectName({ storeId, key })
     if (now - (lastWakeAt.get(name) ?? Number.NEGATIVE_INFINITY) < wakeIntervalMs) continue
     lastWakeAt.set(name, now)
