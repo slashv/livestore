@@ -5,7 +5,9 @@ import { Effect, Option, ReadonlyArray as EffectArray, type RpcMessage, Schema }
 
 import { MAX_PUSH_EVENTS_PER_REQUEST, MAX_WS_MESSAGE_BYTES } from '../../common/constants.ts'
 import { SyncMessage } from '../../common/mod.ts'
+import { checkpointerDurableObjectName } from '../../common/snapshot.ts'
 import {
+  type CheckpointerWakeInterface,
   type Env,
   type ForwardedHeaders,
   type MakeDurableObjectClassOptions,
@@ -190,6 +192,10 @@ export const makePush =
         }).pipe(Effect.tapCauseLogPretty, Effect.withSpan('push-rpc-broadcast')),
       )
 
+      if (options?.snapshots !== undefined) {
+        wakeCheckpointers({ ctx, env, storeId, backendId, snapshots: options.snapshots })
+      }
+
       // Acknowledge only after the committed batch has been published, so a client cannot observe an
       // advanced server head while the corresponding pull response is still waiting in a detached fiber.
       return SyncMessage.PushAck.make({})
@@ -246,3 +252,49 @@ const blockConcurrencyWhile =
 
       return yield* exit
     })
+
+/** Last wake-up per checkpointer name, scoped to the sync DO instance (a rebuilt instance wakes once more, harmless). */
+const lastCheckpointerWakeAt = new WeakMap<CfTypes.DurableObjectState, Map<string, number>>()
+
+/**
+ * Fire-and-forget `ensureRunning` calls to the store's checkpointers, at most once per `wakeIntervalMs` each.
+ * The push acknowledgement never waits for (or fails because of) a checkpointer.
+ */
+const wakeCheckpointers = ({
+  ctx,
+  env,
+  storeId,
+  backendId,
+  snapshots,
+}: {
+  ctx: CfTypes.DurableObjectState
+  env: Env
+  storeId: StoreId
+  backendId: string
+  snapshots: NonNullable<MakeDurableObjectClassOptions['snapshots']>
+}) => {
+  const namespace = (env as Record<string, CfTypes.DurableObjectNamespace | undefined>)[snapshots.checkpointerBinding]
+  if (namespace === undefined) {
+    console.warn(`Checkpointer binding '${snapshots.checkpointerBinding}' not found on env`)
+    return
+  }
+
+  const wakeIntervalMs = snapshots.wakeIntervalMs ?? 10_000
+  const lastWakeAt = lastCheckpointerWakeAt.get(ctx) ?? new Map<string, number>()
+  lastCheckpointerWakeAt.set(ctx, lastWakeAt)
+  const now = Date.now()
+
+  for (const key of snapshots.snapshotKeys) {
+    const name = checkpointerDurableObjectName({ storeId, key })
+    if (now - (lastWakeAt.get(name) ?? Number.NEGATIVE_INFINITY) < wakeIntervalMs) continue
+    lastWakeAt.set(name, now)
+
+    // oxlint-disable-next-line typescript-eslint(no-unsafe-type-assertion) -- the binding is user-configured; the checkpointer class implements this RPC method
+    const stub = namespace.get(namespace.idFromName(name)) as unknown as CheckpointerWakeInterface
+    ctx.waitUntil(
+      stub.ensureRunning(storeId, { backendId }).catch((error: unknown) => {
+        console.warn(`Failed to wake checkpointer ${name}`, error)
+      }),
+    )
+  }
+}

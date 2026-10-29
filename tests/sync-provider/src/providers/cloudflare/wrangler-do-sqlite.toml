@@ -17,9 +17,26 @@ class_name = "TestClientDo"
 name = "STORE_CLIENT_DO"
 class_name = "StoreClientDo"
 
+# Experimental snapshot boot: a sync DO that wakes checkpointers, and the checkpointer DOs
+[[durable_objects.bindings]]
+name = "SNAPSHOT_SYNC_BACKEND_DO"
+class_name = "SnapshotSyncBackendDO"
+
+[[durable_objects.bindings]]
+name = "CHECKPOINTER_DO"
+class_name = "CheckpointerDO"
+
+[[durable_objects.bindings]]
+name = "MEASURE_CHECKPOINTER_DO"
+class_name = "MeasureCheckpointerDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SyncBackendDO", "TestClientDo", "StoreClientDo"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SnapshotSyncBackendDO", "CheckpointerDO", "MeasureCheckpointerDO"]
 
 # Snapshot blobs (experimental snapshot boot); simulated locally by miniflare
 [[r2_buckets]]

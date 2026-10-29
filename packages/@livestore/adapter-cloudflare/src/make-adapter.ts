@@ -1,32 +1,16 @@
 import {
   type Adapter,
   ClientSessionLeaderThreadProxy,
-  EventlogSqliteDb,
   type LockStatus,
-  liveStoreStorageFormatVersion,
   makeClientSession,
-  MaterializationJournal,
-  StateSqliteDb,
   type SyncOptions,
   UnknownError,
-  StateHead,
 } from '@livestore/common'
 import type { CfTypes } from '@livestore/common-cf'
-import {
-  type DevtoolsOptions,
-  Eventlog,
-  LeaderThreadCtx,
-  makeLeaderThreadLayer,
-  streamEventsWithSyncState,
-} from '@livestore/common/leader-thread'
-import { getStateDbBaseName } from '@livestore/common/schema'
-import { LiveStoreEvent } from '@livestore/livestore'
-import { CF_SQL_VFS_REQUIRED_PRAGMAS, sqliteDbFactory } from '@livestore/sqlite-wasm/cf'
-import { loadSqlite3Wasm } from '@livestore/sqlite-wasm/load-wasm'
-import { Effect, FetchHttpClient, Layer, Queue, Schedule, SubscriptionRef, WebChannel } from '@livestore/utils/effect'
+import { type DevtoolsOptions, LeaderThreadCtx, streamEventsWithSyncState } from '@livestore/common/leader-thread'
+import { Effect, FetchHttpClient, Queue, SubscriptionRef } from '@livestore/utils/effect'
 
-import { makeSqliteDb as makeDoSqliteDb } from './make-sqlite-db.ts'
-import * as StateFiles from './state-files.ts'
+import { makeDoLeaderThread } from './make-leader-thread.ts'
 
 export const makeAdapter =
   ({
@@ -55,64 +39,29 @@ export const makeAdapter =
 
       const devtoolsOptions = { enabled: false } as DevtoolsOptions
 
-      const sqlite3 = yield* Effect.promise(() => loadSqlite3Wasm())
+      const { context, dbEventlog, makeSqliteDb } = yield* makeDoLeaderThread({
+        storage,
+        schema,
+        storeId,
+        clientId,
+        syncOptions,
+        resetPersistence,
+        syncPayloadEncoded,
+        syncPayloadSchema,
+        params,
+      })
 
-      const makeSqliteDb = sqliteDbFactory({ sqlite3 })
-
-      const syncInMemoryDb = yield* makeSqliteDb({ _tag: 'in-memory', storage, configureDb: () => {} }).pipe(
+      // The client session queries an in-memory copy of the state, seeded from the leader's state below.
+      const syncInMemoryDb = yield* makeSqliteDb({ _tag: 'in-memory', configureDb: () => {} }).pipe(
         UnknownError.mapToUnknownError,
       )
 
-      if (resetPersistence === true) {
-        yield* resetDurableObjectPersistence({ storage, storeId })
-      }
-
-      const stateFileName = `${getStateDbBaseName(schema)}@${liveStoreStorageFormatVersion}.db`
-      yield* StateFiles.register(storage, stateFileName).pipe(UnknownError.mapToUnknownError)
-
-      const dbState = yield* makeSqliteDb({
-        _tag: 'storage',
-        storage,
-        fileName: stateFileName,
-        configureDb: (db) =>
-          db.execute([...CF_SQL_VFS_REQUIRED_PRAGMAS, 'cache_size=-8000'].map((p) => `PRAGMA ${p}`).join(';\n')),
-      }).pipe(UnknownError.mapToUnknownError)
-
-      // dbEventlog runs on DO SQLite directly (not through the VFS). SQL-level transaction
-      // control (BEGIN/COMMIT/ROLLBACK) is silently dropped — see isTransactionControlStatement
-      // in make-sqlite-db.ts for details on why this is safe.
-      const dbEventlog = yield* makeDoSqliteDb({
-        _tag: 'file',
-        db: storage.sql,
-        configureDb: () => {},
-      }).pipe(UnknownError.mapToUnknownError)
-
-      const shutdownChannel = yield* WebChannel.noopChannel<any, any>()
-      const sqliteDbLayer = Layer.mergeAll(StateSqliteDb.layer(dbState), EventlogSqliteDb.layer(dbEventlog))
-      const stateServicesLayer = Layer.mergeAll(StateHead.layer, MaterializationJournal.layer).pipe(
-        Layer.provide(sqliteDbLayer),
-      )
-
-      const layer = yield* Layer.build(
-        makeLeaderThreadLayer({
-          schema,
-          storeId,
-          clientId,
-          makeSqliteDb,
-          syncOptions,
-          devtoolsOptions,
-          shutdownChannel,
-          syncPayloadEncoded,
-          syncPayloadSchema,
-          params,
-        }).pipe(Layer.provide(Layer.mergeAll(sqliteDbLayer, stateServicesLayer))),
-      )
-
       const { leaderThread, initialSnapshot } = yield* Effect.gen(function* () {
-        const { syncProcessor, extraIncomingMessagesQueue, initialState, networkStatus } = yield* LeaderThreadCtx
+        const { syncProcessor, extraIncomingMessagesQueue, initialState, networkStatus, exportState } =
+          yield* LeaderThreadCtx
 
-        const initialLeaderHead = Eventlog.getClientHeadFromDb(dbEventlog)
-        // const initialLeaderHead = EventSequenceNumber.ROOT
+        // Snapshot and head come from one locked read, so the session never pairs state with a different position.
+        const { bytes: initialSnapshot, head: initialLeaderHead } = yield* exportState
 
         const leaderThread = ClientSessionLeaderThreadProxy.of(
           {
@@ -131,7 +80,7 @@ export const makeAdapter =
               migrationsReport: initialState.migrationsReport,
               storageMode: 'persisted',
             },
-            export: Effect.sync(() => dbState.export()),
+            export: exportState.pipe(Effect.map(({ bytes }) => bytes)),
             getEventlogData: Effect.sync(() => dbEventlog.export()),
             syncState: syncProcessor.syncState,
             sendDevtoolsMessage: (message) => Queue.offer(extraIncomingMessagesQueue, message),
@@ -142,10 +91,8 @@ export const makeAdapter =
           },
         )
 
-        const initialSnapshot = dbState.export()
-
         return { leaderThread, initialSnapshot }
-      }).pipe(Effect.provide(layer))
+      }).pipe(Effect.provide(context))
 
       syncInMemoryDb.import(initialSnapshot)
 
@@ -175,57 +122,8 @@ export const makeAdapter =
         origin: undefined,
       })
 
-      yield* StateFiles.cleanup(storage, stateFileName).pipe(
-        Effect.catch((cause) => Effect.logWarning('Failed to clean up obsolete state databases', cause)),
-      )
-
       return clientSession
     }).pipe(
       Effect.withSpan('@livestore/adapter-cloudflare:makeAdapter', { attributes: { clientId, sessionId } }),
       Effect.provide(FetchHttpClient.layer),
     )
-
-const resetDurableObjectPersistence = ({
-  storage,
-  storeId,
-}: {
-  storage: CfTypes.DurableObjectStorage
-  storeId: string
-}) =>
-  Effect.try({
-    try: () =>
-      // All four tables live in the DO's single storage.sql database but are
-      // owned by different layers during normal operation:
-      // - vfs_pages: written by the wa-sqlite VFS layer (backs dbState)
-      // - eventlog, __livestore_sync_status: written directly by dbEventlog via storage.sql
-      // - __livestore_state_files: adapter-owned state file registry
-      storage.transactionSync(() => {
-        safeSqlExec(storage, 'DELETE FROM vfs_pages')
-        safeSqlExec(storage, 'DELETE FROM __livestore_state_files')
-        safeSqlExec(storage, 'DELETE FROM eventlog')
-        safeSqlExec(storage, 'DELETE FROM __livestore_sync_status')
-      }),
-    catch: (cause) =>
-      new UnknownError({
-        cause,
-        note: `@livestore/adapter-cloudflare: Failed to reset persistence for store ${storeId}`,
-      }),
-  }).pipe(
-    Effect.retry({ schedule: Schedule.exponentialBackoff10Sec }),
-    Effect.withSpan('@livestore/adapter-cloudflare:resetPersistence', { attributes: { storeId } }),
-  )
-
-const safeSqlExec = (storage: CfTypes.DurableObjectStorage, query: string, binding?: string) => {
-  try {
-    binding !== undefined ? storage.sql.exec(query, binding) : storage.sql.exec(query)
-  } catch (error) {
-    if (isMissingTableError(error) === true) {
-      return
-    }
-
-    throw error
-  }
-}
-
-const isMissingTableError = (error: unknown): boolean =>
-  error instanceof Error && error.message.toLowerCase().includes('no such table')

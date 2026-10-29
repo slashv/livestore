@@ -110,6 +110,42 @@ export type MakeDurableObjectClassOptions = {
 
   /** Optional telemetry. Omit to avoid creating an exporter or sending telemetry. */
   otel?: SyncBackendOtelOptions
+
+  /**
+   * Wakes snapshot checkpointers after successful pushes (experimental snapshot boot, LS.SYS-R06).
+   *
+   * A running checkpointer follows the log via live pull, and an evicted one is woken by that pull's callback. This
+   * option covers the remaining case: a checkpointer that has never run for a store (or lost its subscription) starts
+   * as soon as the store receives events. The sync backend stays schema-blind; it only knows the snapshot key strings.
+   *
+   * @experimental
+   */
+  snapshots?: {
+    /** Binding name of the checkpointer Durable Object namespace (e.g. `makeCheckpointerDurableObject`). */
+    checkpointerBinding: string
+    /** Snapshot keys to keep checkpointed: `SnapshotKey.toString(SnapshotKey.make(schema))`, one checkpointer each. */
+    snapshotKeys: ReadonlyArray<string>
+    /**
+     * Minimum time between two wake-up calls to the same checkpointer from this Durable Object instance.
+     *
+     * @default 10 seconds
+     */
+    wakeIntervalMs?: number
+  }
+}
+
+/**
+ * The part of a snapshot checkpointer Durable Object the sync backend calls (experimental snapshot boot).
+ * Checkpointer instances are named by {@link checkpointerDurableObjectName}.
+ */
+export interface CheckpointerWakeInterface {
+  /**
+   * Boots the checkpointer for `storeId` if it is not running and keeps it awake while the log moves.
+   *
+   * `backendId` is the caller's current backend identity. A checkpointer that followed a different identity (the
+   * backend was reset) discards its local copy and starts over, instead of waiting for its next pull to notice.
+   */
+  ensureRunning(storeId: string, options?: { backendId?: string }): Promise<void>
 }
 
 export type SyncBackendOtelOptions =

@@ -1,5 +1,6 @@
 import { IsOfflineError, SyncBackend, UnknownError } from '@livestore/common'
 import { type CfTypes, DoRpcReadError, layerProtocolDurableObject } from '@livestore/common-cf'
+import { EventSequenceNumber } from '@livestore/common/schema'
 import { splitArrayBySize } from '@livestore/common/sync'
 import { shouldNeverHappen } from '@livestore/utils'
 import {
@@ -83,8 +84,43 @@ export const makeDoRpcSync =
 
       const backendIdHelper = yield* SyncBackend.makeBackendIdHelper
 
-      const pull: SyncBackend.SyncBackend<SyncMetadata>['pull'] = (cursor, options) =>
-        rpcClient['SyncDoRpc.Pull']({
+      const pull: SyncBackend.SyncBackend<SyncMetadata>['pull'] = (cursor, options) => {
+        /**
+         * Highest backend event delivered by this pull. Live updates are callbacks racing the catch-up stream: one may
+         * repeat an event the catch-up already delivered (dropped here), and one may be lost before this pull's queue
+         * is registered or after the buffer overflowed (detected as a gap; the pull then fails as offline, so the
+         * leader re-pulls from its cursor instead of merging a non-contiguous batch).
+         */
+        let lastDeliveredSeqNum: number = Option.match(cursor, {
+          onNone: () => EventSequenceNumber.Client.ROOT.global,
+          onSome: (_) => _.eventSequenceNumber,
+        })
+        const trackDelivered = (res: SyncMessage.PullResponse) => {
+          const last = res.batch.at(-1)
+          if (last !== undefined && last.eventEncoded.seqNum > lastDeliveredSeqNum) {
+            lastDeliveredSeqNum = last.eventEncoded.seqNum
+          }
+        }
+        const sequenceLiveUpdate = (res: SyncMessage.PullResponse) =>
+          Effect.suspend(() => {
+            const batch = res.batch.filter((item) => item.eventEncoded.seqNum > lastDeliveredSeqNum)
+            const first = batch[0]
+            if (first === undefined) return Effect.succeed([])
+            if (first.eventEncoded.parentSeqNum !== lastDeliveredSeqNum) {
+              return Effect.fail(
+                new IsOfflineError({
+                  cause: new Error(
+                    `DO-RPC live pull missed updates (expected parent ${lastDeliveredSeqNum}, got ${first.eventEncoded.parentSeqNum})`,
+                  ),
+                }),
+              )
+            }
+            const sequenced = { ...res, batch }
+            trackDelivered(sequenced)
+            return Effect.succeed([sequenced])
+          })
+
+        return rpcClient['SyncDoRpc.Pull']({
           cursor: cursor.pipe(
             Option.map((a) => ({
               eventSequenceNumber: a.eventSequenceNumber,
@@ -100,6 +136,7 @@ export const makeDoRpcSync =
             orElse: () =>
               Stream.fail(new IsOfflineError({ cause: new Error('DO-RPC pull made no progress for 60 seconds') })),
           }),
+          Stream.tap((res) => Effect.sync(() => trackDelivered(res))),
           options?.live === true
             ? Stream.concatWithLastElement((res) =>
                 Effect.gen(function* () {
@@ -114,7 +151,12 @@ export const makeDoRpcSync =
                     Effect.sync(() => routing.delete(requestId)).pipe(Effect.andThen(Queue.shutdown(queue))),
                   )
 
-                  routing.set(requestId, queue)
+                  // Callbacks that arrived while the catch-up was still streaming were buffered; claim them in the
+                  // same synchronous step that registers the queue so none slip in between.
+                  yield* Effect.sync(() => {
+                    routing.set(requestId, queue)
+                    return takePendingUpdates(durableObjectState, requestId)
+                  }).pipe(Effect.flatMap((pending) => Queue.offerAll(queue, pending)))
 
                   // Graceful shutdown only (eviction runs no finalizers); matched on requestId so a late send can't drop a newer pull's row
                   yield* Effect.addFinalizer(() =>
@@ -125,7 +167,10 @@ export const makeDoRpcSync =
                     }).pipe(Effect.timeout('5 seconds'), Effect.tapCauseLogPretty, Effect.ignore),
                   )
 
-                  return Stream.fromQueue(queue)
+                  return Stream.fromQueue(queue).pipe(
+                    Stream.mapEffect(sequenceLiveUpdate),
+                    Stream.flatMap(Stream.fromIterable),
+                  )
                 }).pipe(Stream.unwrap),
               )
             : identity,
@@ -143,6 +188,7 @@ export const makeDoRpcSync =
           ),
           Stream.withSpan('rpc-sync-client:pull'),
         )
+      }
 
       const push: SyncBackend.SyncBackend<{ createdAt: string }>['push'] = Effect.fn('rpc-sync-client:push')(
         function* (batch) {
@@ -240,8 +286,10 @@ export const handleSyncUpdateRpc = (ctx: CfTypes.DurableObjectState, payload: Ui
     const pullStreamQueue = pullRoutingFor(ctx).get(decodedPayload.requestId)
 
     if (pullStreamQueue === undefined) {
-      // Case: DO was hibernated, so we need to manually update the store
-      yield* Effect.log(`No pull stream queue found for ${decodedPayload.requestId}`)
+      // Either the pull's catch-up is still streaming (its queue registers when it ends and claims this buffer), or
+      // the DO was rebuilt without its store (the buffer is never claimed; the rebooted store pulls from its cursor).
+      bufferPendingUpdates(ctx, decodedPayload.requestId, decoded)
+      yield* Effect.logDebug(`No pull stream queue found for ${decodedPayload.requestId}, buffered the update`)
     } else {
       // Case: DO was still alive, so the existing `pull` will pick up the new events
       yield* Queue.offerAll(pullStreamQueue, decoded)
@@ -277,6 +325,42 @@ const pullRoutingFor = (ctx: CfTypes.DurableObjectState): PullRouting => {
   const routing: PullRouting = new Map()
   pullRoutingByInstance.set(ctx, routing)
   return routing
+}
+
+/**
+ * Live updates whose pull has not registered its queue yet, per client DO instance and request id. Bounded: once a
+ * request's buffer is full, further updates are dropped and the pull's gap detection forces a re-pull.
+ */
+const pendingUpdatesByInstance = new WeakMap<
+  CfTypes.DurableObjectState,
+  Map<EffectRpcRequestId, SyncMessage.PullResponse[]>
+>()
+
+const MAX_PENDING_UPDATES_PER_REQUEST = 256
+
+const bufferPendingUpdates = (
+  ctx: CfTypes.DurableObjectState,
+  requestId: EffectRpcRequestId,
+  updates: ReadonlyArray<SyncMessage.PullResponse>,
+) => {
+  const byRequest = pendingUpdatesByInstance.get(ctx) ?? new Map<EffectRpcRequestId, SyncMessage.PullResponse[]>()
+  pendingUpdatesByInstance.set(ctx, byRequest)
+  const pending = byRequest.get(requestId) ?? []
+  byRequest.set(requestId, pending)
+  for (const update of updates) {
+    if (pending.length >= MAX_PENDING_UPDATES_PER_REQUEST) return
+    pending.push(update)
+  }
+}
+
+const takePendingUpdates = (
+  ctx: CfTypes.DurableObjectState,
+  requestId: EffectRpcRequestId,
+): ReadonlyArray<SyncMessage.PullResponse> => {
+  const byRequest = pendingUpdatesByInstance.get(ctx)
+  const pending = byRequest?.get(requestId) ?? []
+  byRequest?.delete(requestId)
+  return pending
 }
 
 /**

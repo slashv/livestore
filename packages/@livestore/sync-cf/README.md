@@ -71,7 +71,11 @@ The sync backend stays schema-blind and only stores the small manifest pointer.
 - Worker: `makeWorker({ snapshots: { bucketBinding } })` (or `matchSnapshotRequest` + `handleSnapshotRequest` in a
   custom `fetch`) serves `GET …/snapshot/manifest?storeId&key&payload` and `GET …/snapshot/blob?storeId&objectKey&payload`.
   Both run `validatePayload`; blob keys must start with `snapshots/<storeId>/`.
-- Checkpointer: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs })` uploads
+- Checkpointer: `makeCheckpointerDurableObject` from `@livestore/adapter-cloudflare` runs a headless leader per
+  `${storeId}/${snapshotKey}` that follows the log via DO-RPC live pull. Pass
+  `makeDurableObject({ snapshots: { checkpointerBinding, snapshotKeys } })` so pushes wake it (with the current
+  `backendId`, so a reset backend restarts it).
+- Sink: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs })` uploads
   `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`, then publishes the manifest, then deletes blobs of the key that were
   replaced more than `graceMs` ago (the previous manifest's blob is always kept).
 - Clients: `makeHttpSnapshotSource({ url })` (same URL as the sync backend) or, inside Durable Objects,

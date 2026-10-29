@@ -2,7 +2,12 @@
 
 import { DurableObject } from 'cloudflare:workers'
 
-import { createStoreDoPromise } from '@livestore/adapter-cloudflare'
+import {
+  type CheckpointerDoRpcInterface,
+  createStoreDoPromise,
+  getCheckpointerStub,
+  makeCheckpointerDurableObject,
+} from '@livestore/adapter-cloudflare'
 import { Snapshot } from '@livestore/common'
 import { type ClientDoWithRpcCallback, setupDurableObjectWebSocketRpc } from '@livestore/common-cf'
 import type { CfDeclare } from '@livestore/common-cf/declare'
@@ -86,7 +91,62 @@ export interface Env {
   DB: CfTypes.D1Database
   /** Snapshot blobs (experimental snapshot boot) */
   SNAPSHOT_BUCKET: CfTypes.R2Bucket
+  /** Sync DO that wakes {@link CheckpointerDO} on push (snapshot boot end-to-end tests). */
+  SNAPSHOT_SYNC_BACKEND_DO: CfTypes.DurableObjectNamespace<SyncBackendRpcInterface & SnapshotSyncDoProbe>
+  CHECKPOINTER_DO: CfTypes.DurableObjectNamespace<CheckpointerDoRpcInterface>
+  /** Checkpointer that never publishes on its own, for DO limit measurements against `SYNC_BACKEND_DO`. */
+  MEASURE_CHECKPOINTER_DO: CfTypes.DurableObjectNamespace<CheckpointerDoRpcInterface>
 }
+
+interface SnapshotSyncDoProbe {
+  resetBackendForTest(): Promise<void>
+}
+
+/** Snapshot key of the test schema; the snapshot sync DO wakes this key's checkpointer on push. */
+const testSnapshotKey = Snapshot.SnapshotKey.toString(Snapshot.SnapshotKey.make(schema))
+
+/**
+ * Sync backend for snapshot boot end-to-end tests. Separate from {@link SyncBackendDO} so other suites don't boot
+ * checkpointers (which would add live-pull subscriptions) for their stores.
+ */
+export class SnapshotSyncBackendDO extends makeDurableObject({
+  snapshots: { checkpointerBinding: 'CHECKPOINTER_DO', snapshotKeys: [testSnapshotKey], wakeIntervalMs: 1_000 },
+}) {
+  #state: CfTypes.DurableObjectState
+
+  constructor(state: CfTypes.DurableObjectState, env: Env) {
+    super(state, env)
+    this.#state = state
+  }
+
+  /**
+   * Simulates a backend reset: wipes all storage (events, backend identity, snapshot manifests, subscriptions) and
+   * aborts the instance so the next request starts with a fresh backendId.
+   */
+  async resetBackendForTest(): Promise<void> {
+    await this.#state.storage.deleteAll()
+    this.#state.abort('backend reset (test)')
+  }
+}
+
+/** Publishes as soon as 100 events accumulated; tests flush the rest with `publishNow`. */
+export class CheckpointerDO extends makeCheckpointerDurableObject<Env>({
+  schema,
+  syncBackendBinding: 'SNAPSHOT_SYNC_BACKEND_DO',
+  bucketBinding: 'SNAPSHOT_BUCKET',
+  bindingName: 'CHECKPOINTER_DO',
+  trigger: { minTailEvents: 100, minIntervalMs: 0, alpha: 0 },
+  pollInterval: 200,
+  keepAlive: { alarmIntervalMs: 2_000, idleTimeoutMs: 10_000 },
+}) {}
+
+export class MeasureCheckpointerDO extends makeCheckpointerDurableObject<Env>({
+  schema,
+  syncBackendBinding: 'SYNC_BACKEND_DO',
+  bucketBinding: 'SNAPSHOT_BUCKET',
+  bindingName: 'MEASURE_CHECKPOINTER_DO',
+  trigger: { minTailEvents: Number.MAX_SAFE_INTEGER },
+}) {}
 
 export class SyncBackendDO extends makeDurableObject({
   onPush: (_message, context) => {
@@ -419,6 +479,10 @@ export default {
       return new Response(JSON.stringify(probe), { headers: { 'content-type': 'application/json' } })
     }
 
+    if (url.pathname.startsWith('/snapshot-e2e/') === true) {
+      return handleSnapshotE2eRequest({ request, url, env, ctx })
+    }
+
     if (url.pathname.includes('/snapshot-test/') === true) {
       return handleSnapshotTestRequest({ request, url, env })
     }
@@ -546,4 +610,65 @@ const handleSnapshotTestRequest = async ({
   }
 
   return new Response('Invalid snapshot test path', { status: 400 })
+}
+
+/**
+ * Routes under `/snapshot-e2e/` use the checkpointer-enabled {@link SnapshotSyncBackendDO}: sync traffic, the snapshot
+ * routes, and test endpoints to drive the checkpointers. `/snapshot-e2e/measure/*` drives {@link MeasureCheckpointerDO}.
+ */
+const handleSnapshotE2eRequest = async ({
+  request,
+  url,
+  env,
+  ctx,
+}: {
+  request: CfTypes.Request
+  url: URL
+  env: Env
+  ctx: CfTypes.ExecutionContext
+}): Promise<CfTypes.Response> => {
+  const snapshotRequest = matchSnapshotRequest(request)
+  if (snapshotRequest !== undefined) {
+    return handleSnapshotRequest({
+      request,
+      snapshotRequest,
+      env,
+      syncBackendBinding: 'SNAPSHOT_SYNC_BACKEND_DO',
+      bucketBinding: 'SNAPSHOT_BUCKET',
+    })
+  }
+
+  const searchParams = matchSyncRequest(request)
+  if (searchParams !== undefined) {
+    return handleSyncRequest({ request, searchParams, env, ctx, syncBackendBinding: 'SNAPSHOT_SYNC_BACKEND_DO' })
+  }
+
+  const storeId = url.searchParams.get('storeId')
+  if (storeId === null) return new Response('storeId required', { status: 400 })
+  const json = (value: unknown) =>
+    new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } })
+
+  const namespace = url.pathname.includes('/measure/') === true ? env.MEASURE_CHECKPOINTER_DO : env.CHECKPOINTER_DO
+  const checkpointer = getCheckpointerStub({ namespace, storeId, schema })
+
+  if (url.pathname.endsWith('/checkpointer/ensure-running') === true) {
+    await checkpointer.ensureRunning(storeId)
+    return json(null)
+  }
+  if (url.pathname.endsWith('/checkpointer/stats') === true) {
+    return json(await checkpointer.stats(storeId))
+  }
+  if (url.pathname.endsWith('/checkpointer/publish-now') === true) {
+    return json(await checkpointer.publishNow(storeId))
+  }
+  if (url.pathname.endsWith('/reset-backend') === true) {
+    await env.SNAPSHOT_SYNC_BACKEND_DO.get(env.SNAPSHOT_SYNC_BACKEND_DO.idFromName(storeId))
+      .resetBackendForTest()
+      .catch(() => {
+        // `abort()` rejects the in-flight call by design.
+      })
+    return json(null)
+  }
+
+  return new Response('Invalid snapshot e2e path', { status: 400 })
 }

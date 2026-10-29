@@ -66,6 +66,9 @@ export const snapshotKeyObjectPrefix = ({ storeId, key }: { storeId: string; key
 
 export const SNAPSHOT_BLOB_CONTENT_TYPE = 'application/vnd.sqlite3'
 
+/** Durable Object name of the checkpointer for a store and snapshot key: one checkpointer per (store, schema). */
+export const checkpointerDurableObjectName = ({ storeId, key }: { storeId: string; key: string }) => `${storeId}/${key}`
+
 export const encodeSnapshotManifestJson = Schema.encodeSync(Schema.fromJsonString(Snapshot.SnapshotManifest))
 export const decodeSnapshotManifestJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Snapshot.SnapshotManifest))
 
