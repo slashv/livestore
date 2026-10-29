@@ -73,6 +73,15 @@ export interface Service {
    * events), which holds for a checkpointer that never pushes.
    */
   readonly exportSnapshot: Effect.Effect<StateSnapshotExport, UnknownError>
+  /**
+   * Serializes the state database between persist transactions. Exports taken while a transaction has yielded to other
+   * fibers would contain a half-applied batch, so every leader-side state export should go through this.
+   */
+  readonly exportState: Effect.Effect<{
+    readonly bytes: Uint8Array<ArrayBuffer>
+    /** State head reflected by `bytes`, read under the same lock. */
+    readonly head: EventSequenceNumber.Client.Composite
+  }>
 }
 
 /**
@@ -243,7 +252,12 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
       Effect.withSpan('@livestore/common:LeaderPersistence:exportSnapshot'),
     )
 
-    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream, exportSnapshot })
+    const exportState: Service['exportState'] = Effect.gen(function* () {
+      const head = yield* stateHead.get.pipe(Effect.orDie)
+      return { bytes: dbState.export(), head }
+    }).pipe(lock.withPermits(1))
+
+    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream, exportSnapshot, exportState })
   })
 
 /**

@@ -290,9 +290,11 @@ const makeLeaderThread = ({
     )
 
     return yield* Effect.gen(function* () {
-      const { syncProcessor, extraIncomingMessagesQueue, initialState, networkStatus } = yield* LeaderThreadCtx
+      const { syncProcessor, extraIncomingMessagesQueue, initialState, networkStatus, exportState } =
+        yield* LeaderThreadCtx
 
-      const initialLeaderHead = Eventlog.getClientHeadFromDb(dbEventlog)
+      // Snapshot and head come from one locked read, so the session never pairs state with a different position.
+      const { bytes: initialSnapshot, head: initialLeaderHead } = yield* exportState
 
       const leaderThread = ClientSessionLeaderThreadProxy.of({
         events: {
@@ -310,14 +312,12 @@ const makeLeaderThread = ({
           migrationsReport: initialState.migrationsReport,
           storageMode: 'in-memory',
         },
-        export: Effect.sync(() => dbState.export()),
+        export: exportState.pipe(Effect.map(({ bytes }) => bytes)),
         getEventlogData: Effect.sync(() => dbEventlog.export()),
         syncState: syncProcessor.syncState,
         sendDevtoolsMessage: (message) => Queue.offer(extraIncomingMessagesQueue, message),
         networkStatus,
       })
-
-      const initialSnapshot = dbState.export()
 
       return { leaderThread, initialSnapshot }
     }).pipe(Effect.provide(layer))

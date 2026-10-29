@@ -300,6 +300,7 @@ export const makeLeaderThreadLayer = ({
       networkStatus,
       snapshotBoot,
       exportSnapshot: persistence.exportSnapshot,
+      exportState: persistence.exportState,
       // State will be set during `bootLeaderThread`
       initialState: {} as any as LeaderThreadCtx['Service']['initialState'],
     } satisfies LeaderThreadCtx['Service']

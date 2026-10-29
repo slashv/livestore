@@ -316,7 +316,6 @@ const makeWorkerRunnerInner = ({ schema, sync: syncOptions, syncPayloadSchema }:
         GetRecreateSnapshot: () =>
           Effect.gen(function* () {
             const workerCtx = yield* LeaderThreadCtx
-            const dbState = yield* StateSqliteDb.StateSqliteDb
 
             // NOTE we can only return the cached snapshot once as it's transferred (i.e. disposed), so we need to set it to undefined
             // const cachedSnapshot =
@@ -324,7 +323,7 @@ const makeWorkerRunnerInner = ({ schema, sync: syncOptions, syncPayloadSchema }:
 
             // return cachedSnapshot ?? workerCtx.db.export()
 
-            const snapshot = dbState.export()
+            const { bytes: snapshot } = yield* workerCtx.exportState
             return { snapshot, migrationsReport: workerCtx.initialState.migrationsReport }
           }).pipe(provideLeaderThread),
         PullStream: ({ cursor }) =>
@@ -354,8 +353,9 @@ const makeWorkerRunnerInner = ({ schema, sync: syncOptions, syncPayloadSchema }:
             })
           }).pipe(provideLeaderThread, Stream.unwrap, Stream.withSpan('@livestore/adapter-web:worker:StreamEvents')),
         Export: () =>
-          StateSqliteDb.StateSqliteDb.pipe(
-            Effect.flatMap((dbState) => Effect.sync(() => dbState.export())),
+          LeaderThreadCtx.pipe(
+            Effect.flatMap((ctx) => ctx.exportState),
+            Effect.map(({ bytes }) => bytes),
             provideLeaderThread,
             Effect.withSpan('@livestore/adapter-web:worker:Export'),
           ),
