@@ -47,7 +47,8 @@ describe('SnapshotTrigger.decide', () => {
     const snapshotBytes = 10_000_000
     const at = (tailEvents: number) => decide({ tailEvents, snapshotBytes, msSinceLastSnapshot: Infinity }, params)
     expect(at(400)).toEqual({ _tag: 'wait', reason: 'cost' })
-    expect(at(401)).toMatchObject({ _tag: 'publish', downloadCostMs: 400 })
+    expect(at(401)._tag).toBe('publish')
+    expect((at(401) as { downloadCostMs: number }).downloadCostMs).toBeCloseTo(400)
     expect((at(401) as { tailCostMs: number }).tailCostMs).toBeCloseTo(200.5)
   })
 
