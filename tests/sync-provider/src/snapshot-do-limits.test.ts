@@ -20,7 +20,9 @@ import { SyncProviderImpl } from './types.ts'
  * SNAPSHOT_DO_LIMITS_MB=10,50,100,200 TEST_SYNC_PROVIDER=cf-http-do pnpm exec vitest run src/snapshot-do-limits.test.ts
  * ```
  *
- * Local workerd does not enforce the 128 MB isolate limit, so the numbers show what production would need.
+ * Local workerd does not enforce the 128 MB isolate limit, so the numbers show what production would need. Workers
+ * timers only advance on I/O, so the in-DO phase timings under-report CPU-bound work; `publishWallMs` is measured from
+ * the test process.
  */
 
 const sizesMb = (process.env.SNAPSHOT_DO_LIMITS_MB ?? '')
@@ -79,7 +81,11 @@ Vitest.describe.skipIf(sizesMb.length === 0)('checkpointer Durable Object limits
         )
         const catchUpMs = performance.now() - catchUpStart
 
+        // Wall clock from the test process: inside workerd, timers only advance on I/O, so CPU-bound phases (export,
+        // hashing) under-report in the checkpointer's own timings.
+        const publishStart = performance.now()
         const manifest = yield* getJson<Snapshot.SnapshotManifest | null>(measureUrl('publish-now'))
+        const publishWallMs = performance.now() - publishStart
         expect(manifest?.seqNum).toBe(eventCount)
         const published = yield* getJson<CheckpointerDoStats>(measureUrl('stats'))
         const timings = published.lastPublish!
@@ -95,6 +101,7 @@ Vitest.describe.skipIf(sizesMb.length === 0)('checkpointer Durable Object limits
           hashMs: Math.round(timings.hashMs),
           uploadMs: Math.round(timings.uploadMs),
           publishTotalMs: Math.round(timings.totalMs),
+          publishWallMs: Math.round(publishWallMs),
           wasmHeapBeforeExportMb: mb(caughtUp.runtime.wasmHeapBytes),
           wasmHeapAfterExportMb: mb(published.runtime.wasmHeapBytes),
         }
