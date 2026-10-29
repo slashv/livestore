@@ -4,6 +4,7 @@ import { Effect, Option, Schema } from '@livestore/utils/effect'
 import { encodeSnapshotManifestJson, type SnapshotManifestPutResult } from '../../common/snapshot.ts'
 import { PERSISTENCE_FORMAT_VERSION } from '../shared.ts'
 import { DoCtx, type Service as DoCtxService } from './layer.ts'
+import { contextTable } from './sqlite.ts'
 
 /**
  * Snapshot manifest storage of the sync Durable Object (experimental snapshot boot, LS.SYS-R06).
@@ -104,9 +105,56 @@ export const getSnapshotManifest = Effect.fn('@livestore/sync-cf:durable-object:
   })
 })
 
+/**
+ * Whether `objectKey` is the blob of the current or previous manifest of any key of this store and backend identity.
+ * The blob route serves nothing else: no orphans, rejected uploads, blobs of a reset backend or of other stores.
+ */
+export const isSnapshotObjectServable = Effect.fn('@livestore/sync-cf:durable-object:isSnapshotObjectServable')(
+  function* (objectKey: string) {
+    const { storeId, backendId, ctx } = yield* DoCtx
+
+    return yield* Effect.try({
+      try: () => {
+        ensureTable(ctx.storage.sql)
+        return (
+          ctx.storage.sql
+            .exec(
+              `SELECT 1 FROM "${snapshotManifestsTableName}" WHERE storeId = ? AND backendId = ?
+                AND (json_extract(manifest, '$.objectKey') = ? OR json_extract(previousManifest, '$.objectKey') = ?)
+                LIMIT 1`,
+              storeId,
+              backendId,
+              objectKey,
+              objectKey,
+            )
+            .toArray().length > 0
+        )
+      },
+      catch: (cause) => new UnknownError({ cause, note: 'Failed to check snapshot object' }),
+    })
+  },
+)
+
+/**
+ * Whether the sync backend has ever been initialized for `storeId` in this Durable Object. Used to reject manifests
+ * for unknown stores on a cold instance, which would otherwise initialize its context from the manifest's store id.
+ */
+export const hasStoreContext = (sql: DoCtxService['ctx']['storage']['sql'], storeId: string): boolean => {
+  try {
+    return sql.exec(`SELECT 1 FROM "${contextTable.sqliteDef.name}" WHERE storeId = ?`, storeId).toArray().length > 0
+  } catch {
+    // No context table yet: nothing was ever pushed or pulled here.
+    return false
+  }
+}
+
 type ManifestRow = { backendId: string; seqNum: number; manifest: string }
 
+/** Storage handles whose manifest table exists, so reads don't re-run DDL. */
+const ensuredTables = new WeakSet<object>()
+
 const ensureTable = (sql: DoCtxService['ctx']['storage']['sql']) => {
+  if (ensuredTables.has(sql) === true) return
   sql.exec(
     `CREATE TABLE IF NOT EXISTS "${snapshotManifestsTableName}" (
       storeId TEXT NOT NULL,
@@ -119,6 +167,7 @@ const ensureTable = (sql: DoCtxService['ctx']['storage']['sql']) => {
       PRIMARY KEY (storeId, key)
     ) strict`,
   )
+  ensuredTables.add(sql)
 }
 
 const readRow = (

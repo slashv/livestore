@@ -54,17 +54,20 @@ export const bootLeader = ({
   storeId,
   clientId,
   syncOptions,
+  dbs,
 }: {
   makeSqliteDb: MakeSqliteDb
   schema: LiveStoreSchema
   storeId: string
   clientId: string
   syncOptions: SyncOptions
+  /** Databases of an earlier (shut down) leader, to model a restart. Fresh in-memory databases by default. */
+  dbs?: { dbState: SqliteDb; dbEventlog: SqliteDb }
 }): Effect.Effect<BootedLeader, UnknownError, Scope.Scope> =>
   Effect.gen(function* () {
     const scope = yield* Scope.fork(yield* Effect.scope)
-    const dbState = yield* makeSqliteDb({ _tag: 'in-memory' })
-    const dbEventlog = yield* makeSqliteDb({ _tag: 'in-memory' })
+    const dbState = dbs?.dbState ?? (yield* makeSqliteDb({ _tag: 'in-memory' }))
+    const dbEventlog = dbs?.dbEventlog ?? (yield* makeSqliteDb({ _tag: 'in-memory' }))
     const shutdownChannel = yield* WebChannel.queueChannelProxy({ schema: ShutdownChannel.All }).pipe(
       Scope.provide(scope),
     )

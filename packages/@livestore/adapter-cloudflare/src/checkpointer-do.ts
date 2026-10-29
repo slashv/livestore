@@ -48,8 +48,20 @@ import { type DoLeaderThread, makeDoLeaderThread } from './make-leader-thread.ts
 export interface CheckpointerDoRpcInterface extends CheckpointerWakeInterface, ClientDoWithRpcCallback {
   /** Current checkpointer state (boots the checkpointer if needed). For monitoring, tests and benchmarks. */
   stats(storeId: string): Promise<CheckpointerDoStats>
+  /** Whether a checkpointer runs in this instance, without booting one. */
+  status(): Promise<CheckpointerDoStatus>
   /** Publishes a snapshot now if the checkpointer's head moved past the latest one, bypassing the cost model. */
   publishNow(storeId: string): Promise<Snapshot.SnapshotManifest | null>
+}
+
+/** Cheap probe that never boots the checkpointer. */
+export interface CheckpointerDoStatus {
+  /** Store this instance checkpoints, once any call told it. */
+  readonly storeId: string | null
+  /** Whether this instance currently runs (or boots) a leader. */
+  readonly running: boolean
+  /** `ensureRunning` calls received by this instance (e.g. wake-ups from the sync backend on push). */
+  readonly ensureRunningCalls: number
 }
 
 /** JSON-friendly {@link CheckpointerStats} plus runtime diagnostics. */
@@ -144,9 +156,14 @@ export const makeCheckpointerDurableObject = <TEnv>(
     readonly #ctx: CfTypes.DurableObjectState
     readonly #env: TEnv
     #running: Promise<Running> | undefined
-    #lastActivityAt = Date.now()
+    /**
+     * Set while a running checkpointer shuts down. `#ensure` waits for it, so a call arriving mid-shutdown never boots
+     * a second leader on the same storage.
+     */
+    #transition: Promise<void> | undefined
     #lastSeenHead = -1
     #resetPersistenceOnBoot = false
+    #ensureRunningCalls = 0
 
     constructor(ctx: CfTypes.DurableObjectState, env: TEnv) {
       super(ctx, env)
@@ -155,7 +172,8 @@ export const makeCheckpointerDurableObject = <TEnv>(
     }
 
     async ensureRunning(storeId: string, ensureOptions?: { backendId?: string }): Promise<void> {
-      this.#lastActivityAt = Date.now()
+      this.#ensureRunningCalls++
+      this.#markActive()
       const running = await this.#ensure(storeId)
       const followedBackendId = Eventlog.getBackendIdFromDb(running.leader.dbEventlog)
       if (
@@ -164,39 +182,50 @@ export const makeCheckpointerDurableObject = <TEnv>(
         followedBackendId.value !== ensureOptions.backendId
       ) {
         // The backend was reset. Its new history is unrelated to the local copy, so start over from an empty store.
-        await this.#restart(running, { resetPersistence: true })
+        await this.#stop(running, { resetPersistence: true })
         await this.#ensure(storeId)
       }
       await this.#armAlarm()
     }
 
     async syncUpdateRpc(payload: Uint8Array<ArrayBuffer>, storeId: string): Promise<void> {
-      this.#lastActivityAt = Date.now()
-      if (this.#running === undefined) {
-        // The sync DO awaits this callback before acknowledging the push, so don't block it on a cold boot.
-        // The booting leader pulls from its persisted cursor, which covers the dropped payload.
-        this.#ctx.waitUntil(this.ensureRunning(storeId).catch((error: unknown) => console.error(error)))
-        return
-      }
-      await this.#ensure(storeId)
-      await this.#armAlarm()
+      this.#markActive()
+      // The sync DO awaits this callback during push broadcast, so never wait for a boot here. Routing is synchronous:
+      // a running pull takes the update, a pull still catching up buffers it, and with no pull it is dropped (the
+      // leader pulls from its persisted cursor when it boots).
       await handleSyncUpdateRpc(this.#ctx, payload)
+      this.#ctx.waitUntil(
+        this.#ensure(storeId)
+          .then(() => this.#armAlarm())
+          .catch((error: unknown) => console.error('Checkpointer failed to start', error)),
+      )
     }
 
     override async alarm(): Promise<void> {
       const storeId = this.#ctx.storage.kv.get<string>(STORE_ID_KEY)
       if (storeId === undefined) return
 
+      // A leftover alarm on a quiet, evicted store must not boot a whole leader just to find nothing to do.
+      if (this.#running === undefined && this.#idleForMs() >= idleTimeoutMs) return
+
       const running = await this.#ensure(storeId)
       const { head } = await runPromise(SubscriptionRef.get(running.checkpointer.stats), options.logLevel)
       if (head !== this.#lastSeenHead) {
         this.#lastSeenHead = head
-        this.#lastActivityAt = Date.now()
+        this.#markActive()
       }
 
       // Re-arm only while the log moves; a quiet store lets the instance idle out (and be evicted).
-      if (Date.now() - this.#lastActivityAt < idleTimeoutMs) {
+      if (this.#idleForMs() < idleTimeoutMs) {
         await this.#ctx.storage.setAlarm(Date.now() + alarmIntervalMs)
+      }
+    }
+
+    async status(): Promise<CheckpointerDoStatus> {
+      return {
+        storeId: this.#ctx.storage.kv.get<string>(STORE_ID_KEY) ?? null,
+        running: this.#running !== undefined,
+        ensureRunningCalls: this.#ensureRunningCalls,
       }
     }
 
@@ -225,19 +254,32 @@ export const makeCheckpointerDurableObject = <TEnv>(
       return runPromise(running.checkpointer.publishNow.pipe(Effect.map(Option.getOrNull)), options.logLevel)
     }
 
-    async #restart(running: Running, { resetPersistence }: { resetPersistence: boolean }): Promise<void> {
-      if (this.#running !== undefined && (await this.#running) === running) this.#running = undefined
-      await runPromise(Scope.close(running.scope, Exit.void), options.logLevel)
-      this.#resetPersistenceOnBoot = resetPersistence
+    /**
+     * Shuts a running checkpointer down. The reset flag is set first and `#running` is cleared only once its scope has
+     * closed, all while `#transition` holds back `#ensure`, so no second leader boots on the same storage meanwhile.
+     */
+    #stop(running: Running, { resetPersistence }: { resetPersistence: boolean }): Promise<void> {
+      if (this.#transition !== undefined) return this.#transition
+      if (resetPersistence === true) this.#resetPersistenceOnBoot = true
+      const transition = runPromise(Scope.close(running.scope, Exit.void), options.logLevel)
+        .catch((error: unknown) => console.error('Checkpointer shutdown failed', error))
+        .finally(() => {
+          this.#running = undefined
+          this.#transition = undefined
+        })
+      this.#transition = transition
+      return transition
     }
 
-    #ensure(storeId: string): Promise<Running> {
+    async #ensure(storeId: string): Promise<Running> {
       const persistedStoreId = this.#ctx.storage.kv.get<string>(STORE_ID_KEY)
       if (persistedStoreId === undefined) {
         this.#ctx.storage.kv.put(STORE_ID_KEY, storeId)
       } else if (persistedStoreId !== storeId) {
-        return Promise.reject(new Error(`Checkpointer belongs to store '${persistedStoreId}', called for '${storeId}'`))
+        throw new Error(`Checkpointer belongs to store '${persistedStoreId}', called for '${storeId}'`)
       }
+
+      while (this.#transition !== undefined) await this.#transition
 
       if (this.#running === undefined) {
         const running = this.#boot(storeId)
@@ -256,6 +298,17 @@ export const makeCheckpointerDurableObject = <TEnv>(
       }
     }
 
+    /** Last activity is persisted (throttled to once per second) so alarms after eviction can tell a quiet store. */
+    #markActive() {
+      const now = Date.now()
+      const persisted = this.#ctx.storage.kv.get<number>(LAST_ACTIVITY_KEY) ?? 0
+      if (now - persisted >= 1_000) this.#ctx.storage.kv.put(LAST_ACTIVITY_KEY, now)
+    }
+
+    #idleForMs() {
+      return Date.now() - (this.#ctx.storage.kv.get<number>(LAST_ACTIVITY_KEY) ?? 0)
+    }
+
     #boot(storeId: string): Promise<Running> {
       const ctx = this.#ctx
       const resetPersistence = this.#resetPersistenceOnBoot
@@ -265,9 +318,7 @@ export const makeCheckpointerDurableObject = <TEnv>(
         | CfTypes.DurableObjectNamespace<SyncBackendRpcInterface>
         | undefined
       const bucket = env[options.bucketBinding] as CfTypes.R2Bucket | undefined
-      const onStopped = (running: Promise<Running>) => {
-        if (this.#running === running) this.#running = undefined
-      }
+      const onStopped = (running: Running) => this.#stop(running, { resetPersistence: false })
 
       const boot = Effect.gen(function* () {
         if (syncBackendNamespace === undefined) {
@@ -338,21 +389,19 @@ export const makeCheckpointerDurableObject = <TEnv>(
         Effect.withSpan('@livestore/adapter-cloudflare:checkpointer:boot', { attributes: { storeId } }),
       )
 
-      const running: Promise<Running> = runPromise(boot, options.logLevel).then((booted) => {
-        // When the leader stops (e.g. a backend reset made it clear its storage), drop this instance's checkpointer;
-        // the next call or alarm boots a fresh one against the new backend.
+      return runPromise(boot, options.logLevel).then((booted) => {
+        // When the leader stops (e.g. a backend reset made it clear its storage), shut this checkpointer down; the next
+        // call or alarm boots a fresh one against the new backend.
         Effect.runFork(
           Queue.take(booted.shutdownQueue).pipe(
             Effect.flatMap((cause) =>
               Effect.logWarning('Checkpointer leader stopped, will reboot on next wake', cause),
             ),
-            Effect.andThen(Effect.sync(() => onStopped(running))),
-            Effect.andThen(Scope.close(booted.scope, Exit.void)),
+            Effect.andThen(Effect.promise(() => onStopped(booted))),
           ),
         )
         return booted
       })
-      return running
     }
   }
 }
@@ -386,6 +435,7 @@ interface Running {
 }
 
 const STORE_ID_KEY = 'livestore-checkpointer:storeId'
+const LAST_ACTIVITY_KEY = 'livestore-checkpointer:lastActivityAt'
 
 // oxlint-disable-next-line typescript-eslint(no-unsafe-type-assertion) -- `cloudflare:workers` types the base class against the ambient env type
 const DurableObjectBase = DurableObject as unknown as new (

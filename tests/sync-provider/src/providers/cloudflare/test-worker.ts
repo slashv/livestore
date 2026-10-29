@@ -126,8 +126,11 @@ export class SnapshotSyncBackendDO extends makeDurableObject({
    * aborts the instance so the next request starts with a fresh backendId.
    */
   async resetBackendForTest(): Promise<void> {
-    await this.#state.storage.deleteAll()
-    this.#state.abort('backend reset (test)')
+    // No other request may observe the wiped storage through this instance's cached backend identity.
+    await this.#state.blockConcurrencyWhile(async () => {
+      await this.#state.storage.deleteAll()
+      this.#state.abort('backend reset (test)')
+    })
   }
 }
 
@@ -581,8 +584,15 @@ const handleSnapshotTestRequest = async ({
     return json(await getSyncBackendStub().putSnapshotManifest(await request.text()))
   }
 
+  if (url.pathname.endsWith('/snapshot-test/put-orphan') === true) {
+    // A blob under the store's prefix that no manifest points at (e.g. left behind by a failed publish).
+    const objectKey = `snapshots/${encodeURIComponent(storeId)}/orphan/${crypto.randomUUID()}.sqlite`
+    await env.SNAPSHOT_BUCKET.put(objectKey, new Uint8Array(16), { customMetadata: { storeId } })
+    return json({ objectKey })
+  }
+
   if (url.pathname.endsWith('/snapshot-test/blobs') === true) {
-    const listed = await env.SNAPSHOT_BUCKET.list({ prefix: `snapshots/${storeId}/` })
+    const listed = await env.SNAPSHOT_BUCKET.list({ prefix: `snapshots/${encodeURIComponent(storeId)}/` })
     return json(listed.objects.map((object) => object.key).toSorted())
   }
 
@@ -670,6 +680,9 @@ const handleSnapshotE2eRequest = async ({
   if (url.pathname.endsWith('/checkpointer/ensure-running') === true) {
     await checkpointer.ensureRunning(storeId)
     return json(null)
+  }
+  if (url.pathname.endsWith('/checkpointer/status') === true) {
+    return json(await checkpointer.status())
   }
   if (url.pathname.endsWith('/checkpointer/stats') === true) {
     return json(await checkpointer.stats(storeId))

@@ -235,6 +235,13 @@ export interface SyncBackendRpcInterface {
    * @experimental
    */
   getSnapshotManifest(args: { storeId: string; key: string }): Promise<string | null>
+  /**
+   * Whether `objectKey` is the blob of the current or previous manifest of some snapshot key of this store (and backend
+   * identity). The worker's blob route serves nothing else.
+   *
+   * @experimental
+   */
+  isSnapshotObjectServable(args: { storeId: string; objectKey: string }): Promise<boolean>
 }
 
 export const WebSocketAttachmentSchema = Schema.fromJsonString(

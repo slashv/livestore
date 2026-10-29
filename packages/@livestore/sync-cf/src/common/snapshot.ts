@@ -57,12 +57,15 @@ export type SnapshotManifestPutResult =
       readonly message: string
     }
 
-/** Every snapshot blob of a store lives under this R2 prefix; the blob route refuses anything outside of it. */
-export const snapshotObjectPrefix = (storeId: string) => `snapshots/${storeId}/`
+/**
+ * Every snapshot blob of a store lives under this R2 prefix. The store id is URI-encoded so that one store's prefix
+ * is never a prefix of another's (`a` vs `a/b`).
+ */
+export const snapshotObjectPrefix = (storeId: string) => `snapshots/${encodeURIComponent(storeId)}/`
 
 /** R2 prefix of all blobs published for one snapshot key. */
 export const snapshotKeyObjectPrefix = ({ storeId, key }: { storeId: string; key: string }) =>
-  `${snapshotObjectPrefix(storeId)}${key}/`
+  `${snapshotObjectPrefix(storeId)}${encodeURIComponent(key)}/`
 
 export const SNAPSHOT_BLOB_CONTENT_TYPE = 'application/vnd.sqlite3'
 
@@ -97,8 +100,18 @@ export const readSnapshotBlobFromR2 = async ({
   }
 
   const object = await bucket.get(manifest.objectKey)
-  if (object === null) {
+  // The sink records the owning store on every blob; a mismatch means the key does not belong to this store.
+  if (object === null || object.customMetadata?.storeId !== storeId) {
+    object?.body.cancel().catch(() => {})
     return { _tag: 'Error', reason: 'not-found', message: `No snapshot blob at ${manifest.objectKey}` }
+  }
+  if (object.size !== manifest.byteLength) {
+    object.body.cancel().catch(() => {})
+    return {
+      _tag: 'Error',
+      reason: 'integrity',
+      message: `Snapshot blob has ${object.size} bytes, manifest expects ${manifest.byteLength}`,
+    }
   }
 
   const bytes = new Uint8Array(await object.arrayBuffer())

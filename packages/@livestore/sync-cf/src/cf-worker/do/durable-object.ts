@@ -213,9 +213,15 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
         // The DO doesn't know its own name, so the store id is taken from the manifest; `putSnapshotManifest` then
         // checks it against the id this instance was initialized with.
         Effect.flatMap((manifest) =>
-          SnapshotManifests.putSnapshotManifest(manifest).pipe(
-            Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId: manifest.storeId } })),
-          ),
+          SnapshotManifests.hasStoreContext(this.ctx.storage.sql, manifest.storeId) === false
+            ? Effect.succeed<SnapshotManifestPutResult>({
+                _tag: 'Rejected',
+                reason: 'incompatible',
+                message: `Unknown store ${manifest.storeId}: the sync backend has no history for it`,
+              })
+            : SnapshotManifests.putSnapshotManifest(manifest).pipe(
+                Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId: manifest.storeId } })),
+              ),
         ),
         this.runEffectAsPromise,
       )
@@ -226,8 +232,22 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
      * See {@link SyncBackendRpcInterface.getSnapshotManifest}.
      */
     async getSnapshotManifest({ storeId, key }: { storeId: string; key: string }): Promise<string | null> {
+      // Don't initialize a backend context (and identity) just to answer a read for a store that has no history.
+      if (SnapshotManifests.hasStoreContext(this.ctx.storage.sql, storeId) === false) return null
       return SnapshotManifests.getSnapshotManifest(key).pipe(
         Effect.map(Option.getOrNull),
+        Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId } })),
+        this.runEffectAsPromise,
+      )
+    }
+
+    /**
+     * Whether `objectKey` belongs to the current or previous snapshot manifest of this store (experimental snapshot
+     * boot). See {@link SyncBackendRpcInterface.isSnapshotObjectServable}.
+     */
+    async isSnapshotObjectServable({ storeId, objectKey }: { storeId: string; objectKey: string }): Promise<boolean> {
+      if (SnapshotManifests.hasStoreContext(this.ctx.storage.sql, storeId) === false) return false
+      return SnapshotManifests.isSnapshotObjectServable(objectKey).pipe(
         Effect.provide(DoCtx.layer({ doSelf: this, doOptions: options, from: { storeId } })),
         this.runEffectAsPromise,
       )

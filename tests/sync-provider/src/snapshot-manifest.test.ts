@@ -41,7 +41,9 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
       })
       expect(published._tag).toBe('ok')
       if (published._tag !== 'ok') return
-      expect(published.manifest.objectKey.startsWith(`snapshots/${storeId}/${snapshotKey}/3-`)).toBe(true)
+      expect(
+        published.manifest.objectKey.startsWith(`snapshots/${encodeURIComponent(storeId)}/${snapshotKey}/3-`),
+      ).toBe(true)
 
       const source = yield* makeHttpSnapshotSource({ url: baseUrl })({
         storeId,
@@ -88,6 +90,14 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
         reason: 'incompatible',
       })
       expect(yield* putManifest({ ...valid, seqNum: 6 })).toMatchObject({ _tag: 'Rejected', reason: 'incompatible' })
+
+      // A cold sync DO must not adopt the store id of the first manifest it sees.
+      const coldStoreId = `snapshot-cold-${nanoid()}`
+      const cold = yield* postJson<{ _tag: string; reason?: string }>(
+        `${baseUrl}/snapshot-test/put-manifest?storeId=${coldStoreId}`,
+        { ...valid, storeId: coldStoreId },
+      )
+      expect(cold.body).toMatchObject({ _tag: 'Rejected', reason: 'incompatible' })
       expect(yield* putManifest(valid)).toEqual({ _tag: 'Accepted', previousObjectKey: null })
       // Same seqNum again is allowed (e.g. a restarted checkpointer republishing), older is not.
       expect(yield* putManifest(valid)).toEqual({ _tag: 'Accepted', previousObjectKey: valid.objectKey })
@@ -139,13 +149,33 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
       const deniedBlob = yield* deniedSource.download(published.manifest).pipe(Effect.flip)
       expect(deniedBlob.message).toContain('status 400')
 
-      // A payload valid for this store must not read another store's blobs.
-      const foreign = yield* Effect.promise(() =>
-        fetch(
-          `${baseUrl}/snapshot/blob?storeId=${storeId}&objectKey=${encodeURIComponent(published.manifest.objectKey.replace(storeId, 'other-store'))}`,
-        ),
-      )
-      expect(foreign.status).toBe(403)
+      const blobStatus = (requestStoreId: string, objectKey: string) =>
+        Effect.promise(() =>
+          fetch(
+            `${baseUrl}/snapshot/blob?storeId=${encodeURIComponent(requestStoreId)}&objectKey=${encodeURIComponent(objectKey)}`,
+          ).then(async (res) => {
+            await res.arrayBuffer()
+            return res.status
+          }),
+        )
+
+      // A payload valid for this store must not read another store's blobs, including a store whose id extends this
+      // one (`<storeId>/victim` used to share the `snapshots/<storeId>/` prefix).
+      const victimStoreId = `${storeId}/victim`
+      const victim = yield* setupStore({ eventCount: 2, storeId: victimStoreId })
+      const victimPublished = yield* publish({
+        baseUrl,
+        storeId: victimStoreId,
+        manifest: makeManifest({ storeId: victimStoreId, backendId: victim.backendId, seqNum: 2, bytes }),
+        bytes,
+      })
+      if (victimPublished._tag !== 'ok') return expect.unreachable('victim publish failed')
+      expect(yield* blobStatus(storeId, victimPublished.manifest.objectKey)).toBe(403)
+      expect(yield* blobStatus(victimStoreId, victimPublished.manifest.objectKey)).toBe(200)
+
+      // Only blobs a manifest points at are served, not arbitrary objects under the store's prefix.
+      const orphan = yield* getJson<{ objectKey: string }>(`${baseUrl}/snapshot-test/put-orphan?storeId=${storeId}`)
+      expect(yield* blobStatus(storeId, orphan.objectKey)).toBe(404)
 
       // The blob route sets content-length from R2.
       const blob = yield* Effect.promise(() =>
@@ -212,8 +242,22 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
         objectKeys.push(published.manifest.objectKey)
       }
 
-      // Within the grace period every replaced blob stays readable.
+      // Within the grace period every replaced blob stays stored, but only the current and previous one are served.
       expect(yield* listBlobs({ baseUrl, storeId })).toEqual(objectKeys.toSorted())
+      const servedStatus = (objectKey: string) =>
+        Effect.promise(() =>
+          fetch(`${baseUrl}/snapshot/blob?storeId=${storeId}&objectKey=${encodeURIComponent(objectKey)}`).then(
+            async (res) => {
+              await res.arrayBuffer()
+              return res.status
+            },
+          ),
+        )
+      expect([
+        yield* servedStatus(objectKeys[0]!),
+        yield* servedStatus(objectKeys[1]!),
+        yield* servedStatus(objectKeys[2]!),
+      ]).toEqual([404, 200, 200])
 
       const bytes = randomBytes(1024)
       const latest = yield* publish({
@@ -232,9 +276,8 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
 })
 
 /** Creates a fresh store, pushes `eventCount` events over HTTP and reads the sync DO's backend identity and head. */
-const setupStore = ({ eventCount }: { eventCount: number }) =>
+const setupStore = ({ eventCount, storeId = `snapshot-${nanoid()}` }: { eventCount: number; storeId?: string }) =>
   Effect.gen(function* () {
-    const storeId = `snapshot-${nanoid()}`
     const { makeProvider } = yield* SyncProviderImpl
     const syncBackend = yield* makeProvider({ storeId, clientId: 'snapshot-test', payload: undefined })
     const url = syncBackend.metadata.url
@@ -252,7 +295,7 @@ const setupStore = ({ eventCount }: { eventCount: number }) =>
     )
 
     const { backendId, head } = yield* getJson<{ backendId: string; head: number }>(
-      `${baseUrl}/snapshot-test/context?storeId=${storeId}`,
+      `${baseUrl}/snapshot-test/context?storeId=${encodeURIComponent(storeId)}`,
     )
     return { storeId, baseUrl, backendId, head }
   })
@@ -293,7 +336,7 @@ const publish = ({
   graceMs?: number
 }) =>
   postJson<Snapshot.SnapshotManifest | { reason: string; message: string }>(
-    `${baseUrl}/snapshot-test/publish?storeId=${storeId}${graceMs !== undefined ? `&graceMs=${graceMs}` : ''}`,
+    `${baseUrl}/snapshot-test/publish?storeId=${encodeURIComponent(storeId)}${graceMs !== undefined ? `&graceMs=${graceMs}` : ''}`,
     { manifest, bytesBase64: Buffer.from(bytes).toString('base64') },
   ).pipe(
     Effect.map(({ status, body }) =>

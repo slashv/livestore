@@ -121,6 +121,15 @@ export const makeHttpSnapshotSource =
         }
         yield* failUnlessOk(response, 'blob')
 
+        // Refuse a blob of the wrong size before buffering it.
+        const contentLength = response.headers['content-length']
+        if (contentLength !== undefined && Number(contentLength) !== manifest.byteLength) {
+          return yield* new Snapshot.SnapshotError({
+            reason: 'integrity',
+            message: `Snapshot blob has ${contentLength} bytes, manifest expects ${manifest.byteLength}`,
+          })
+        }
+
         const buffer = yield* response.arrayBuffer.pipe(
           Effect.mapError(
             (cause) =>

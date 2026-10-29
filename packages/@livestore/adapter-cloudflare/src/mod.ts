@@ -6,6 +6,7 @@ export { makeAdapter } from './make-adapter.ts'
 export {
   type CheckpointerDoRpcInterface,
   type CheckpointerDoStats,
+  type CheckpointerDoStatus,
   getCheckpointerStub,
   makeCheckpointerDurableObject,
   type MakeCheckpointerDurableObjectOptions,

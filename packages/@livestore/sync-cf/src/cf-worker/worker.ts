@@ -362,17 +362,17 @@ export const handleSnapshotRequest = <TEnv extends Env = Env, CFHostMetada = unk
     const textResponse = (status: number, body: string) =>
       makeResponse(body, { status, headers, extraHeaders: { 'Content-Type': 'text/plain' } })
 
-    if (snapshotRequest._tag === 'manifest') {
-      if (!(syncBackendBinding in env)) {
-        return textResponse(
-          424,
-          `Failed dependency: Required Durable Object binding '${syncBackendBinding as string}' not available`,
-        )
-      }
+    if (!(syncBackendBinding in env)) {
+      return textResponse(
+        424,
+        `Failed dependency: Required Durable Object binding '${syncBackendBinding as string}' not available`,
+      )
+    }
+    const namespace = env[syncBackendBinding as keyof TEnv] as CfTypes.DurableObjectNamespace<SyncBackendRpcInterface>
+    const stub = namespace.get(namespace.idFromName(storeId))
 
-      const namespace = env[syncBackendBinding as keyof TEnv] as CfTypes.DurableObjectNamespace<SyncBackendRpcInterface>
-      const stub = namespace.get(namespace.idFromName(storeId))
-      const manifestJson = yield* Effect.promise(() =>
+    if (snapshotRequest._tag === 'manifest') {
+      const manifestJson = yield* Effect.tryPromise(() =>
         stub.getSnapshotManifest({ storeId, key: snapshotRequest.params.key }),
       )
 
@@ -396,8 +396,17 @@ export const handleSnapshotRequest = <TEnv extends Env = Env, CFHostMetada = unk
       return textResponse(424, `Failed dependency: Required R2 bucket binding '${bucketBinding}' not available`)
     }
 
-    const object = yield* Effect.promise(() => bucket.get(objectKey))
+    // Only blobs a manifest currently points at (current or previous) are served: never orphans, rejected uploads or
+    // blobs of a reset backend, even under this store's prefix.
+    const servable = yield* Effect.tryPromise(() => stub.isSnapshotObjectServable({ storeId, objectKey }))
+    if (servable === false) return textResponse(404, 'No snapshot blob')
+
+    const object = yield* Effect.tryPromise(() => bucket.get(objectKey))
     if (object === null) return textResponse(404, 'No snapshot blob')
+    if (object.customMetadata?.storeId !== storeId) {
+      yield* Effect.promise(() => object.body.cancel())
+      return textResponse(404, 'No snapshot blob')
+    }
 
     return makeResponse(object.body, {
       status: 200,
@@ -410,7 +419,20 @@ export const handleSnapshotRequest = <TEnv extends Env = Env, CFHostMetada = unk
         'Cache-Control': 'private, max-age=31536000, immutable',
       },
     })
-  }).pipe(Effect.tapCauseLogPretty, Effect.runPromise)
+  }).pipe(
+    Effect.tapCauseLogPretty,
+    // Storage or RPC failures are transient for the client (it falls back to full replay); keep CORS headers on them.
+    Effect.catchCause(() =>
+      Effect.succeed(
+        makeResponse('Snapshot storage unavailable', {
+          status: 503,
+          headers,
+          extraHeaders: { 'Content-Type': 'text/plain', 'Retry-After': '5' },
+        }),
+      ),
+    ),
+    Effect.runPromise,
+  )
 
 /**
  * Runs `validatePayload` (decoding with `syncPayloadSchema` first, when given) and returns a 400 response if the

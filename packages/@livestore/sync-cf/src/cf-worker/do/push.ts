@@ -24,6 +24,9 @@ const jsonStringify = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))
 type PullBatchItem = SyncMessage.PullResponse['batch'][number]
 type PushBatchItem = SyncMessage.PushRequest['batch'][number]
 
+/** Upper bound for one reverse-RPC delivery to a live-pull subscriber (a client Durable Object). */
+const RPC_SUBSCRIBER_CALLBACK_TIMEOUT = '5 seconds'
+
 export const makePush =
   ({
     payload,
@@ -183,7 +186,13 @@ export const makePush =
                   storeId: subscription.storeId,
                   schema: SyncMessage.PullResponse,
                   values: [response],
-                }).pipe(Effect.tapCauseLogPretty, Effect.exit)
+                }).pipe(
+                  // A slow subscriber must not hold up push admission; it detects the missed update as a gap and
+                  // re-pulls from its cursor.
+                  Effect.timeout(RPC_SUBSCRIBER_CALLBACK_TIMEOUT),
+                  Effect.tapCauseLogPretty,
+                  Effect.exit,
+                )
               }
             }
 

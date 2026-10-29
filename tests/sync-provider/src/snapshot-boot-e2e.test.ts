@@ -1,7 +1,7 @@
 import { expect } from 'vitest'
 
-import type { CheckpointerDoStats } from '@livestore/adapter-cloudflare'
-import { type MakeSqliteDb, Snapshot } from '@livestore/common'
+import type { CheckpointerDoStats, CheckpointerDoStatus } from '@livestore/adapter-cloudflare'
+import { type MakeSqliteDb, Snapshot, type SqliteDb } from '@livestore/common'
 import { nanoid } from '@livestore/livestore'
 import { schema } from '@livestore/livestore/internal/testing-utils'
 import { makeHttpSnapshotSource, makeHttpSync } from '@livestore/sync-cf/client'
@@ -42,8 +42,21 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot boot end to
       const storeId = `snapshot-e2e-${nanoid()}`
       const writer = yield* makeWriter({ syncUrl, storeId })
 
-      // The sync DO wakes the checkpointer on push; it publishes on its own once 100 events accumulated.
+      // The sync DO wakes the checkpointer on push (probed without booting it); it then publishes on its own once 100
+      // events accumulated.
       yield* writer.push(150)
+      const woken = yield* getJson<CheckpointerDoStatus>(
+        `${baseUrl}/snapshot-e2e/checkpointer/status?storeId=${storeId}`,
+      ).pipe(
+        Effect.filterOrFail(
+          (status) => status.running === true && status.ensureRunningCalls >= 1,
+          (status) => new SyncDoProbeError({ message: encodeJson(status) }),
+        ),
+        Effect.retry(Schedule.spaced('250 millis')),
+        Effect.timeout('30 seconds'),
+        Effect.orDie,
+      )
+      expect(woken.storeId).toBe(storeId)
       const auto = yield* awaitStats(
         { baseUrl, storeId },
         (stats) => stats.latestManifest !== null && stats.head === 150,
@@ -111,6 +124,8 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot boot end to
       const booted = yield* bootClient({ makeSqliteDb, syncUrl, storeId, clientId: 'booted', snapshot: true })
       yield* waitForUpstreamHead(booted, 120)
       expect(Option.isSome(booted.ctx.snapshotBoot)).toBe(true)
+      // Stop the client before the reset so none of its polls races the backend wipe; it restarts below.
+      yield* booted.shutdown
 
       yield* Effect.promise(() => fetch(`${baseUrl}/snapshot-e2e/reset-backend?storeId=${storeId}`))
 
@@ -119,27 +134,37 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot boot end to
       const afterReset = yield* source.getManifest({ key: oldManifest.key })
       expect(Option.isNone(afterReset)).toBe(true)
 
-      // The booted client's next live pull hits the identity mismatch: it clears its storage and shuts down.
-      const shutdownMessage = yield* Queue.take(booted.shutdownMessages).pipe(Effect.timeout('20 seconds'))
+      // The client that installed the old snapshot restarts on its persisted databases. Its first pull hits the
+      // identity mismatch: it clears its storage and shuts down.
+      const restarted = yield* bootClient({
+        makeSqliteDb,
+        syncUrl,
+        storeId,
+        clientId: 'booted',
+        snapshot: true,
+        dbs: { dbState: booted.dbState, dbEventlog: booted.dbEventlog },
+      })
+      const shutdownMessage = yield* Queue.take(restarted.shutdownMessages).pipe(Effect.timeout('20 seconds'))
       expect(shutdownMessage._tag).toMatch(/BackendIdMismatch|IntentionalShutdown/)
+      expect(eventlogRowCount(booted.dbEventlog)).toBe(0)
 
       // New history on the reset backend: the push wake tells the checkpointer about the new identity, it starts over
       // and publishes a snapshot of the new backend.
       const newWriter = yield* makeWriter({ syncUrl, storeId, clientId: 'writer-after-reset' })
       yield* newWriter.push(110)
-      const restarted = yield* awaitStats(
+      const restartedCheckpointer = yield* awaitStats(
         { baseUrl, storeId },
         (stats) =>
           stats.head === 110 &&
           stats.latestManifest !== null &&
           stats.latestManifest.backendId !== oldManifest.backendId,
       )
-      expect(restarted.latestManifest!.seqNum).toBeLessThanOrEqual(110)
+      expect(restartedCheckpointer.latestManifest!.seqNum).toBeLessThanOrEqual(110)
 
       const fresh = yield* bootClient({ makeSqliteDb, syncUrl, storeId, clientId: 'fresh', snapshot: true })
       yield* waitForUpstreamHead(fresh, 110)
       expect(Option.getOrUndefined(fresh.ctx.snapshotBoot)?.manifest.backendId).toBe(
-        restarted.latestManifest!.backendId,
+        restartedCheckpointer.latestManifest!.backendId,
       )
       const replay = yield* bootClient({ makeSqliteDb, syncUrl, storeId, clientId: 'replay', snapshot: false })
       yield* waitForUpstreamHead(replay, 110)
@@ -195,15 +220,18 @@ const bootClient = ({
   storeId,
   clientId,
   snapshot,
+  dbs,
 }: {
   makeSqliteDb: MakeSqliteDb
   syncUrl: string
   storeId: string
   clientId: string
   snapshot: boolean
+  dbs?: { dbState: SqliteDb; dbEventlog: SqliteDb }
 }) =>
   bootLeader({
     makeSqliteDb,
+    ...(dbs !== undefined ? { dbs } : {}),
     schema,
     storeId,
     clientId,
