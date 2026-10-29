@@ -205,7 +205,7 @@ const backfillEventlogBelowBase = Effect.fn('@livestore/common:leader-thread:bac
           { discard: true },
         ).pipe(SqliteDbHelper.withSavepoint(dbEventlog))
 
-        if (batch.some(({ eventEncoded }) => eventEncoded.seqNum >= base.seqNumGlobal)) reachedBase = true
+        if (batch.some(({ eventEncoded }) => eventEncoded.seqNum >= base.seqNumGlobal) === true) reachedBase = true
       }),
     ),
     Effect.mapError(

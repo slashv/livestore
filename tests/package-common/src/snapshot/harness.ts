@@ -13,8 +13,8 @@ import { EventFactory } from '@livestore/common/testing'
 import { loadSqlite3Wasm } from '@livestore/sqlite-wasm/load-wasm'
 import { sqliteDbFactory } from '@livestore/sqlite-wasm/node'
 import {
+  type Duration,
   Context,
-  Duration,
   Effect,
   Exit,
   FetchHttpClient,
