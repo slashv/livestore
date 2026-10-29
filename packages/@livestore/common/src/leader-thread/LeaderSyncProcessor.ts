@@ -30,7 +30,11 @@ import { IntentionalShutdownCause } from '../errors.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import type { LiveStoreSchema } from '../schema/mod.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
-import { EVENTLOG_META_TABLE, SYNC_STATUS_TABLE } from '../schema/state/sqlite/system-tables/eventlog-tables.ts'
+import {
+  EVENTLOG_BASE_TABLE,
+  EVENTLOG_META_TABLE,
+  SYNC_STATUS_TABLE,
+} from '../schema/state/sqlite/system-tables/eventlog-tables.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
 import type { BackendIdMismatchError, IsOfflineError, ServerAheadError } from '../sync/errors.ts'
 import type * as SyncBackend from '../sync/sync-backend.ts'
@@ -1356,6 +1360,8 @@ const clearLocalDatabases = ({ dbEventlog, dbState }: { dbEventlog: SqliteDb; db
       // Clear eventlog tables
       dbEventlog.execute(sql`DELETE FROM ${EVENTLOG_META_TABLE}`)
       dbEventlog.execute(sql`DELETE FROM ${SYNC_STATUS_TABLE}`)
+      // A reset backend invalidates the snapshot the eventlog was positioned at.
+      dbEventlog.execute(sql`DELETE FROM ${EVENTLOG_BASE_TABLE}`)
 
       // Drop all state tables - they'll be recreated on next boot
       const tables = dbState.select<{ name: string }>(

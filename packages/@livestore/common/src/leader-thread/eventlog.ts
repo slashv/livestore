@@ -1,12 +1,13 @@
 import { LS_DEV, shouldNeverHappen } from '@livestore/utils'
 import { Effect, Option, ReadonlyArray, Schema } from '@livestore/utils/effect'
 
-import type { SqliteDb } from '../adapter-types.ts'
+import { type SqliteDb, UnknownError } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import { migrateTable } from '../schema-management/migrations.ts'
 import * as EventSequenceNumber from '../schema/EventSequenceNumber/mod.ts'
 import * as LiveStoreEvent from '../schema/LiveStoreEvent/mod.ts'
 import {
+  EVENTLOG_BASE_TABLE,
   EVENTLOG_META_TABLE,
   eventlogMetaTable,
   eventlogSystemTables,
@@ -192,10 +193,107 @@ export const getClientHeadFromDb = (dbEventlog: SqliteDb): EventSequenceNumber.C
     sql`select seqNumGlobal, seqNumClient, seqNumRebaseGeneration from ${EVENTLOG_META_TABLE} order by seqNumGlobal DESC, seqNumClient DESC limit 1`,
   )[0]
 
-  return res !== undefined
-    ? { global: res.seqNumGlobal, client: res.seqNumClient, rebaseGeneration: res.seqNumRebaseGeneration }
-    : EventSequenceNumber.Client.ROOT
+  if (res !== undefined) {
+    return { global: res.seqNumGlobal, client: res.seqNumClient, rebaseGeneration: res.seqNumRebaseGeneration }
+  }
+
+  // A snapshot-booted eventlog without events after its base is positioned at the base, not at the root.
+  return getEventlogBaseFromDb(dbEventlog).pipe(
+    Option.match({
+      onNone: () => EventSequenceNumber.Client.ROOT,
+      onSome: (base) => baseToSeqNum(base.seqNumGlobal),
+    }),
+  )
 }
+
+/** Where a snapshot-booted eventlog begins. See `eventlogBaseTable`. */
+export interface EventlogBase {
+  readonly seqNumGlobal: EventSequenceNumber.Global.Type
+  readonly syncMetadata: Option.Option<Schema.Json>
+  readonly snapshotKey: string
+}
+
+const decodeSyncMetadataJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.toCodecJson(Schema.Option(Schema.Json))),
+)
+const encodeSyncMetadataJson = Schema.encodeSync(Schema.fromJsonString(Schema.toCodecJson(Schema.Option(Schema.Json))))
+
+/** The base is a synced position, so it never carries a client or rebase-generation component. */
+export const baseToSeqNum = (seqNumGlobal: EventSequenceNumber.Global.Type): EventSequenceNumber.Client.Composite =>
+  EventSequenceNumber.Client.Composite.make({
+    global: seqNumGlobal,
+    client: EventSequenceNumber.Client.DEFAULT,
+    rebaseGeneration: EventSequenceNumber.Client.REBASE_GENERATION_DEFAULT,
+  })
+
+/** Returns the eventlog base, or `None` when the eventlog starts at the root (including databases without the table). */
+export const getEventlogBaseFromDb = (dbEventlog: SqliteDb): Option.Option<EventlogBase> => {
+  const hasTable =
+    dbEventlog.select<{ name: string }>(
+      sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '${EVENTLOG_BASE_TABLE}'`,
+    ).length === 1
+  if (hasTable === false) return Option.none()
+
+  const row = dbEventlog.select<{ seqNumGlobal: number; syncMetadataJson: string; snapshotKey: string }>(
+    sql`SELECT seqNumGlobal, syncMetadataJson, snapshotKey FROM ${EVENTLOG_BASE_TABLE} WHERE id = 1`,
+  )[0]
+  if (row === undefined) return Option.none()
+
+  return Option.some({
+    seqNumGlobal: EventSequenceNumber.Global.make(row.seqNumGlobal),
+    syncMetadata: decodeSyncMetadataJson(row.syncMetadataJson),
+    snapshotKey: row.snapshotKey,
+  })
+}
+
+/**
+ * Positions an empty eventlog at a snapshot: records the base and moves the backend head and identity to it.
+ * Runs in one eventlog transaction so a crash never leaves a base without its head (or the reverse).
+ */
+export const installEventlogBase = (
+  dbEventlog: SqliteDb,
+  { base, backendId }: { base: EventlogBase; backendId: string },
+) =>
+  Effect.gen(function* () {
+    yield* execSql(dbEventlog, sql`DELETE FROM ${EVENTLOG_BASE_TABLE}`, {})
+    yield* execSql(
+      dbEventlog,
+      sql`INSERT INTO ${EVENTLOG_BASE_TABLE} (id, seqNumGlobal, syncMetadataJson, snapshotKey, installedAt)
+          VALUES (1, $seqNumGlobal, $syncMetadataJson, $snapshotKey, $installedAt)`,
+      {
+        seqNumGlobal: base.seqNumGlobal,
+        syncMetadataJson: encodeSyncMetadataJson(base.syncMetadata),
+        snapshotKey: base.snapshotKey,
+        installedAt: new Date().toISOString(),
+      },
+    )
+    yield* execSql(dbEventlog, sql`UPDATE ${SYNC_STATUS_TABLE} SET head = $head, backendId = $backendId`, {
+      head: base.seqNumGlobal,
+      backendId,
+    })
+  }).pipe(SqliteDbHelper.withSavepoint(dbEventlog))
+
+/** Removes the base, e.g. after the events below it were backfilled or the local databases were reset. */
+export const clearEventlogBase = (dbEventlog: SqliteDb) =>
+  Effect.try({
+    try: () => {
+      if (Option.isSome(getEventlogBaseFromDb(dbEventlog)) === true) {
+        dbEventlog.execute(sql`DELETE FROM ${EVENTLOG_BASE_TABLE}`)
+      }
+    },
+    catch: (cause) => new UnknownError({ cause, note: 'Failed to clear the eventlog base' }),
+  })
+
+/**
+ * True when nothing has been recorded locally yet: no events, no backend progress and no snapshot base.
+ * Only such an eventlog may be positioned at a snapshot.
+ */
+export const isEventlogEmpty = (dbEventlog: SqliteDb): boolean =>
+  dbEventlog.select<{ count: number }>(
+    sql`SELECT COUNT(*) AS count FROM (SELECT 1 FROM ${EVENTLOG_META_TABLE} LIMIT 1)`,
+  )[0]!.count === 0 &&
+  getBackendHeadFromDb(dbEventlog) === EventSequenceNumber.Client.ROOT.global &&
+  Option.isNone(getEventlogBaseFromDb(dbEventlog))
 
 export const getBackendHeadFromDb = (dbEventlog: SqliteDb): EventSequenceNumber.Global.Type =>
   dbEventlog.select<{ head: EventSequenceNumber.Global.Type }>(sql`select head from ${SYNC_STATUS_TABLE}`)[0]?.head ??
@@ -230,7 +328,15 @@ export const insertIntoEventlog = (
           [eventEncoded.parentSeqNum.global, eventEncoded.parentSeqNum.client] as any as PreparedBindValues,
         )[0]!.count === 1
 
-      if (parentEventExists === false) {
+      // The first event after a snapshot base has the base as its parent, which has no row.
+      const parentIsBase =
+        eventEncoded.parentSeqNum.client === EventSequenceNumber.Client.DEFAULT &&
+        Option.exists(
+          getEventlogBaseFromDb(dbEventlog),
+          (base) => base.seqNumGlobal === eventEncoded.parentSeqNum.global,
+        )
+
+      if (parentEventExists === false && parentIsBase === false) {
         shouldNeverHappen(
           `Parent event ${eventEncoded.parentSeqNum.global},${eventEncoded.parentSeqNum.client} does not exist in eventlog`,
         )
@@ -314,7 +420,19 @@ export const getSyncBackendCursorInfoForDb = (
       dbEventlog.select<{ syncMetadataJson: string }>(
         sql`SELECT syncMetadataJson FROM ${EVENTLOG_META_TABLE} WHERE seqNumGlobal = ${remoteHead} ORDER BY seqNumClient ASC LIMIT 1`,
       ),
-    ).pipe(Effect.andThen(Schema.decodeEffect(EventlogQuerySchema)), Effect.map(Option.flatten), Effect.orDie)
+    ).pipe(
+      Effect.andThen(Schema.decodeEffect(EventlogQuerySchema)),
+      // A snapshot-booted eventlog has no row at its base; the base row carries the cursor metadata instead.
+      Effect.map((rowMetadata) =>
+        Option.isSome(rowMetadata) === true
+          ? Option.flatten(rowMetadata)
+          : getEventlogBaseFromDb(dbEventlog).pipe(
+              Option.filter((base) => base.seqNumGlobal === remoteHead),
+              Option.flatMap((base) => base.syncMetadata),
+            ),
+      ),
+      Effect.orDie,
+    )
 
     return Option.some({
       eventSequenceNumber: remoteHead,

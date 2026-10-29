@@ -1,7 +1,7 @@
 import type { Schema } from '@livestore/utils/effect'
-import { Context, Effect, Option } from '@livestore/utils/effect'
+import { Context, Effect, Option, Semaphore } from '@livestore/utils/effect'
 
-import { MaterializeError, SqliteError, type SqliteDb } from '../adapter-types.ts'
+import { MaterializeError, SqliteError, type SqliteDb, UnknownError } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
 import * as MaterializationJournal from '../MaterializationJournal.ts'
 import { EventSequenceNumber, LiveStoreEvent } from '../schema/mod.ts'
@@ -50,10 +50,28 @@ export interface UpstreamPersistReceipt {
 
 export type PersistError = MaterializeError | MaterializationJournal.MaterializationJournalError
 
+/** A state database export consistent with the eventlog position it reflects. */
+export interface StateSnapshotExport {
+  /** Serialized state database (rollback-journal format). */
+  readonly bytes: Uint8Array<ArrayBuffer>
+  /** Global sequence number of the last event reflected by `bytes`. Always a synced position. */
+  readonly seqNum: EventSequenceNumber.Global.Type
+  /** Sync metadata of the event at `seqNum`, used by booting clients as the pull cursor metadata. */
+  readonly cursorMetadata: Option.Option<Schema.Json>
+  readonly backendId: string
+  readonly exportMs: number
+}
+
 export interface Service {
   readonly [TypeId]: TypeId
   readonly persistLocal: (plan: LocalPersistPlan) => Effect.Effect<LocalPersistReceipt, PersistError>
   readonly persistUpstream: (plan: UpstreamPersistPlan) => Effect.Effect<UpstreamPersistReceipt, PersistError>
+  /**
+   * Exports the state database for publication as a snapshot. Runs between persist transactions, so the export never
+   * contains a half-applied batch. Fails unless state reflects exactly the backend head (no pending or client-only
+   * events), which holds for a checkpointer that never pushes.
+   */
+  readonly exportSnapshot: Effect.Effect<StateSnapshotExport, UnknownError>
 }
 
 /**
@@ -71,6 +89,9 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
     const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
     const materializationJournal = yield* MaterializationJournal.MaterializationJournal
     const stateHead = yield* StateHead.StateHead
+    // Serializes persist transactions with snapshot exports. Effect may yield to other fibers inside a transaction,
+    // and an export taken then would include uncommitted writes.
+    const lock = yield* Semaphore.make(1)
 
     const materializeEvents = (
       events: ReadonlyArray<LiveStoreEvent.Client.Encoded>,
@@ -89,6 +110,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
 
     const persistLocal: Service['persistLocal'] = ({ events }) =>
       withCoordinatedTransactions(
+        lock,
         { dbState, dbEventlog },
         Effect.gen(function* () {
           const materializerHashes = yield* materializeEvents(events)
@@ -111,6 +133,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
 
     const persistUpstream: Service['persistUpstream'] = (plan) =>
       withCoordinatedTransactions(
+        lock,
         { dbState, dbEventlog },
         Effect.gen(function* () {
           const rollbackEventNums = plan.rollbackEvents.map((event) => event.seqNum)
@@ -169,7 +192,39 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         }),
       )
 
-    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream })
+    const exportSnapshot: Service['exportSnapshot'] = Effect.gen(function* () {
+      const start = performance.now()
+      const head = yield* stateHead.get.pipe(UnknownError.mapToUnknownError)
+      const backendHead = Eventlog.getBackendHeadFromDb(dbEventlog)
+
+      if (head.client !== EventSequenceNumber.Client.DEFAULT || head.global !== backendHead) {
+        return yield* UnknownError.make({
+          cause: `State head ${EventSequenceNumber.Client.toString(head)} is not the backend head ${backendHead}; only a client without local events can export a snapshot`,
+        })
+      }
+
+      const backendId = Eventlog.getBackendIdFromDb(dbEventlog)
+      if (Option.isNone(backendId) === true) {
+        return yield* UnknownError.make({ cause: 'Cannot export a snapshot before the sync backend identity is known' })
+      }
+
+      const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: head.global })
+      const bytes = dbState.export()
+
+      return {
+        bytes,
+        seqNum: head.global,
+        cursorMetadata: Option.flatMap(cursorInfo, (info) => info.metadata),
+        backendId: backendId.value,
+        exportMs: performance.now() - start,
+      }
+    }).pipe(
+      lock.withPermits(1),
+      UnknownError.mapToUnknownError,
+      Effect.withSpan('@livestore/common:LeaderPersistence:exportSnapshot'),
+    )
+
+    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream, exportSnapshot })
   })
 
 /**
@@ -182,6 +237,7 @@ export const isSameSequencePosition = (
 ) => left.global === right.global && left.client === right.client
 
 const withCoordinatedTransactions = <A, E, R>(
+  lock: Semaphore.Semaphore,
   { dbState, dbEventlog }: { dbState: SqliteDb; dbEventlog: SqliteDb },
   effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | MaterializeError, R> => {
@@ -220,6 +276,7 @@ const withCoordinatedTransactions = <A, E, R>(
     Effect.ensuring(rollbackOpenTransactions),
     // Do not allow cancellation between the two commits and the cleanup that follows a failure.
     Effect.uninterruptible,
+    lock.withPermits(1),
   )
 }
 

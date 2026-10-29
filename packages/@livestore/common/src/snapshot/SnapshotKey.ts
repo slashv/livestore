@@ -14,7 +14,7 @@ import { liveStoreStorageFormatVersion } from '../version.ts'
  *
  * @remarks
  * The key deliberately does not cover materializer code. LiveStore's convention is that changing a materializer's
- * behaviour requires a new event name (e.g. `todoCreated-v2`), which changes `eventDefsHash`. Under this assumption
+ * behaviour requires a new event name (e.g. `v2.TodoCreated`), which changes `eventDefsHash`. Under this assumption
  * materializer changes are forward-only: events already materialized under the old name keep their old effect.
  */
 export interface SnapshotKey {

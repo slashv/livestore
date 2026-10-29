@@ -42,6 +42,8 @@ import * as LeaderSyncProcessor from './LeaderSyncProcessor.ts'
 import { makeMaterializeEvent } from './materialize-event.ts'
 import { hasCompletedState, recreateDb } from './recreate-db.ts'
 import type { ShutdownChannel } from './shutdown-channel.ts'
+import { bootFromSnapshot } from './snapshot-boot.ts'
+import { rebuildFromEventlogBase } from './snapshot-rebuild.ts'
 import type {
   DevtoolsContext,
   DevtoolsOptions,
@@ -121,9 +123,9 @@ export const makeLeaderThreadLayer = ({
 
     const dbEventlogMissing = !hasEventlogTables(dbEventlog)
 
-    const stateNeedsRebuild = !hasCompletedState(dbState)
+    const stateNeedsRebuildAtOpen = !hasCompletedState(dbState)
 
-    if (stateNeedsRebuild === true) {
+    if (stateNeedsRebuildAtOpen === true) {
       // Import also clears hook-created objects while preserving the open connection.
       yield* Effect.acquireUseRelease(
         makeSqliteDb({ _tag: 'in-memory' }),
@@ -137,6 +139,23 @@ export const makeLeaderThreadLayer = ({
     }
 
     yield* Eventlog.initEventlogDb(dbEventlog)
+
+    // Snapshot boot (experimental): only a client that has recorded nothing locally installs a snapshot. Any client
+    // with local events keeps its own state. This runs before the sync backend client is constructed because providers
+    // read the persisted backend identity at construction.
+    const snapshotBoot =
+      syncOptions?.snapshot !== undefined && Eventlog.isEventlogEmpty(dbEventlog) === true
+        ? yield* bootFromSnapshot({
+            schema,
+            storeId,
+            clientId,
+            payload: syncPayloadDecoded,
+            options: syncOptions.snapshot,
+            makeSqliteDb,
+          })
+        : Option.none()
+
+    const stateNeedsRebuild = Option.isSome(snapshotBoot) === true ? false : !hasCompletedState(dbState)
 
     const syncBackend =
       syncOptions?.backend === undefined
@@ -191,15 +210,31 @@ export const makeLeaderThreadLayer = ({
 
     // Recreate state database if needed BEFORE creating sync processor
     // This ensures all system tables exist before any queries are made
+    const eventlogBase = Eventlog.getEventlogBaseFromDb(dbEventlog)
     const { migrationsReport } =
-      stateNeedsRebuild === true
-        ? yield* recreateDb({
-            schema,
-            bootStatusQueue,
-            materializeEvent,
-            ...omitUndefineds({ stateRebuildBatchSize: params?.stateRebuildBatchSize }),
-          })
-        : { migrationsReport: { migrations: [] } }
+      stateNeedsRebuild === false
+        ? { migrationsReport: { migrations: [] } }
+        : Option.isSome(eventlogBase) === true
+          ? // The local eventlog starts at a snapshot base, so a plain replay would miss the events below it.
+            yield* rebuildFromEventlogBase({
+              schema,
+              storeId,
+              clientId,
+              payload: syncPayloadDecoded,
+              base: eventlogBase.value,
+              snapshotOptions: syncOptions?.snapshot,
+              syncBackend,
+              makeSqliteDb,
+              bootStatusQueue,
+              materializeEvent,
+              ...omitUndefineds({ stateRebuildBatchSize: params?.stateRebuildBatchSize }),
+            })
+          : yield* recreateDb({
+              schema,
+              bootStatusQueue,
+              materializeEvent,
+              ...omitUndefineds({ stateRebuildBatchSize: params?.stateRebuildBatchSize }),
+            })
 
     const devtoolsContext =
       devtoolsOptions.enabled === true
@@ -221,7 +256,10 @@ export const makeLeaderThreadLayer = ({
         devtoolsLatch: devtoolsContext.enabled === true ? devtoolsContext.syncBackendLatch : undefined,
         span,
       },
-      initialSyncState: getInitialSyncState({ dbEventlog, dbEventlogMissing }),
+      initialSyncState: getInitialSyncState({
+        dbEventlog,
+        dbEventlogMissing: dbEventlogMissing === true && Option.isNone(snapshotBoot) === true,
+      }),
       initialBlockingSyncContext,
       onError: syncOptions?.onSyncError ?? 'ignore',
       onBackendIdMismatch: syncOptions?.onBackendIdMismatch ?? 'reset',
@@ -259,6 +297,8 @@ export const makeLeaderThreadLayer = ({
       extraIncomingMessagesQueue,
       devtools: devtoolsContext,
       networkStatus,
+      snapshotBoot,
+      exportSnapshot: persistence.exportSnapshot,
       // State will be set during `bootLeaderThread`
       initialState: {} as any as LeaderThreadCtx['Service']['initialState'],
     } satisfies LeaderThreadCtx['Service']
@@ -285,7 +325,7 @@ export const makeLeaderThreadLayer = ({
 
 const hasEventlogTables = (db: SqliteDb) => {
   const tableNames = new Set(db.select<{ name: string }>(sql`select name from sqlite_master`).map((_) => _.name))
-  return ReadonlyArray.every(SystemTables.eventlogSystemTables, (_) => tableNames.has(_.sqliteDef.name))
+  return ReadonlyArray.every(SystemTables.eventlogRequiredSystemTables, (_) => tableNames.has(_.sqliteDef.name))
 }
 
 const getInitialSyncState = ({

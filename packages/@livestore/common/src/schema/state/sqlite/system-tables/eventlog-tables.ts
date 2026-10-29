@@ -61,4 +61,36 @@ export const syncStatusTable = table({
 
 export type SyncStatusRow = typeof syncStatusTable.Type
 
-export const eventlogSystemTables = [eventlogMetaTable, syncStatusTable] as const
+export const EVENTLOG_BASE_TABLE = '__livestore_eventlog_base'
+
+/**
+ * Single-row marker for where the local eventlog begins when the client booted from a state snapshot.
+ *
+ * @remarks
+ * A snapshot-booted client installs state at a known head and keeps only the events after it, so the eventlog has no
+ * rows at or below `seqNumGlobal`. The row stands in for the missing event at the base: it is the parent of the first
+ * event after the base and carries the sync metadata the backend cursor needs at that position. No row means the
+ * eventlog starts at the root.
+ *
+ * Added after storage format 6 as a separate table that is created when missing, so existing eventlogs open unchanged
+ * and no storage format bump is needed.
+ */
+export const eventlogBaseTable = table({
+  name: EVENTLOG_BASE_TABLE,
+  columns: {
+    id: SqliteDsl.integer({ primaryKey: true }),
+    seqNumGlobal: SqliteDsl.integer({ schema: EventSequenceNumber.Global.Schema }),
+    syncMetadataJson: SqliteDsl.text({ schema: Schema.fromJsonString(Schema.toCodecJson(Schema.Option(Schema.Json))) }),
+    /** Snapshot key of the installed snapshot, for diagnostics. */
+    snapshotKey: SqliteDsl.text({}),
+    /** ISO date format */
+    installedAt: SqliteDsl.text({}),
+  },
+})
+
+export type EventlogBaseRow = typeof eventlogBaseTable.Type
+
+export const eventlogSystemTables = [eventlogMetaTable, syncStatusTable, eventlogBaseTable] as const
+
+/** Tables whose presence marks an existing eventlog database. The base table is optional because it was added later. */
+export const eventlogRequiredSystemTables = [eventlogMetaTable, syncStatusTable] as const

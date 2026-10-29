@@ -2,6 +2,7 @@ import {
   type Schema,
   type Scope,
   Effect,
+  KeyValueStore,
   Option,
   Queue,
   Ref,
@@ -41,6 +42,11 @@ export interface MockSyncBackendOptions {
   nonLiveChunkSize?: number
   /** Initial connected state; defaults to false */
   startConnected?: boolean
+  /**
+   * Backend identity reported to clients. It is persisted through the client's `KeyValueStore` when one is provided
+   * (as the leader does), like real providers do on their first response. Defaults to `'mock-backend'`.
+   */
+  backendId?: string
   // TODO add a "flaky" mode to simulate transient network / server failures for pull/push
 }
 
@@ -139,6 +145,13 @@ export const makeMockSyncBackend = (
       )
       yield* Effect.addFinalizer(() => Effect.sync(() => syncPullQueues.delete(syncPullQueue)))
 
+      // Persist the identity on the first response, as real providers do, so snapshot exports know the backend.
+      const kv = yield* Effect.serviceOption(KeyValueStore.KeyValueStore)
+      const recordBackendId = Option.match(kv, {
+        onNone: () => Effect.void,
+        onSome: (store) => store.set('backendId', options?.backendId ?? 'mock-backend').pipe(Effect.ignore),
+      })
+
       const pullLive = (cursor: Option.Option<{ eventSequenceNumber: EventSequenceNumber.Global.Type }>) => {
         const lastSeen = cursorPosition(cursor)
         return Stream.concat(
@@ -169,6 +182,7 @@ export const makeMockSyncBackend = (
               new UnknownError({ cause: new Error('MockSyncBackend: simulated pull failure') }),
             ),
           ).pipe(
+            Stream.tap(() => recordBackendId),
             Stream.flatMap(() => (pullOptions?.live === true ? pullLive(cursor) : pullNonLive(cursor))),
             Stream.withSpan('MockSyncBackend:pull', { parent: span }),
           ),

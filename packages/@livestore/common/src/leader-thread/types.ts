@@ -28,8 +28,10 @@ import type {
 import type * as MaterializationJournal from '../MaterializationJournal.ts'
 import { EventSequenceNumber, type LiveStoreEvent, type LiveStoreSchema } from '../schema/mod.ts'
 import type * as SyncState from '../sync/syncstate.ts'
+import type { StateSnapshotExport } from './LeaderPersistence.ts'
 import type * as LeaderSyncProcessor from './LeaderSyncProcessor.ts'
 import type { ShutdownChannel } from './shutdown-channel.ts'
+import type { SnapshotInstallResult } from './snapshot-boot.ts'
 
 export type ShutdownState = 'running' | 'shutting-down'
 
@@ -113,6 +115,10 @@ export class LeaderThreadCtx extends Context.Service<
      */
     extraIncomingMessagesQueue: Queue.Queue<Devtools.Leader.MessageToApp>
     networkStatus: Subscribable.Subscribable<SyncBackend.NetworkStatus>
+    /** Present when this boot installed a state snapshot instead of replaying history (experimental). */
+    snapshotBoot: Option.Option<SnapshotInstallResult>
+    /** Exports state as a snapshot consistent with the eventlog. Used by checkpointers (experimental). */
+    exportSnapshot: Effect.Effect<StateSnapshotExport, UnknownError>
   }
 >()('LeaderThreadCtx') {}
 

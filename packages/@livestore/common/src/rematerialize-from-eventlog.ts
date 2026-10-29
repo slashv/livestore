@@ -21,12 +21,18 @@ export const rematerializeFromEventlog = Effect.fn('@livestore/common:rematerial
   onProgress,
   materializeEvent,
   batchSize = STATE_REBUILD_BATCH_SIZE_DEFAULT,
+  since = EventSequenceNumber.Client.ROOT,
 }: {
   dbState: SqliteDb
   schema: LiveStoreSchema
   onProgress: (_: { done: number; total: number }) => Effect.Effect<void>
   materializeEvent: MaterializeEvent
   batchSize?: number
+  /**
+   * Exclusive start position. Defaults to the root (full replay). A later position is used when the state database
+   * already reflects every event up to it, e.g. after installing a snapshot.
+   */
+  since?: EventSequenceNumber.Client.Composite
 }) {
   if (Schema.is(StateRebuildBatchSizeSchema)(batchSize) === false) {
     return yield* UnknownError.make({
@@ -37,7 +43,8 @@ export const rematerializeFromEventlog = Effect.fn('@livestore/common:rematerial
 
   const dbEventlog = yield* EventlogSqliteDb.EventlogSqliteDb
   const eventsCount = dbEventlog.select<{ count: number }>(
-    `SELECT COUNT(*) AS count FROM ${SystemTables.EVENTLOG_META_TABLE}`,
+    `SELECT COUNT(*) AS count FROM ${SystemTables.EVENTLOG_META_TABLE} WHERE seqNumGlobal > ? OR (seqNumGlobal = ? AND seqNumClient > ?)`,
+    [since.global, since.global, since.client] as any as PreparedBindValues,
   )[0]!.count
 
   const hashEventDef = memoizeByRef((event: EventDef.AnyWithoutFn) => Schema.hash(event.schema))
@@ -105,7 +112,7 @@ LIMIT $batchSize
 
   let processedEvents = 0
 
-  yield* Stream.paginate(EventSequenceNumber.Client.ROOT, (lastId) =>
+  yield* Stream.paginate(since, (lastId) =>
     Effect.sync(() => {
       const rows = stmt.select<SystemTables.EventlogMetaRow>({
         $seqNumGlobal: lastId.global,
