@@ -70,14 +70,16 @@ The sync backend stays schema-blind and only stores the small manifest pointer.
   an earlier backend identity are never served.
 - Worker: `makeWorker({ snapshots: { bucketBinding } })` (or `matchSnapshotRequest` + `handleSnapshotRequest` in a
   custom `fetch`) serves `GET …/snapshot/manifest?storeId&key&payload` and `GET …/snapshot/blob?storeId&objectKey&payload`.
-  Both run `validatePayload`; blob keys must start with `snapshots/<storeId>/`.
+  Both run `validatePayload`; the blob route serves only the current or previous manifest's blob of that store.
 - Checkpointer: `makeCheckpointerDurableObject` from `@livestore/adapter-cloudflare` runs a headless leader per
   `${storeId}/${snapshotKey}` that follows the log via DO-RPC live pull. Pass
   `makeDurableObject({ snapshots: { checkpointerBinding, snapshotKeys } })` so pushes wake it (with the current
   `backendId`, so a reset backend restarts it).
-- Sink: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs })` uploads
-  `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`, then publishes the manifest, then deletes blobs of the key that were
-  replaced more than `graceMs` ago (the previous manifest's blob is always kept).
+- Sink: `makeR2SnapshotSink({ bucket, storeId, getSyncBackendStub, graceMs, stage? })` uploads
+  `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite` (URI-encoded segments), then publishes the manifest, then deletes blobs of the key that were
+  replaced more than `graceMs` ago (the previous manifest's blob is always kept). With `stage` (used by the checkpointer
+  DO's default `exportMode: 'streamed'`) the state file's pages are copied inside DO storage under the leader's
+  persistence lock and streamed to R2 as a multipart upload, so memory stays near one 5 MiB part at any state size.
 - Clients: `makeHttpSnapshotSource({ url })` (same URL as the sync backend) or, inside Durable Objects,
   `makeDoRpcSnapshotSource({ getSyncBackendStub, bucket })`.
 
