@@ -213,7 +213,11 @@ before any push or page is handled; boot itself never changes the model. The ini
 eventlog by the leader layer (`getInitialSyncState`,
 `make-leader-thread-layer.ts:291-329`; see `../../04-runtime/spec.md`
 Leadership Handover), and the initial push plan is its non-client-only pending
-suffix (`:902-919`).
+suffix (`:902-919`). The pending set is every eventlog row after the backend
+head by global/client position (`Eventlog.getEventsSince`). The rebase
+generation is not compared: a confirmed row keeps the generation it was rebased
+to, while events committed after its confirmation can carry a lower one (the
+local head adopts the backend's copy, see Durability inside the turn).
 
 ### Failure and shutdown
 

@@ -43,7 +43,12 @@ export const initEventlogDb = (dbEventlog: SqliteDb) =>
   })
 
 /**
- * Exclusive of the "since event"
+ * Returns the events after the position `since`, exclusive.
+ *
+ * @remarks
+ * Positions compare by global and client components only. Rebase generation describes a version of optimistic history,
+ * not a position: a confirmed own event keeps the generation it was rebased to, while later local events can carry a
+ * lower one. Comparing the generation would return such a confirmed event at `since` as pending.
  */
 export const getEventsSince = ({
   dbEventlog,
@@ -73,7 +78,7 @@ export const getEventsSince = ({
         sessionId: eventlogEvent.sessionId,
       })
     })
-    .filter((_) => EventSequenceNumber.Client.compare(_.seqNum, since) > 0)
+    .filter((_) => EventSequenceNumber.Client.isGreaterThan(_.seqNum, since))
     .toSorted((a, b) => EventSequenceNumber.Client.compare(a.seqNum, b.seqNum))
 }
 
