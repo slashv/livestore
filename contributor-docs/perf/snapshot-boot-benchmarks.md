@@ -12,6 +12,17 @@ Measured at commit `328321b99` (branch `claude/snapshot-boot-6d51c8`).
 
 ## Summary
 
+> **Update after the runs below.** The three leaks listed under the blockers are
+> addressed on the branch (commits `eafc154b1`, `5b131b719`): the SQL text
+> buffer and prepared-statement leaks are fixed (leak probe: 506 B JS + 227 B
+> wasm heap per SQL call before, ~1 B and 0 after), and headless leaders such
+> as checkpointers no longer retain session pull items. A headless leader
+> following a mock backend now grows ~250 B per applied event, most of which is
+> the in-memory mock backend retaining every event; a leader that serves
+> sessions still retains ~430 B per event in its session pull cache (pre-existing,
+> tracked as a follow-up). The CPU timings below predate these fixes. The trigger
+> default now uses the measured `replayCostPerEventMs = 0.5`.
+
 Measured on a heavily loaded laptop (see [Setup](#setup)); CPU times are the
 reliable figures, wall-clock times are inflated.
 
