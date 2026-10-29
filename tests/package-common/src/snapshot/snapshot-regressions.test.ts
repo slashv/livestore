@@ -235,7 +235,7 @@ Vitest.describe('snapshot boot regressions', () => {
         pollInterval: 20,
       }).pipe(provideLeader(leader))
 
-      while (Option.isNone((yield* SubscriptionRef.get(checkpointer.stats)).latestManifest)) {
+      while (Option.isNone((yield* SubscriptionRef.get(checkpointer.stats)).latestManifest) === true) {
         yield* Effect.sleep(20)
       }
       const stats = yield* SubscriptionRef.get(checkpointer.stats)
