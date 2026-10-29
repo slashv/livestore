@@ -147,16 +147,23 @@ Steps:
    state head row equals `{ global: manifest.seqNum, client: 0 }` and the
    rebuild-complete marker (`__livestore_rebuild`) is present
    (LS.SYS.SYNC.SNAP-R07).
-4. Clear the materialization journal (the snapshot has no pending events to
-   roll back) and replace the state database with the temporary one
-   (`dbState.import`, an SQLite backup/page copy).
-5. Only after the state install succeeded, write the eventlog: the base row,
-   sync status head `= manifest.seqNum`, and `backendId = manifest.backendId`.
+4. In the temporary database, clear the materialization journal (the producer's
+   rollback records) and the rebuild-complete marker, then replace the state
+   database with it in one step (`dbState.import`, an SQLite backup/page copy).
+   The state database is now the snapshot but marked incomplete.
+5. Write the eventlog in one transaction: the base row, sync status head
+   `= manifest.seqNum`, and `backendId = manifest.backendId`.
+6. Mark the state complete.
 
-Fallback (LS.SYS.SYNC.SNAP-R08): any error or timeout in steps 1–5 is logged,
+Fallback (LS.SYS.SYNC.SNAP-R08): any error or timeout in steps 1–6 is logged,
 the state database is wiped again, and boot continues on today's path, a full
-replay from the backend. The eventlog is written last, so a failed install
-leaves no eventlog trace.
+replay from the backend.
+
+Crash safety: until step 6 the state counts as incomplete, so the next boot
+wipes it. If the crash happened before step 5, the eventlog is still empty and
+snapshot boot simply retries; after step 5, the eventlog has its base and the
+rebuild path below repairs state. No crash point leaves a complete state next to
+an eventlog that does not describe it.
 
 After a successful install, leader boot proceeds as usual: the upstream head is
 the base, there are no pending events, and the sync processor pulls the events
@@ -206,16 +213,23 @@ produce wrong state. `rebuildFromEventlogBase`
 (LS.SYS.SYNC.SNAP-R11):
 
 - **A — Re-seed.** Fetch the snapshot for the **new** key at position `p'`
-  with `base <= p' <= backendHead`. Precondition: no client-only event of this
-  client sits at or below `p'`, since a snapshot cannot contain this
-  client's client-only effects. Install it as in Client Boot, then
-  rematerialize the local eventlog events after `p'`, including pending and
-  client-only events. The base moves to `p'`.
-- **B — Backfill.** Pull the backend events from the root up to the base,
-  insert them into the eventlog with their sync metadata, delete the base row,
-  and run the normal full replay. Needs the backend to be reachable; offline,
-  boot fails with a clear error because no correct state can be produced
-  locally (LS-DQ3).
+  with `base <= p' <= backendHead`, the same `backendId`, and no client-only
+  event of this client below `p'` (a snapshot cannot contain this client's
+  client-only effects; one at `(p', c>0)` is after `p'` and replayed). Install
+  it as in Client Boot, then rematerialize the local eventlog events after
+  `p'`, including pending and client-only events. The base stays where it was:
+  the rows in `(base, p']` remain valid history. A failed re-seed wipes state
+  and falls through to B.
+- **B — Backfill.** Drop leftover rows below the base (only an interrupted
+  earlier backfill can have written them), pull the backend events from the
+  root up to the base, insert them into the eventlog with their sync metadata,
+  delete the base row, and run the normal full replay. Idempotent across
+  crashes. Needs the backend to be reachable; offline, boot fails with a clear
+  error because no correct state can be produced locally (LS-DQ3). If the
+  backend's identity changed (a `BackendIdMismatchError`, or the provider
+  adopting a new identity on the cursor-less pull), the history below the base
+  no longer exists: with `onBackendIdMismatch: 'reset'` the eventlog is reset
+  and the client boots fresh from the new backend; otherwise boot fails.
 
 Re-seed is preferred when a compatible snapshot exists; backfill is the
 fallback. Both preserve LS.SYS.SYNC.SNAP-R10.
@@ -234,8 +248,13 @@ other clients never reach it.
   `LeaderThreadCtx.exportSnapshot` runs under a lock shared with
   `LeaderPersistence` transactions and returns
   `{ bytes, head, cursorMetadata, backendId }`. `head` comes from the state
-  head row and must have client part `0`; `cursorMetadata` is the eventlog
-  row's sync metadata at `head`.
+  head row and must equal the backend head with client part `0`;
+  `cursorMetadata` is the eventlog row's sync metadata at `head`. Export is
+  refused for a leader that ever recorded a client-only event: such events
+  leave the pending set once later events are confirmed, but their effects
+  stay in state. The same lock backs `LeaderThreadCtx.exportState`, which every
+  leader-side state export (session boot, devtools) uses, so no export ever
+  captures a half-applied persist transaction.
 - **Loop:** `makeCheckpointer` (generic, `leader-thread/checkpointer.ts`) evaluates
   the trigger after pulls, exports, and calls `sink.publish`. It runs one
   checkpointer per `(storeId, key)`: a schema deploy that changes the key
