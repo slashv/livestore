@@ -114,10 +114,10 @@ export const makeProtocolSocketWithIsConnected = (options: {
             Effect.flatMap(pinger.timeout, () =>
               Effect.fail(
                 new Socket.SocketError({
-                  reason: new Socket.SocketOpenError({
-                    kind: 'Timeout',
-                    cause: new Error('ping timeout'),
-                  }),
+                  // A ping timeout drops an open connection, so it must not be a `SocketOpenError`: those are retried
+                  // without failing in-flight requests, which would leave a live stream waiting forever on a socket
+                  // the server has already forgotten. (Matches upstream `makeProtocolSocket` in effect 4.0.3.)
+                  reason: new Socket.SocketReadError({ cause: new Error('ping timeout') }),
                 }),
               ),
             ),
