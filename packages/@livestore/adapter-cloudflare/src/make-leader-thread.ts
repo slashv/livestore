@@ -66,6 +66,8 @@ export interface DoLeaderThread {
   readonly dbState: SqliteDb
   readonly dbEventlog: SqliteDb
   readonly makeSqliteDb: MakeSqliteDb
+  /** File name of the state database in the DO's VFS (e.g. for `stageVfsFile`). */
+  readonly stateFileName: string
   /**
    * Current size of this leader's wasm linear memory. Wasm memory only grows, so this is the high-water mark of SQLite's
    * page cache, statement memory and snapshot exports. Diagnostics only.
@@ -151,6 +153,7 @@ export const makeDoLeaderThread = ({
       dbState,
       dbEventlog,
       makeSqliteDb,
+      stateFileName,
       wasmHeapBytes: () => readWasmHeapBytes(sqlite3),
     } satisfies DoLeaderThread
   }).pipe(Effect.withSpan('@livestore/adapter-cloudflare:makeDoLeaderThread', { attributes: { storeId, clientId } }))

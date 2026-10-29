@@ -17,13 +17,16 @@ import { SyncProviderImpl } from './types.ts'
  * upload time, snapshot size and the leader's wasm heap. Opt-in and slow:
  *
  * ```sh
- * SNAPSHOT_DO_LIMITS_MB=10,50,100,200 TEST_SYNC_PROVIDER=cf-http-do pnpm exec vitest run src/snapshot-do-limits.test.ts
+ * SNAPSHOT_DO_LIMITS_MB=10,50,100,200 [SNAPSHOT_DO_LIMITS_MODE=buffered] TEST_SYNC_PROVIDER=cf-http-do pnpm exec vitest run src/snapshot-do-limits.test.ts
  * ```
  *
  * Local workerd does not enforce the 128 MB isolate limit, so the numbers show what production would need. Workers
  * timers only advance on I/O, so the in-DO phase timings under-report CPU-bound work; `publishWallMs` is measured from
  * the test process.
  */
+
+/** `streamed` (default) or `buffered` export, see `makeCheckpointerDurableObject({ exportMode })`. */
+const exportMode = process.env.SNAPSHOT_DO_LIMITS_MODE === 'buffered' ? 'buffered' : 'streamed'
 
 const sizesMb = (process.env.SNAPSHOT_DO_LIMITS_MB ?? '')
   .split(',')
@@ -49,7 +52,8 @@ Vitest.describe.skipIf(sizesMb.length === 0)('checkpointer Durable Object limits
         const writer = yield* makeProvider({ storeId, clientId: 'writer', payload: undefined })
         const url = writer.metadata.url
         const baseUrl = typeof url === 'string' ? url : objectToString(url)
-        const measureUrl = (path: string) => `${baseUrl}/snapshot-e2e/measure/checkpointer/${path}?storeId=${storeId}`
+        const measureUrl = (path: string) =>
+          `${baseUrl}/snapshot-e2e/${exportMode === 'buffered' ? 'measure-buffered' : 'measure'}/checkpointer/${path}?storeId=${storeId}`
 
         const eventCount = Math.ceil((sizeMb * 1024 * 1024) / TEXT_BYTES)
         const factory = makeEventFactory({
@@ -91,6 +95,7 @@ Vitest.describe.skipIf(sizesMb.length === 0)('checkpointer Durable Object limits
         const timings = published.lastPublish!
 
         const row = {
+          exportMode,
           targetMb: sizeMb,
           events: eventCount,
           stateDbMb: mb(published.runtime.stateDbBytes),

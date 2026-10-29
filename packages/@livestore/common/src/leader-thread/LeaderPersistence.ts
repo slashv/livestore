@@ -51,16 +51,24 @@ export interface UpstreamPersistReceipt {
 
 export type PersistError = MaterializeError | MaterializationJournal.MaterializationJournalError
 
-/** A state database export consistent with the eventlog position it reflects. */
-export interface StateSnapshotExport {
-  /** Serialized state database (rollback-journal format). */
-  readonly bytes: Uint8Array<ArrayBuffer>
-  /** Global sequence number of the last event reflected by `bytes`. Always a synced position. */
+/**
+ * A capture of the state database taken at a moment consistent with the eventlog position it reflects.
+ * `data` is whatever the capture callback of {@link Service.exportSnapshotWith} returned.
+ */
+export interface StateSnapshotCapture<T> {
+  readonly data: T
+  /** Global sequence number of the last event reflected by the captured state. Always a synced position. */
   readonly seqNum: EventSequenceNumber.Global.Type
   /** Sync metadata of the event at `seqNum`, used by booting clients as the pull cursor metadata. */
   readonly cursorMetadata: Option.Option<Schema.Json>
   readonly backendId: string
   readonly exportMs: number
+}
+
+/** A state database export consistent with the eventlog position it reflects. */
+export interface StateSnapshotExport extends Omit<StateSnapshotCapture<never>, 'data'> {
+  /** Serialized state database (rollback-journal format). */
+  readonly bytes: Uint8Array<ArrayBuffer>
 }
 
 export interface Service {
@@ -73,6 +81,15 @@ export interface Service {
    * events), which holds for a checkpointer that never pushes.
    */
   readonly exportSnapshot: Effect.Effect<StateSnapshotExport, UnknownError>
+  /**
+   * Same validations and consistency as {@link exportSnapshot}, but hands the consistent moment to `capture` instead of
+   * serializing the database. `capture` runs synchronously while the persistence lock is held and no persist
+   * transaction is open, so every committed page has reached the database's storage. Platforms whose state database
+   * lives in external storage use it to copy pages there without materializing the state in memory.
+   */
+  readonly exportSnapshotWith: <T>(
+    capture: (dbState: SqliteDb) => T,
+  ) => Effect.Effect<StateSnapshotCapture<T>, UnknownError>
   /**
    * Serializes the state database between persist transactions. Exports taken while a transaction has yielded to other
    * fibers would contain a half-applied batch, so every leader-side state export should go through this.
@@ -209,47 +226,55 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         }),
       )
 
-    const exportSnapshot: Service['exportSnapshot'] = Effect.gen(function* () {
-      const start = performance.now()
-      const head = yield* stateHead.get.pipe(UnknownError.mapToUnknownError)
-      const backendHead = Eventlog.getBackendHeadFromDb(dbEventlog)
+    const exportSnapshotWith: Service['exportSnapshotWith'] = Effect.fn(
+      '@livestore/common:LeaderPersistence:exportSnapshot',
+    )(
+      function* <T>(capture: (dbState: SqliteDb) => T) {
+        const start = performance.now()
+        const head = yield* stateHead.get.pipe(UnknownError.mapToUnknownError)
+        const backendHead = Eventlog.getBackendHeadFromDb(dbEventlog)
 
-      if (head.client !== EventSequenceNumber.Client.DEFAULT || head.global !== backendHead) {
-        return yield* UnknownError.make({
-          cause: `State head ${EventSequenceNumber.Client.toString(head)} is not the backend head ${backendHead}; only a client without local events can export a snapshot`,
-        })
-      }
+        if (head.client !== EventSequenceNumber.Client.DEFAULT || head.global !== backendHead) {
+          return yield* UnknownError.make({
+            cause: `State head ${EventSequenceNumber.Client.toString(head)} is not the backend head ${backendHead}; only a client without local events can export a snapshot`,
+          })
+        }
 
-      hasClientOnlyEvents ??=
-        dbEventlog.select<{ found: number }>(
-          `SELECT 1 AS found FROM ${EVENTLOG_META_TABLE} WHERE seqNumClient > ${EventSequenceNumber.Client.DEFAULT} LIMIT 1`,
-        ).length > 0
-      if (hasClientOnlyEvents === true) {
-        return yield* UnknownError.make({
-          cause:
-            'This client recorded client-only events, so its state is not pure synced history and cannot be exported',
-        })
-      }
+        hasClientOnlyEvents ??=
+          dbEventlog.select<{ found: number }>(
+            `SELECT 1 AS found FROM ${EVENTLOG_META_TABLE} WHERE seqNumClient > ${EventSequenceNumber.Client.DEFAULT} LIMIT 1`,
+          ).length > 0
+        if (hasClientOnlyEvents === true) {
+          return yield* UnknownError.make({
+            cause:
+              'This client recorded client-only events, so its state is not pure synced history and cannot be exported',
+          })
+        }
 
-      const backendId = Eventlog.getBackendIdFromDb(dbEventlog)
-      if (Option.isNone(backendId) === true) {
-        return yield* UnknownError.make({ cause: 'Cannot export a snapshot before the sync backend identity is known' })
-      }
+        const backendId = Eventlog.getBackendIdFromDb(dbEventlog)
+        if (Option.isNone(backendId) === true) {
+          return yield* UnknownError.make({
+            cause: 'Cannot export a snapshot before the sync backend identity is known',
+          })
+        }
 
-      const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: head.global })
-      const bytes = dbState.export()
+        const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: head.global })
+        const data = yield* Effect.try(() => capture(dbState))
 
-      return {
-        bytes,
-        seqNum: head.global,
-        cursorMetadata: Option.flatMap(cursorInfo, (info) => info.metadata),
-        backendId: backendId.value,
-        exportMs: performance.now() - start,
-      }
-    }).pipe(
+        return {
+          data,
+          seqNum: head.global,
+          cursorMetadata: Option.flatMap(cursorInfo, (info) => info.metadata),
+          backendId: backendId.value,
+          exportMs: performance.now() - start,
+        } satisfies StateSnapshotCapture<T>
+      },
       lock.withPermits(1),
       UnknownError.mapToUnknownError,
-      Effect.withSpan('@livestore/common:LeaderPersistence:exportSnapshot'),
+    )
+
+    const exportSnapshot: Service['exportSnapshot'] = exportSnapshotWith((db) => db.export()).pipe(
+      Effect.map(({ data, ...rest }) => ({ ...rest, bytes: data })),
     )
 
     const exportState: Service['exportState'] = Effect.gen(function* () {
@@ -257,7 +282,14 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
       return { bytes: dbState.export(), head }
     }).pipe(lock.withPermits(1))
 
-    return LeaderPersistence.of({ [TypeId]: TypeId, persistLocal, persistUpstream, exportSnapshot, exportState })
+    return LeaderPersistence.of({
+      [TypeId]: TypeId,
+      persistLocal,
+      persistUpstream,
+      exportSnapshot,
+      exportSnapshotWith,
+      exportState,
+    })
   })
 
 /**

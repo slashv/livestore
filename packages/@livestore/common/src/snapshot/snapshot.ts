@@ -4,6 +4,7 @@ import type { Duration, Effect, HttpClient, Option, Scope } from '@livestore/uti
 import { Schema } from '@livestore/utils/effect'
 
 import type { UnknownError } from '../errors.ts'
+import type { SqliteDb } from '../sqlite-types.ts'
 
 /**
  * Describes one published state snapshot.
@@ -91,6 +92,26 @@ export interface SnapshotSink {
   readonly getManifest: (args: {
     readonly key: string
   }) => Effect.Effect<Option.Option<SnapshotManifest>, SnapshotError>
+  /**
+   * Optional streaming path for state that should not be materialized as one buffer. When present, the checkpointer
+   * calls `capture` (synchronously, under the leader's persistence lock) instead of serializing the state database,
+   * and later publishes the captured copy through the returned {@link StagedSnapshot}.
+   *
+   * `capture` must take a copy that stays consistent after the lock is released (e.g. a server-side copy of the
+   * database pages) and must not hold the state in memory.
+   */
+  readonly capture?: (dbState: SqliteDb) => StagedSnapshot
+}
+
+/** Manifest fields known before a staged snapshot is uploaded; the sink adds `objectKey`, `byteLength` and `sha256`. */
+export type SnapshotManifestDraft = Omit<SnapshotManifest, 'objectKey' | 'byteLength' | 'sha256'>
+
+/** A consistent copy of the state taken by {@link SnapshotSink.capture}, not yet published. @experimental */
+export interface StagedSnapshot {
+  /** Uploads the copy (blob first, pointer second, like `publish`) and releases it. */
+  readonly publish: (manifest: SnapshotManifestDraft) => Effect.Effect<SnapshotManifest, SnapshotError>
+  /** Releases the copy without publishing it. */
+  readonly discard: Effect.Effect<void>
 }
 
 /**

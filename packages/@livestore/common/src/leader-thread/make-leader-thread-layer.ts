@@ -301,6 +301,7 @@ export const makeLeaderThreadLayer = ({
       snapshotBoot,
       exportSnapshot: persistence.exportSnapshot,
       exportState: persistence.exportState,
+      exportSnapshotWith: persistence.exportSnapshotWith,
       // State will be set during `bootLeaderThread`
       initialState: {} as any as LeaderThreadCtx['Service']['initialState'],
     } satisfies LeaderThreadCtx['Service']
@@ -361,10 +362,11 @@ const getInitialSyncState = ({
         ? []
         : Eventlog.getEventsSince({
             dbEventlog,
+            // Everything up to the backend head is confirmed, whatever rebase generation its rows carry.
             since: {
               global: initialBackendHead,
               client: EventSequenceNumber.Client.DEFAULT,
-              rebaseGeneration: initialLocalHead.rebaseGeneration,
+              rebaseGeneration: EventSequenceNumber.Client.REBASE_GENERATION_DEFAULT,
             },
           }),
   })

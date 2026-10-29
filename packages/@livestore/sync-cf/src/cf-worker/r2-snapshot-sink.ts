@@ -1,4 +1,4 @@
-import { Snapshot } from '@livestore/common'
+import { Snapshot, type SqliteDb } from '@livestore/common'
 import type { CfTypes } from '@livestore/common-cf'
 import { Effect } from '@livestore/utils/effect'
 import { nanoid } from '@livestore/utils/nanoid'
@@ -23,6 +23,28 @@ export interface R2SnapshotSinkOptions {
   graceMs?: number
   /** Clock used for grace-period pruning. Injectable for tests. */
   now?: () => number
+  /**
+   * Enables streaming publication for state too large to serialize in memory (e.g. `stageVfsFile` from
+   * `@livestore/sqlite-wasm/cf`). Called synchronously under the leader's persistence lock; it must take a consistent
+   * copy that outlives the lock. The sink then streams it to R2 as a multipart upload, hashing as it goes, so memory
+   * stays around one part regardless of the state size.
+   */
+  stage?: (dbState: SqliteDb) => SnapshotBlobSource
+  /**
+   * Multipart part size for streamed publication. R2 requires equal parts of at least 5 MiB (except the last).
+   *
+   * @default 5 MiB
+   */
+  partSizeBytes?: number
+}
+
+/** A staged, consistent copy of a snapshot blob that can be read in ranges. */
+export interface SnapshotBlobSource {
+  readonly byteLength: number
+  /** Reads `length` bytes at `offset` into a new buffer. Offsets are multiples of the part size. */
+  readonly read: (offset: number, length: number) => Uint8Array<ArrayBuffer>
+  /** Drops the staged copy. Called exactly once, after publication or discard. */
+  readonly release: () => void
 }
 
 /**
@@ -38,6 +60,10 @@ export interface R2SnapshotSinkOptions {
  *
  * Blobs of other snapshot keys (e.g. an older schema) are never touched; use an R2 lifecycle rule for those.
  *
+ * With `stage`, the sink also implements {@link Snapshot.SnapshotSink.capture}: the checkpointer then never serializes
+ * the state database, and step 1 becomes a multipart upload streamed from the staged copy (sha256 computed on the fly
+ * with `crypto.DigestStream`).
+ *
  * @experimental
  */
 export const makeR2SnapshotSink = ({
@@ -46,6 +72,8 @@ export const makeR2SnapshotSink = ({
   getSyncBackendStub,
   graceMs = 5 * 60_000,
   now = () => Date.now(),
+  stage,
+  partSizeBytes = 5 * 1024 * 1024,
 }: R2SnapshotSinkOptions): Snapshot.SnapshotSink => {
   const prune = Effect.fn('@livestore/sync-cf:r2-snapshot-sink:prune')(function* ({
     key,
@@ -76,7 +104,7 @@ export const makeR2SnapshotSink = ({
         })
       }
 
-      const objectKey = `${snapshotKeyObjectPrefix({ storeId, key: manifest.key })}${manifest.seqNum}-${nanoid()}.sqlite`
+      const objectKey = makeObjectKey(manifest)
       const published: Snapshot.SnapshotManifest = { ...manifest, objectKey }
 
       yield* trySnapshotPromise('unavailable', `Failed to upload snapshot blob ${objectKey}`, () =>
@@ -84,39 +112,129 @@ export const makeR2SnapshotSink = ({
           // R2 rejects the upload if the received bytes don't hash to the manifest's digest.
           sha256: manifest.sha256,
           httpMetadata: { contentType: SNAPSHOT_BLOB_CONTENT_TYPE },
-          customMetadata: {
-            storeId,
-            snapshotKey: manifest.key,
-            backendId: manifest.backendId,
-            seqNum: String(manifest.seqNum),
-            createdAt: String(manifest.createdAt),
-          },
+          customMetadata: customMetadataFor(manifest),
         }),
       )
 
-      const result = yield* trySnapshotPromise('unavailable', 'Failed to publish snapshot manifest', () =>
-        getSyncBackendStub().putSnapshotManifest(encodeSnapshotManifestJson(published)),
-      )
-
-      if (result._tag === 'Rejected') {
-        // The pointer never moved to this blob, so nobody can be reading it.
-        yield* trySnapshotPromise('unavailable', 'Failed to delete rejected snapshot blob', () =>
-          bucket.delete(objectKey),
-        ).pipe(Effect.ignore({ log: 'Warn' }))
-        return yield* new Snapshot.SnapshotError({ reason: result.reason, message: result.message })
-      }
-
-      const keep = new Set([objectKey, ...(result.previousObjectKey === null ? [] : [result.previousObjectKey])])
-      yield* prune({ key: manifest.key, keep }).pipe(Effect.ignore({ log: 'Warn' }))
-
-      return published
+      return yield* movePointer(published)
     },
   )
+
+  /** Second half of every publish: move the pointer to the uploaded blob, then prune replaced blobs. */
+  const movePointer = Effect.fn('@livestore/sync-cf:r2-snapshot-sink:movePointer')(function* (
+    published: Snapshot.SnapshotManifest,
+  ) {
+    const result = yield* trySnapshotPromise('unavailable', 'Failed to publish snapshot manifest', () =>
+      getSyncBackendStub().putSnapshotManifest(encodeSnapshotManifestJson(published)),
+    )
+
+    if (result._tag === 'Rejected') {
+      // The pointer never moved to this blob, so nobody can be reading it.
+      yield* trySnapshotPromise('unavailable', 'Failed to delete rejected snapshot blob', () =>
+        bucket.delete(published.objectKey),
+      ).pipe(Effect.ignore({ log: 'Warn' }))
+      return yield* new Snapshot.SnapshotError({ reason: result.reason, message: result.message })
+    }
+
+    const keep = new Set([
+      published.objectKey,
+      ...(result.previousObjectKey === null ? [] : [result.previousObjectKey]),
+    ])
+    yield* prune({ key: published.key, keep }).pipe(Effect.ignore({ log: 'Warn' }))
+
+    return published
+  })
+
+  /** Streams a staged copy to R2 as a multipart upload, hashing incrementally, then moves the pointer. */
+  const publishStaged = Effect.fn('@livestore/sync-cf:r2-snapshot-sink:publishStaged')(function* (
+    source: SnapshotBlobSource,
+    draft: Snapshot.SnapshotManifestDraft,
+  ) {
+    if (draft.storeId !== storeId) {
+      return yield* new Snapshot.SnapshotError({
+        reason: 'incompatible',
+        message: `Manifest storeId ${draft.storeId} does not match sink storeId ${storeId}`,
+      })
+    }
+    if (source.byteLength === 0) {
+      return yield* new Snapshot.SnapshotError({ reason: 'internal', message: 'Staged snapshot is empty' })
+    }
+
+    const objectKey = makeObjectKey(draft)
+    const upload = yield* trySnapshotPromise('unavailable', `Failed to start snapshot upload ${objectKey}`, () =>
+      bucket.createMultipartUpload(objectKey, {
+        httpMetadata: { contentType: SNAPSHOT_BLOB_CONTENT_TYPE },
+        customMetadata: customMetadataFor(draft),
+      }),
+    )
+
+    const sha256 = yield* Effect.gen(function* () {
+      const digest = new (cfCrypto().DigestStream)('SHA-256')
+      const hasher = digest.getWriter()
+      const parts: CfTypes.R2UploadedPart[] = []
+      for (let offset = 0, partNumber = 1; offset < source.byteLength; offset += partSizeBytes, partNumber++) {
+        // One part in memory at a time: read, hash, upload, drop.
+        const part = source.read(offset, Math.min(partSizeBytes, source.byteLength - offset))
+        yield* trySnapshotPromise('internal', 'Failed to hash snapshot part', () => hasher.write(part))
+        parts.push(
+          yield* trySnapshotPromise('unavailable', `Failed to upload snapshot part ${partNumber}`, () =>
+            upload.uploadPart(partNumber, part),
+          ),
+        )
+      }
+      yield* trySnapshotPromise('internal', 'Failed to finish snapshot hash', () => hasher.close())
+      const hash = yield* trySnapshotPromise('internal', 'Failed to finish snapshot hash', () => digest.digest)
+      yield* trySnapshotPromise('unavailable', `Failed to complete snapshot upload ${objectKey}`, () =>
+        upload.complete(parts),
+      )
+      return toHex(new Uint8Array(hash))
+    }).pipe(
+      Effect.tapError(() =>
+        trySnapshotPromise('unavailable', 'Failed to abort snapshot upload', () => upload.abort()).pipe(
+          Effect.ignore({ log: 'Warn' }),
+        ),
+      ),
+    )
+
+    return yield* movePointer({ ...draft, objectKey, byteLength: source.byteLength, sha256 })
+  })
+
+  const capture: Snapshot.SnapshotSink['capture'] =
+    stage === undefined
+      ? undefined
+      : (dbState) => {
+          const source = stage(dbState)
+          return {
+            publish: (draft) => publishStaged(source, draft).pipe(Effect.ensuring(Effect.sync(source.release))),
+            discard: Effect.sync(source.release),
+          }
+        }
 
   const getManifest: Snapshot.SnapshotSink['getManifest'] = ({ key }) =>
     getManifestViaRpc({ getSyncBackendStub, storeId, key })
 
-  return { publish, getManifest }
+  const makeObjectKey = (manifest: Pick<Snapshot.SnapshotManifest, 'key' | 'seqNum'>) =>
+    `${snapshotKeyObjectPrefix({ storeId, key: manifest.key })}${manifest.seqNum}-${nanoid()}.sqlite`
+
+  const customMetadataFor = (manifest: Snapshot.SnapshotManifestDraft) => ({
+    storeId,
+    snapshotKey: manifest.key,
+    backendId: manifest.backendId,
+    seqNum: String(manifest.seqNum),
+    createdAt: String(manifest.createdAt),
+  })
+
+  return capture === undefined ? { publish, getManifest } : { publish, getManifest, capture }
+}
+
+/** Workers' `crypto` has the non-standard `DigestStream`; the ambient type may be the DOM one. */
+// oxlint-disable-next-line typescript-eslint(no-unsafe-type-assertion) -- workerd global with Cloudflare-specific members
+const cfCrypto = () => Reflect.get(globalThis, 'crypto') as CfTypes.Crypto
+
+const toHex = (bytes: Uint8Array) => {
+  let hex = ''
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0')
+  return hex
 }
 
 /** R2 deletes at most 1000 keys per call. */

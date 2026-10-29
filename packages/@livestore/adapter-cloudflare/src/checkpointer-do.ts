@@ -2,7 +2,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 
-import { Snapshot } from '@livestore/common'
+import { Snapshot, type SqliteDb } from '@livestore/common'
 import type { CfTypes, ClientDoWithRpcCallback, HelperTypes } from '@livestore/common-cf'
 import {
   type Checkpointer,
@@ -13,6 +13,7 @@ import {
   ShutdownChannel,
 } from '@livestore/common/leader-thread'
 import type { LiveStoreSchema } from '@livestore/common/schema'
+import { stageVfsFile } from '@livestore/sqlite-wasm/cf'
 import {
   type CheckpointerWakeInterface,
   makeR2SnapshotSink,
@@ -92,6 +93,17 @@ export interface MakeCheckpointerDurableObjectOptions<TEnv> {
     /** The checkpointer stops re-arming its alarm after the head has not moved for this long. @default 60 seconds */
     idleTimeoutMs?: number
   }
+  /**
+   * How snapshots leave the Durable Object:
+   * - `streamed`: under the persistence lock the state file's pages are copied inside DO storage, then streamed to R2
+   *   as a multipart upload. Memory stays around one part (5 MiB) regardless of state size, at the cost of one extra
+   *   DO row write per 8 KiB page per snapshot.
+   * - `buffered`: the state database is serialized into wasm and JS memory (about twice the state size) and uploaded
+   *   with one `put`. Only viable for state of a few tens of MB under the 128 MB isolate limit.
+   *
+   * @default 'streamed'
+   */
+  exportMode?: 'streamed' | 'buffered'
   /** @default 'Info' */
   logLevel?: LogLevel.LogLevel
 }
@@ -297,6 +309,17 @@ export const makeCheckpointerDurableObject = <TEnv>(
             storeId,
             getSyncBackendStub,
             ...(options.graceMs !== undefined ? { graceMs: options.graceMs } : {}),
+            ...(options.exportMode === 'buffered'
+              ? {}
+              : {
+                  stage: (dbState: SqliteDb) =>
+                    stageVfsFile({
+                      sql: ctx.storage.sql,
+                      fileName: leader.stateFileName,
+                      // The pager's page count, read under the same lock, is what `sqlite3_serialize` would export.
+                      pageCount: dbState.select<{ page_count: number }>('PRAGMA page_count')[0]?.page_count ?? 0,
+                    }),
+                }),
           }),
           ...(options.trigger !== undefined ? { trigger: options.trigger } : {}),
           ...(options.pollInterval !== undefined ? { pollInterval: options.pollInterval } : {}),

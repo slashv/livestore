@@ -96,6 +96,8 @@ export interface Env {
   CHECKPOINTER_DO: CfTypes.DurableObjectNamespace<CheckpointerDoRpcInterface>
   /** Checkpointer that never publishes on its own, for DO limit measurements against `SYNC_BACKEND_DO`. */
   MEASURE_CHECKPOINTER_DO: CfTypes.DurableObjectNamespace<CheckpointerDoRpcInterface>
+  /** Same as `MEASURE_CHECKPOINTER_DO` with the in-memory (buffered) export. */
+  MEASURE_BUFFERED_CHECKPOINTER_DO: CfTypes.DurableObjectNamespace<CheckpointerDoRpcInterface>
 }
 
 interface SnapshotSyncDoProbe {
@@ -146,6 +148,15 @@ export class MeasureCheckpointerDO extends makeCheckpointerDurableObject<Env>({
   bucketBinding: 'SNAPSHOT_BUCKET',
   bindingName: 'MEASURE_CHECKPOINTER_DO',
   trigger: { minTailEvents: Number.MAX_SAFE_INTEGER },
+}) {}
+
+export class MeasureBufferedCheckpointerDO extends makeCheckpointerDurableObject<Env>({
+  schema,
+  syncBackendBinding: 'SYNC_BACKEND_DO',
+  bucketBinding: 'SNAPSHOT_BUCKET',
+  bindingName: 'MEASURE_BUFFERED_CHECKPOINTER_DO',
+  trigger: { minTailEvents: Number.MAX_SAFE_INTEGER },
+  exportMode: 'buffered',
 }) {}
 
 export class SyncBackendDO extends makeDurableObject({
@@ -648,7 +659,12 @@ const handleSnapshotE2eRequest = async ({
   const json = (value: unknown) =>
     new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } })
 
-  const namespace = url.pathname.includes('/measure/') === true ? env.MEASURE_CHECKPOINTER_DO : env.CHECKPOINTER_DO
+  const namespace =
+    url.pathname.includes('/measure-buffered/') === true
+      ? env.MEASURE_BUFFERED_CHECKPOINTER_DO
+      : url.pathname.includes('/measure/') === true
+        ? env.MEASURE_CHECKPOINTER_DO
+        : env.CHECKPOINTER_DO
   const checkpointer = getCheckpointerStub({ namespace, storeId, schema })
 
   if (url.pathname.endsWith('/checkpointer/ensure-running') === true) {

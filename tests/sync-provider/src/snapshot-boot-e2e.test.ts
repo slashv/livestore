@@ -1,7 +1,7 @@
 import { expect } from 'vitest'
 
 import type { CheckpointerDoStats } from '@livestore/adapter-cloudflare'
-import type { MakeSqliteDb, Snapshot } from '@livestore/common'
+import { type MakeSqliteDb, Snapshot } from '@livestore/common'
 import { nanoid } from '@livestore/livestore'
 import { schema } from '@livestore/livestore/internal/testing-utils'
 import { makeHttpSnapshotSource, makeHttpSync } from '@livestore/sync-cf/client'
@@ -56,9 +56,26 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot boot end to
       const manifest = flushed ?? auto.latestManifest!
       expect(manifest.seqNum).toBe(150)
 
+      // The test checkpointer streams its export (multipart upload from staged pages): the blob must be a complete
+      // rollback-journal SQLite file of exactly `page count × page size` bytes that passes an integrity check.
+      const makeSqliteDb = yield* makeSqlite
+      const blob = yield* (yield* makeHttpSnapshotSource({ url: syncUrl })({
+        storeId,
+        clientId: 'blob-check',
+        payload: undefined,
+      })).download(manifest)
+      const header = new DataView(blob.buffer, blob.byteOffset, 100)
+      expect([blob[18], blob[19]]).toEqual([1, 1])
+      expect(blob.byteLength).toBe(header.getUint16(16) * header.getUint32(28))
+      expect(Snapshot.sha256Hex(blob)).toBe(manifest.sha256)
+      const imported = yield* makeSqliteDb({ _tag: 'in-memory' })
+      imported.import(blob)
+      expect(imported.select<{ integrity_check: string }>('PRAGMA integrity_check')).toEqual([
+        { integrity_check: 'ok' },
+      ])
+
       yield* writer.push(20)
 
-      const makeSqliteDb = yield* makeSqlite
       const snapshotClient = yield* bootClient({ makeSqliteDb, syncUrl, storeId, clientId: 'snapshot', snapshot: true })
       const replayClient = yield* bootClient({ makeSqliteDb, syncUrl, storeId, clientId: 'replay', snapshot: false })
       yield* waitForUpstreamHead(snapshotClient, 170)

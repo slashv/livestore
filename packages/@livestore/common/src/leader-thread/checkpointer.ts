@@ -1,4 +1,13 @@
-import { type Scope, Duration, Effect, Option, Schedule, Semaphore, SubscriptionRef } from '@livestore/utils/effect'
+import {
+  type Scope,
+  Duration,
+  Effect,
+  Option,
+  Schedule,
+  type Schema,
+  Semaphore,
+  SubscriptionRef,
+} from '@livestore/utils/effect'
 
 import { UnknownError } from '../adapter-types.ts'
 import * as EventlogSqliteDb from '../EventlogSqliteDb.ts'
@@ -73,7 +82,7 @@ export const makeCheckpointer = (
   options: CheckpointerOptions,
 ): Effect.Effect<Checkpointer, never, LeaderThreadCtx | StateSqliteDb.StateSqliteDb | Scope.Scope> =>
   Effect.gen(function* () {
-    const { syncProcessor, exportSnapshot } = yield* LeaderThreadCtx
+    const { syncProcessor, exportSnapshot, exportSnapshotWith } = yield* LeaderThreadCtx
     const dbState = yield* StateSqliteDb.StateSqliteDb
     const { schema, storeId, sink } = options
     const now = options.now ?? (() => Date.now())
@@ -109,15 +118,32 @@ export const makeCheckpointer = (
       return (pageCount?.page_count ?? 0) * (pageSize?.page_size ?? 0)
     })
 
-    const publish = Effect.gen(function* () {
-      const totalStart = performance.now()
+    const manifestDraft = (exported: {
+      backendId: string
+      seqNum: number
+      cursorMetadata: Option.Option<Schema.Json>
+    }) => ({
+      manifestVersion: 1 as const,
+      storeId,
+      key,
+      backendId: exported.backendId,
+      seqNum: exported.seqNum,
+      ...(Option.isSome(exported.cursorMetadata) === true ? { cursorMetadata: exported.cursorMetadata.value } : {}),
+      createdAt: now(),
+    })
+
+    // After a backend reset the log restarts, so the previous backend's snapshot says nothing about this one.
+    const previousSeqNumFor = (previous: Option.Option<SnapshotManifest>, backendId: string) =>
+      Option.match(previous, {
+        onNone: () => 0,
+        onSome: (manifest) => (manifest.backendId === backendId ? manifest.seqNum : 0),
+      })
+
+    /** Serializes the state database into one buffer, hashes it and hands it to `sink.publish`. */
+    const exportAndPublishBuffered = Effect.gen(function* () {
       const previous = (yield* SubscriptionRef.get(stats)).latestManifest
       const exported = yield* exportSnapshot
-      // After a backend reset the log restarts, so the previous backend's snapshot says nothing about this one.
-      const previousSeqNum = Option.match(previous, {
-        onNone: () => 0,
-        onSome: (manifest) => (manifest.backendId === exported.backendId ? manifest.seqNum : 0),
-      })
+      const previousSeqNum = previousSeqNumFor(previous, exported.backendId)
       if (exported.seqNum <= previousSeqNum) return Option.none()
 
       const hashStart = performance.now()
@@ -127,28 +153,46 @@ export const makeCheckpointer = (
       const uploadStart = performance.now()
       const manifest = yield* sink
         .publish({
-          manifest: {
-            manifestVersion: 1,
-            storeId,
-            key,
-            backendId: exported.backendId,
-            seqNum: exported.seqNum,
-            ...(Option.isSome(exported.cursorMetadata) === true
-              ? { cursorMetadata: exported.cursorMetadata.value }
-              : {}),
-            byteLength: exported.bytes.byteLength,
-            sha256: digest,
-            createdAt: now(),
-          },
+          manifest: { ...manifestDraft(exported), byteLength: exported.bytes.byteLength, sha256: digest },
           bytes: exported.bytes,
         })
         .pipe(UnknownError.mapToUnknownError)
       const uploadMs = performance.now() - uploadStart
 
+      return Option.some({ manifest, previousSeqNum, exportMs: exported.exportMs, hashMs, uploadMs })
+    })
+
+    /** Lets the sink copy the state at the consistent moment and stream it, without a full in-memory export. */
+    const exportAndPublishStaged = (capture: NonNullable<SnapshotSink['capture']>) =>
+      Effect.gen(function* () {
+        const previous = (yield* SubscriptionRef.get(stats)).latestManifest
+        const exported = yield* exportSnapshotWith(capture)
+        const previousSeqNum = previousSeqNumFor(previous, exported.backendId)
+        if (exported.seqNum <= previousSeqNum) {
+          yield* exported.data.discard
+          return Option.none()
+        }
+
+        const uploadStart = performance.now()
+        const manifest = yield* exported.data.publish(manifestDraft(exported)).pipe(UnknownError.mapToUnknownError)
+        const uploadMs = performance.now() - uploadStart
+
+        // Hashing happens while streaming, so it is part of `uploadMs`.
+        return Option.some({ manifest, previousSeqNum, exportMs: exported.exportMs, hashMs: 0, uploadMs })
+      })
+
+    const publish = Effect.gen(function* () {
+      const totalStart = performance.now()
+      const published = yield* sink.capture === undefined
+        ? exportAndPublishBuffered
+        : exportAndPublishStaged(sink.capture)
+      if (Option.isNone(published) === true) return Option.none()
+      const { manifest, previousSeqNum, exportMs, hashMs, uploadMs } = published.value
+
       const timings: PublishTimings = {
         seqNum: manifest.seqNum,
         byteLength: manifest.byteLength,
-        exportMs: exported.exportMs,
+        exportMs,
         hashMs,
         uploadMs,
         totalMs: performance.now() - totalStart,

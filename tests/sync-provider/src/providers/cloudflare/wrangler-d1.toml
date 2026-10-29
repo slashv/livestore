@@ -35,6 +35,10 @@ class_name = "CheckpointerDO"
 name = "MEASURE_CHECKPOINTER_DO"
 class_name = "MeasureCheckpointerDO"
 
+[[durable_objects.bindings]]
+name = "MEASURE_BUFFERED_CHECKPOINTER_DO"
+class_name = "MeasureBufferedCheckpointerDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SyncBackendDO", "TestClientDo", "StoreClientDo"]
@@ -42,6 +46,10 @@ new_sqlite_classes = ["SyncBackendDO", "TestClientDo", "StoreClientDo"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["SnapshotSyncBackendDO", "CheckpointerDO", "MeasureCheckpointerDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["MeasureBufferedCheckpointerDO"]
 
 # Snapshot blobs (experimental snapshot boot); simulated locally by miniflare
 [[r2_buckets]]

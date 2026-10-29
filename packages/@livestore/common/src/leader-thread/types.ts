@@ -122,6 +122,8 @@ export class LeaderThreadCtx extends Context.Service<
     exportSnapshot: Effect.Effect<StateSnapshotExport, UnknownError>
     /** Serializes the state database consistently (between persist transactions). Use for every leader-side export. */
     exportState: LeaderPersistence.Service['exportState']
+    /** Like `exportSnapshot`, but hands the consistent moment to a capture callback (experimental). */
+    exportSnapshotWith: LeaderPersistence.Service['exportSnapshotWith']
   }
 >()('LeaderThreadCtx') {}
 
