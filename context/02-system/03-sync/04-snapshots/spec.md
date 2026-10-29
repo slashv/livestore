@@ -288,7 +288,7 @@ roughly constant as state grows. A quiet store publishes nothing.
 | `minIntervalMs`         | `10_000`                  |
 | `minTailEvents`         | `100`                     |
 
-The cost constants are calibrated by the snapshot boot benchmarks.
+The cost constants are calibrated by the [snapshot boot benchmarks](../../../../contributor-docs/perf/snapshot-boot-benchmarks.md).
 
 ### Grace period
 
