@@ -159,7 +159,8 @@ export const makeSqliteDb = <
         return
       }
 
-      for (const stmt of [...preparedStmts]) {
+      // Deleting the visited entry during Set iteration (finalize does) is safe in JS.
+      for (const stmt of preparedStmts) {
         stmt.finalize()
       }
       sqlite3.close(dbPointer)
