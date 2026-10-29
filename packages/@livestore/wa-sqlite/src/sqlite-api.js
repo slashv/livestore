@@ -776,7 +776,9 @@ export function Factory(Module) {
 
     // return (async function*() {
     const onFinally = []
-    // try {
+    // LiveStore: the upstream generator released its resources in a `finally` after iteration. Returning an array
+    // instead, the `finally` must still run, or every call leaks the SQL text buffer in the wasm heap.
+    try {
     // Encode SQL string to UTF-8.
     const utf8 = textEncoder.encode(sql)
 
@@ -826,11 +828,18 @@ export function Factory(Module) {
         stmts.push(stmt)
       }
     } while (stmt)
-    // } finally {
-    //   while (onFinally.length) {
-    //     onFinally.pop()();
-    //   }
-    // }
+    } catch (error) {
+      // Statements are handed to the caller only on success; unscoped ones prepared before the failure would leak.
+      if (options.unscoped) {
+        for (const prepared of stmts) sqlite3.finalize(prepared)
+      }
+      throw error
+    } finally {
+      // SQLite keeps its own copy of the SQL text, so the input buffer can be freed once preparation is done.
+      while (onFinally.length) {
+        onFinally.pop()()
+      }
+    }
 
     return stmts
   }

@@ -26,7 +26,9 @@ export const makeSqliteDb = <
   sqlite3: SQLiteAPI
   metadata: TMetadata
 }): SqliteDb<TMetadata> => {
-  const preparedStmts: PreparedStatement[] = []
+  // Only live statements are tracked, so `close` can finalize them. Finalized ones must leave the set: one-shot
+  // `execute`/`select` calls prepare a statement each, and keeping them would grow memory with every query.
+  const preparedStmts = new Set<PreparedStatement>()
   const { dbPointer } = metadata
 
   let isClosed = false
@@ -115,6 +117,7 @@ export const makeSqliteDb = <
             }
 
             isFinalized = true
+            preparedStmts.delete(preparedStmt)
 
             for (const stmt of stmts) {
               sqlite3.finalize(stmt)
@@ -123,7 +126,7 @@ export const makeSqliteDb = <
           sql: queryStr,
         } satisfies PreparedStatement
 
-        preparedStmts.push(preparedStmt)
+        preparedStmts.add(preparedStmt)
 
         return preparedStmt
       } catch (e) {
@@ -156,7 +159,7 @@ export const makeSqliteDb = <
         return
       }
 
-      for (const stmt of preparedStmts) {
+      for (const stmt of [...preparedStmts]) {
         stmt.finalize()
       }
       sqlite3.close(dbPointer)

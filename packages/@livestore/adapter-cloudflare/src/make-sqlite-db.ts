@@ -138,8 +138,6 @@ export const makeSqliteDb_ = <
   sqlStorage: CfTypes.SqlStorage
   metadata: TMetadata
 }): SqliteDb<TMetadata> => {
-  const preparedStmts: PreparedStatement[] = []
-
   let isClosed = false
 
   const sqliteDb: SqliteDb<TMetadata> = {
@@ -151,9 +149,9 @@ export const makeSqliteDb_ = <
     },
     prepare: (queryStr) => {
       try {
-        const preparedStmt = new CloudflarePreparedStatement(sqlStorage, queryStr.trim())
-        preparedStmts.push(preparedStmt)
-        return preparedStmt
+        // Statements hold no resources on DO SqlStorage (finalize is a no-op), so they are not tracked for `close`;
+        // tracking them retained every statement ever prepared.
+        return new CloudflarePreparedStatement(sqlStorage, queryStr.trim())
       } catch (e) {
         throw new SqliteError({
           query: { sql: queryStr, bindValues: {} },
@@ -194,10 +192,6 @@ export const makeSqliteDb_ = <
     close: () => {
       if (isClosed === true) {
         return
-      }
-
-      for (const stmt of preparedStmts) {
-        stmt.finalize()
       }
 
       // NOTE: Database close not supported with public API
