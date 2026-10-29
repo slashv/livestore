@@ -43,12 +43,12 @@ describe('SnapshotTrigger.decide', () => {
   })
 
   it('publishes exactly when tail × replay cost exceeds alpha × download cost', () => {
-    // 1 MB at defaults: download 40 ms, alpha 0.5 → threshold 20 ms → 400 events at 0.05 ms/event.
-    const snapshotBytes = 1_000_000
+    // 10 MB at defaults: download 400 ms, alpha 0.5 → threshold 200 ms → 400 events at 0.5 ms/event.
+    const snapshotBytes = 10_000_000
     const at = (tailEvents: number) => decide({ tailEvents, snapshotBytes, msSinceLastSnapshot: Infinity }, params)
     expect(at(400)).toEqual({ _tag: 'wait', reason: 'cost' })
-    expect(at(401)).toMatchObject({ _tag: 'publish', downloadCostMs: 40 })
-    expect((at(401) as { tailCostMs: number }).tailCostMs).toBeCloseTo(20.05)
+    expect(at(401)).toMatchObject({ _tag: 'publish', downloadCostMs: 400 })
+    expect((at(401) as { tailCostMs: number }).tailCostMs).toBeCloseTo(200.5)
   })
 
   it('agrees with the inequality on random inputs and is monotone in the tail', () => {

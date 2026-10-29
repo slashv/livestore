@@ -283,7 +283,7 @@ roughly constant as state grows. A quiet store publishes nothing.
 | Parameter               | Default                   |
 | ----------------------- | ------------------------- |
 | `alpha`                 | `0.5`                     |
-| `replayCostPerEventMs`  | `0.05`                    |
+| `replayCostPerEventMs`  | `0.5`                     |
 | `downloadCostPerByteMs` | `0.00004` (about 25 MB/s) |
 | `minIntervalMs`         | `10_000`                  |
 | `minTailEvents`         | `100`                     |

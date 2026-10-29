@@ -23,9 +23,10 @@ export interface TriggerParams {
   readonly alpha: number
   /**
    * Client cost of pulling and materializing one tail event, in milliseconds.
-   * Calibrated by the snapshot boot benchmarks (`tests/perf-snapshot`).
+   * Calibrated by the snapshot boot benchmarks (`contributor-docs/perf/snapshot-boot-benchmarks.md`): full replay
+   * costs about 0.5 ms of CPU per event on a Node leader.
    *
-   * @default 0.05
+   * @default 0.5
    */
   readonly replayCostPerEventMs: number
   /**
@@ -50,7 +51,7 @@ export interface TriggerParams {
 
 export const defaultTriggerParams: TriggerParams = {
   alpha: 0.5,
-  replayCostPerEventMs: 0.05,
+  replayCostPerEventMs: 0.5,
   downloadCostPerByteMs: 0.00004,
   minIntervalMs: 10_000,
   minTailEvents: 100,
