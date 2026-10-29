@@ -18,6 +18,7 @@ export {
   SessionIdSymbol,
   type BindableWithSessionIdSymbol,
 } from './session-id-symbol.ts'
+export * as Snapshot from './snapshot/mod.ts'
 export * as SqliteDbHelper from './sqlite-db-helper.ts'
 export * as StateSqliteDb from './StateSqliteDb.ts'
 export * as StateHead from './StateHead.ts'

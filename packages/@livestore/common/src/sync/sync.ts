@@ -4,6 +4,7 @@ export * as SyncBackend from './sync-backend.ts'
 import type { Schema } from '@livestore/utils/effect'
 
 import type { InitialSyncOptions } from '../leader-thread/types.ts'
+import type { SnapshotBootOptions } from '../snapshot/snapshot.ts'
 import type { SyncBackendConstructor } from './sync-backend.ts'
 
 export type SyncOptions<TPayload = Schema.Json> = {
@@ -45,4 +46,14 @@ export type SyncOptions<TPayload = Schema.Json> = {
    * @default true
    */
   livePull?: boolean
+  /**
+   * Experimental: lets a fresh client (empty local eventlog) install a recent state snapshot and pull only the events
+   * after it, instead of replaying the store's entire history. Snapshots are published by a checkpointer running next
+   * to the sync backend. Falls back to full replay when no usable snapshot exists.
+   *
+   * Not enabled by default (LS.SYS-R06).
+   *
+   * @experimental
+   */
+  snapshot?: SnapshotBootOptions<TPayload>
 }
