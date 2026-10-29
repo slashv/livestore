@@ -36,7 +36,7 @@ import {
   SYNC_STATUS_TABLE,
 } from '../schema/state/sqlite/system-tables/eventlog-tables.ts'
 import * as StateSqliteDb from '../StateSqliteDb.ts'
-import type { BackendIdMismatchError, IsOfflineError, ServerAheadError } from '../sync/errors.ts'
+import { type BackendIdMismatchError, IsOfflineError, type ServerAheadError } from '../sync/errors.ts'
 import type * as SyncBackend from '../sync/sync-backend.ts'
 import * as SyncState from '../sync/syncstate.ts'
 import { sql } from '../util.ts'
@@ -1011,7 +1011,25 @@ const runProviderPull = ({
     )
     yield* Effect.gen(function* () {
       const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: cursor.global })
+      // The backend log is a chain: every event's parent is the previous event. Track the last position this stream
+      // delivered, drop repeats, and treat a gap as a broken connection so the pull restarts from the durable cursor
+      // instead of applying a batch with missing events.
+      let lastDelivered = cursor.global
       yield* syncBackend.pull(cursorInfo, { live }).pipe(
+        Stream.mapEffect(({ batch: rawBatch, pageInfo }) =>
+          Effect.gen(function* () {
+            const batch = rawBatch.filter(({ eventEncoded }) => eventEncoded.seqNum > lastDelivered)
+            for (const { eventEncoded } of batch) {
+              if (eventEncoded.parentSeqNum !== lastDelivered) {
+                return yield* new IsOfflineError({
+                  cause: `Sync backend delivered event ${eventEncoded.seqNum} with parent ${eventEncoded.parentSeqNum} after ${lastDelivered}`,
+                })
+              }
+              lastDelivered = eventEncoded.seqNum
+            }
+            return { batch, pageInfo }
+          }),
+        ),
         Stream.runForEach(({ batch, pageInfo }) =>
           Effect.gen(function* () {
             yield* SubscriptionRef.waitUntil(syncBackend.isConnected, (connected) => connected === true)
