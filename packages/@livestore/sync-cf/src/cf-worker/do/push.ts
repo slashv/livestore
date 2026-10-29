@@ -177,24 +177,27 @@ export const makePush =
             ctx.storage.kv.list<RpcSubscription>({ prefix: rpcSubscriptionKeyPrefix }),
           )
           if (rpcSubscriptions.length > 0) {
-            for (const [, subscription] of rpcSubscriptions) {
-              for (const { response } of responses) {
-                yield* emitStreamResponse({
-                  callerContext: subscription.callerContext,
-                  env,
-                  requestId: subscription.requestId,
-                  storeId: subscription.storeId,
-                  schema: SyncMessage.PullResponse,
-                  values: [response],
-                }).pipe(
-                  // A slow subscriber must not hold up push admission; it detects the missed update as a gap and
-                  // re-pulls from its cursor.
-                  Effect.timeout(RPC_SUBSCRIBER_CALLBACK_TIMEOUT),
-                  Effect.tapCauseLogPretty,
-                  Effect.exit,
-                )
-              }
-            }
+            // Subscribers are independent, so they're called concurrently; chunks to one subscriber stay in order.
+            // A slow subscriber's chunk times out instead of holding up push admission: the subscriber detects the
+            // missed update as a gap on its next delivery and re-pulls from its cursor.
+            yield* Effect.forEach(
+              rpcSubscriptions,
+              ([, subscription]) =>
+                Effect.forEach(
+                  responses,
+                  ({ response }) =>
+                    emitStreamResponse({
+                      callerContext: subscription.callerContext,
+                      env,
+                      requestId: subscription.requestId,
+                      storeId: subscription.storeId,
+                      schema: SyncMessage.PullResponse,
+                      values: [response],
+                    }).pipe(Effect.timeout(RPC_SUBSCRIBER_CALLBACK_TIMEOUT), Effect.tapCauseLogPretty, Effect.exit),
+                  { discard: true },
+                ),
+              { concurrency: 'unbounded', discard: true },
+            )
 
             yield* Effect.logDebug(`Broadcasted to ${rpcSubscriptions.length} RPC clients`)
           }
@@ -202,7 +205,14 @@ export const makePush =
       )
 
       if (options?.snapshots !== undefined) {
-        wakeCheckpointers({ ctx, env, storeId, backendId, snapshots: options.snapshots })
+        wakeCheckpointers({
+          ctx,
+          env,
+          storeId,
+          backendId,
+          head: currentHeadRef.current,
+          snapshots: options.snapshots,
+        })
       }
 
       // Acknowledge only after the committed batch has been published, so a client cannot observe an
@@ -274,12 +284,14 @@ const wakeCheckpointers = ({
   env,
   storeId,
   backendId,
+  head,
   snapshots,
 }: {
   ctx: CfTypes.DurableObjectState
   env: Env
   storeId: StoreId
   backendId: string
+  head: number
   snapshots: NonNullable<MakeDurableObjectClassOptions['snapshots']>
 }) => {
   const namespace = (env as Record<string, CfTypes.DurableObjectNamespace | undefined>)[snapshots.checkpointerBinding]
@@ -301,7 +313,7 @@ const wakeCheckpointers = ({
     // oxlint-disable-next-line typescript-eslint(no-unsafe-type-assertion) -- the binding is user-configured; the checkpointer class implements this RPC method
     const stub = namespace.get(namespace.idFromName(name)) as unknown as CheckpointerWakeInterface
     ctx.waitUntil(
-      stub.ensureRunning(storeId, { backendId }).catch((error: unknown) => {
+      stub.ensureRunning(storeId, { backendId, head }).catch((error: unknown) => {
         console.warn(`Failed to wake checkpointer ${name}`, error)
       }),
     )

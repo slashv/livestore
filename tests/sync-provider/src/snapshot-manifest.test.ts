@@ -189,6 +189,24 @@ describeHttpDo(`${CloudflareHttpProvider.doSqlite.name} — snapshot manifests`,
     }).pipe(Effect.provide(getContext())),
   )
 
+  Vitest.live('stages dense, isolated page copies and never streams a dropped or partial copy', () =>
+    Effect.gen(function* () {
+      const { storeId, baseUrl } = yield* setupStore({ eventCount: 2 })
+      expect(yield* getJson(`${baseUrl}/snapshot-test/staging-probe?storeId=${storeId}`)).toEqual({
+        denseRead: true,
+        sparsePageIsZero: true,
+        isolatedFromSecondCopy: true,
+        droppedCopyThrows: true,
+      })
+
+      const failing = yield* getJson<{ failed: string | null; released: boolean; tooSmallPartRejected: boolean }>(
+        `${baseUrl}/snapshot-test/publish-failing-stream?storeId=${storeId}`,
+      )
+      expect(failing).toEqual({ failed: 'internal', released: true, tooSmallPartRejected: true })
+      expect(yield* listBlobs({ baseUrl, storeId })).toEqual([])
+    }).pipe(Effect.provide(getContext())),
+  )
+
   Vitest.live('never serves manifests recorded under a previous backend identity', () =>
     Effect.gen(function* () {
       const { storeId, baseUrl, backendId } = yield* setupStore({ eventCount: 3 })

@@ -16,7 +16,7 @@ export {
   REQUIRED_PRAGMAS as CF_SQL_VFS_REQUIRED_PRAGMAS,
 } from './CloudflareDurableObjectVFS.ts'
 export { CloudflareWorkerVFS } from './CloudflareWorkerVFS.ts'
-export { stageVfsFile, type StagedVfsFile } from './vfs-file-staging.ts'
+export { dropStagedVfsFiles, stageVfsFile, type StagedVfsFile } from './vfs-file-staging.ts'
 
 export type CloudflareDatabaseMetadataInMemory = {
   _tag: 'in-memory'

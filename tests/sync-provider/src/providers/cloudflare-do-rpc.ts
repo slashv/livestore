@@ -52,6 +52,8 @@ const makeLayer = (config?: { wranglerConfigPath?: string; label: string }): Syn
       WranglerDevServer.layer({
         cwd: path.join(import.meta.dirname, 'cloudflare'),
         ...(config?.wranglerConfigPath && { wranglerConfigPath: config.wranglerConfigPath }),
+        // The 5 s local default trips on a loaded machine; CI already uses 30 s.
+        readiness: { connectTimeout: '30 seconds' },
       }).pipe(Layer.provide(PlatformNode.NodeServices.layer)),
     ),
     UnknownError.mapToUnknownErrorLayer,

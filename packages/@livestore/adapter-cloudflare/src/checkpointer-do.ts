@@ -13,7 +13,7 @@ import {
   ShutdownChannel,
 } from '@livestore/common/leader-thread'
 import type { LiveStoreSchema } from '@livestore/common/schema'
-import { stageVfsFile } from '@livestore/sqlite-wasm/cf'
+import { dropStagedVfsFiles, type StagedVfsFile, stageVfsFile } from '@livestore/sqlite-wasm/cf'
 import {
   type CheckpointerWakeInterface,
   makeR2SnapshotSink,
@@ -26,6 +26,7 @@ import {
   Effect,
   Exit,
   FetchHttpClient,
+  Fiber,
   type LogLevel,
   Option,
   Queue,
@@ -161,9 +162,16 @@ export const makeCheckpointerDurableObject = <TEnv>(
      * a second leader on the same storage.
      */
     #transition: Promise<void> | undefined
+    /** Boot generation of `#running`, so a finished shutdown only clears the instance it stopped. */
+    #runningGeneration = 0
     #lastSeenHead = -1
     #resetPersistenceOnBoot = false
     #ensureRunningCalls = 0
+    /** Staged snapshot copies not yet released, i.e. streamed publications in flight. */
+    #stagedInFlight = 0
+    /** Highest backend head reported by wake-ups, and since when the leader has been behind it. */
+    #expectedHead = 0
+    #behindSince: number | undefined
 
     constructor(ctx: CfTypes.DurableObjectState, env: TEnv) {
       super(ctx, env)
@@ -171,8 +179,11 @@ export const makeCheckpointerDurableObject = <TEnv>(
       this.#env = env
     }
 
-    async ensureRunning(storeId: string, ensureOptions?: { backendId?: string }): Promise<void> {
+    async ensureRunning(storeId: string, ensureOptions?: { backendId?: string; head?: number }): Promise<void> {
       this.#ensureRunningCalls++
+      if (ensureOptions?.head !== undefined && ensureOptions.head > this.#expectedHead) {
+        this.#expectedHead = ensureOptions.head
+      }
       this.#markActive()
       const running = await this.#ensure(storeId)
       const followedBackendId = Eventlog.getBackendIdFromDb(running.leader.dbEventlog)
@@ -215,8 +226,22 @@ export const makeCheckpointerDurableObject = <TEnv>(
         this.#markActive()
       }
 
-      // Re-arm only while the log moves; a quiet store lets the instance idle out (and be evicted).
-      if (this.#idleForMs() < idleTimeoutMs) {
+      // A lost live-pull callback is only detected (as a gap) when the next one arrives. If the leader stays behind the
+      // head a wake-up reported, restart it so it pulls from its persisted cursor.
+      if (head >= this.#expectedHead) {
+        this.#behindSince = undefined
+      } else if (this.#behindSince === undefined) {
+        this.#behindSince = Date.now()
+      } else if (Date.now() - this.#behindSince > 2 * alarmIntervalMs) {
+        this.#behindSince = undefined
+        console.warn(`Checkpointer stuck at ${head}, backend head is ${this.#expectedHead}; re-pulling`)
+        await this.#stop(running, { resetPersistence: false })
+        await this.#ensure(storeId)
+      }
+
+      // Re-arm while the log moves or a streamed publication is still uploading; a quiet store lets the instance idle
+      // out (and be evicted).
+      if (this.#idleForMs() < idleTimeoutMs || this.#stagedInFlight > 0 || this.#behindSince !== undefined) {
         await this.#ctx.storage.setAlarm(Date.now() + alarmIntervalMs)
       }
     }
@@ -251,7 +276,16 @@ export const makeCheckpointerDurableObject = <TEnv>(
 
     async publishNow(storeId: string): Promise<Snapshot.SnapshotManifest | null> {
       const running = await this.#ensure(storeId)
-      return runPromise(running.checkpointer.publishNow.pipe(Effect.map(Option.getOrNull)), options.logLevel)
+      // Runs inside the leader's scope, so stopping the checkpointer interrupts it instead of letting it outlive the
+      // leader (and race the next leader's staging).
+      return runPromise(
+        running.checkpointer.publishNow.pipe(
+          Effect.map(Option.getOrNull),
+          Effect.forkIn(running.scope),
+          Effect.flatMap(Fiber.join),
+        ),
+        options.logLevel,
+      )
     }
 
     /**
@@ -259,12 +293,13 @@ export const makeCheckpointerDurableObject = <TEnv>(
      * closed, all while `#transition` holds back `#ensure`, so no second leader boots on the same storage meanwhile.
      */
     #stop(running: Running, { resetPersistence }: { resetPersistence: boolean }): Promise<void> {
-      if (this.#transition !== undefined) return this.#transition
+      // Recorded even when joining an in-flight shutdown, so a reset requested meanwhile is not lost.
       if (resetPersistence === true) this.#resetPersistenceOnBoot = true
+      if (this.#transition !== undefined) return this.#transition
       const transition = runPromise(Scope.close(running.scope, Exit.void), options.logLevel)
         .catch((error: unknown) => console.error('Checkpointer shutdown failed', error))
         .finally(() => {
-          this.#running = undefined
+          if (this.#runningGeneration === running.generation) this.#running = undefined
           this.#transition = undefined
         })
       this.#transition = transition
@@ -282,7 +317,8 @@ export const makeCheckpointerDurableObject = <TEnv>(
       while (this.#transition !== undefined) await this.#transition
 
       if (this.#running === undefined) {
-        const running = this.#boot(storeId)
+        const generation = ++this.#runningGeneration
+        const running = this.#boot(storeId, generation)
         // A failed boot must not poison the instance: the next call retries.
         running.catch(() => {
           if (this.#running === running) this.#running = undefined
@@ -309,7 +345,7 @@ export const makeCheckpointerDurableObject = <TEnv>(
       return Date.now() - (this.#ctx.storage.kv.get<number>(LAST_ACTIVITY_KEY) ?? 0)
     }
 
-    #boot(storeId: string): Promise<Running> {
+    #boot(storeId: string, generation: number): Promise<Running> {
       const ctx = this.#ctx
       const resetPersistence = this.#resetPersistenceOnBoot
       this.#resetPersistenceOnBoot = false
@@ -319,6 +355,19 @@ export const makeCheckpointerDurableObject = <TEnv>(
         | undefined
       const bucket = env[options.bucketBinding] as CfTypes.R2Bucket | undefined
       const onStopped = (running: Running) => this.#stop(running, { resetPersistence: false })
+      const trackStaged = (staged: StagedVfsFile): StagedVfsFile => {
+        this.#stagedInFlight++
+        let released = false
+        return {
+          ...staged,
+          release: () => {
+            if (released === true) return
+            released = true
+            this.#stagedInFlight--
+            staged.release()
+          },
+        }
+      }
 
       const boot = Effect.gen(function* () {
         if (syncBackendNamespace === undefined) {
@@ -329,6 +378,8 @@ export const makeCheckpointerDurableObject = <TEnv>(
         }
 
         const start = performance.now()
+        // Copies of an earlier instance that was evicted mid-upload are never released by anyone else.
+        dropStagedVfsFiles(ctx.storage.sql)
         const getSyncBackendStub = () => syncBackendNamespace.get(syncBackendNamespace.idFromName(storeId))
         // Lives as long as this instance runs the checkpointer; closed when the leader stops.
         const scope = yield* Scope.make()
@@ -364,12 +415,14 @@ export const makeCheckpointerDurableObject = <TEnv>(
               ? {}
               : {
                   stage: (dbState: SqliteDb) =>
-                    stageVfsFile({
-                      sql: ctx.storage.sql,
-                      fileName: leader.stateFileName,
-                      // The pager's page count, read under the same lock, is what `sqlite3_serialize` would export.
-                      pageCount: dbState.select<{ page_count: number }>('PRAGMA page_count')[0]?.page_count ?? 0,
-                    }),
+                    trackStaged(
+                      stageVfsFile({
+                        sql: ctx.storage.sql,
+                        fileName: leader.stateFileName,
+                        // The pager's page count, read under the same lock, is what `sqlite3_serialize` would export.
+                        pageCount: dbState.select<{ page_count: number }>('PRAGMA page_count')[0]?.page_count ?? 0,
+                      }),
+                    ),
                 }),
           }),
           ...(options.trigger !== undefined ? { trigger: options.trigger } : {}),
@@ -377,6 +430,7 @@ export const makeCheckpointerDurableObject = <TEnv>(
         }).pipe(Effect.provide(leader.context), Scope.provide(scope))
 
         return {
+          generation,
           storeId,
           leader,
           checkpointer,
@@ -426,6 +480,7 @@ export const getCheckpointerStub = <T extends CheckpointerDoRpcInterface>({
   )
 
 interface Running {
+  readonly generation: number
   readonly storeId: string
   readonly leader: DoLeaderThread
   readonly checkpointer: Checkpointer

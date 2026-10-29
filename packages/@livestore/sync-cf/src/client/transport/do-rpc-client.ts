@@ -105,6 +105,7 @@ export const makeDoRpcSync =
           // `rpc-sub:` rows can outlive a backend reset; never splice events of another backend identity.
           const knownBackendId = backendIdHelper.get()
           if (Option.isSome(knownBackendId) === true && knownBackendId.value !== res.backendId) {
+            // Same convention as the server (`push.ts`, `pull.ts`): expected = backend's identity, received = ours.
             return yield* new BackendIdMismatchError({ expected: res.backendId, received: knownBackendId.value })
           }
           const batch = res.batch.filter((item) => item.eventEncoded.seqNum > lastDeliveredSeqNum)

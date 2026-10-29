@@ -144,8 +144,10 @@ export interface CheckpointerWakeInterface {
    *
    * `backendId` is the caller's current backend identity. A checkpointer that followed a different identity (the
    * backend was reset) discards its local copy and starts over, instead of waiting for its next pull to notice.
+   * `head` is the backend head at the time of the call; a checkpointer that stays behind it (e.g. because a live-pull
+   * callback was lost and no later push revealed the gap) re-pulls from its cursor.
    */
-  ensureRunning(storeId: string, options?: { backendId?: string }): Promise<void>
+  ensureRunning(storeId: string, options?: { backendId?: string; head?: number }): Promise<void>
 }
 
 export type SyncBackendOtelOptions =

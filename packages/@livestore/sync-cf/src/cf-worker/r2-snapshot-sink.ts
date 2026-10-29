@@ -1,6 +1,6 @@
 import { Snapshot, type SqliteDb } from '@livestore/common'
 import type { CfTypes } from '@livestore/common-cf'
-import { Effect } from '@livestore/utils/effect'
+import { Effect, Exit } from '@livestore/utils/effect'
 import { nanoid } from '@livestore/utils/nanoid'
 
 import { getManifestViaRpc, type SnapshotManifestRpcStub, trySnapshotPromise } from '../common/snapshot-rpc.ts'
@@ -31,7 +31,8 @@ export interface R2SnapshotSinkOptions {
    */
   stage?: (dbState: SqliteDb) => SnapshotBlobSource
   /**
-   * Multipart part size for streamed publication. R2 requires equal parts of at least 5 MiB (except the last).
+   * Multipart part size for streamed publication. R2 requires equal parts of at least 5 MiB (except the last), and it
+   * must be a multiple of the staged copy's `pageSize`.
    *
    * @default 5 MiB
    */
@@ -41,6 +42,8 @@ export interface R2SnapshotSinkOptions {
 /** A staged, consistent copy of a snapshot blob that can be read in ranges. */
 export interface SnapshotBlobSource {
   readonly byteLength: number
+  /** Reads must start at multiples of this; the part size has to be a multiple of it. */
+  readonly pageSize: number
   /** Reads `length` bytes at `offset` into a new buffer. Offsets are multiples of the part size. */
   readonly read: (offset: number, length: number) => Uint8Array<ArrayBuffer>
   /** Drops the staged copy. Called exactly once, after publication or discard. */
@@ -64,6 +67,9 @@ export interface SnapshotBlobSource {
  * the state database, and step 1 becomes a multipart upload streamed from the staged copy (sha256 computed on the fly
  * with `crypto.DigestStream`).
  *
+ * R2 does not verify a SHA-256 for multipart uploads (unlike the single `put` path), so streamed blobs rely on the
+ * manifest's digest alone: booting clients verify it and fall back to full replay on a mismatch.
+ *
  * @experimental
  */
 export const makeR2SnapshotSink = ({
@@ -75,6 +81,10 @@ export const makeR2SnapshotSink = ({
   stage,
   partSizeBytes = 5 * 1024 * 1024,
 }: R2SnapshotSinkOptions): Snapshot.SnapshotSink => {
+  if (stage !== undefined && (Number.isInteger(partSizeBytes) === false || partSizeBytes < R2_MIN_PART_BYTES)) {
+    throw new Error(`partSizeBytes must be an integer of at least ${R2_MIN_PART_BYTES} bytes, got ${partSizeBytes}`)
+  }
+
   const prune = Effect.fn('@livestore/sync-cf:r2-snapshot-sink:prune')(function* ({
     key,
     keep,
@@ -159,6 +169,12 @@ export const makeR2SnapshotSink = ({
     if (source.byteLength === 0) {
       return yield* new Snapshot.SnapshotError({ reason: 'internal', message: 'Staged snapshot is empty' })
     }
+    if (partSizeBytes % source.pageSize !== 0) {
+      return yield* new Snapshot.SnapshotError({
+        reason: 'internal',
+        message: `partSizeBytes ${partSizeBytes} is not a multiple of the staged page size ${source.pageSize}`,
+      })
+    }
 
     const objectKey = makeObjectKey(draft)
     const upload = yield* trySnapshotPromise('unavailable', `Failed to start snapshot upload ${objectKey}`, () =>
@@ -174,7 +190,11 @@ export const makeR2SnapshotSink = ({
       const parts: CfTypes.R2UploadedPart[] = []
       for (let offset = 0, partNumber = 1; offset < source.byteLength; offset += partSizeBytes, partNumber++) {
         // One part in memory at a time: read, hash, upload, drop.
-        const part = source.read(offset, Math.min(partSizeBytes, source.byteLength - offset))
+        const part = yield* Effect.try({
+          try: () => source.read(offset, Math.min(partSizeBytes, source.byteLength - offset)),
+          catch: (cause) =>
+            new Snapshot.SnapshotError({ reason: 'internal', message: 'Failed to read staged snapshot', cause }),
+        })
         yield* trySnapshotPromise('internal', 'Failed to hash snapshot part', () => hasher.write(part))
         parts.push(
           yield* trySnapshotPromise('unavailable', `Failed to upload snapshot part ${partNumber}`, () =>
@@ -189,10 +209,13 @@ export const makeR2SnapshotSink = ({
       )
       return toHex(new Uint8Array(hash))
     }).pipe(
-      Effect.tapError(() =>
-        trySnapshotPromise('unavailable', 'Failed to abort snapshot upload', () => upload.abort()).pipe(
-          Effect.ignore({ log: 'Warn' }),
-        ),
+      // Any non-success (failure, defect or interruption) leaves no half-finished multipart upload behind.
+      Effect.onExit((exit) =>
+        Exit.isSuccess(exit) === true
+          ? Effect.void
+          : trySnapshotPromise('unavailable', 'Failed to abort snapshot upload', () => upload.abort()).pipe(
+              Effect.ignore({ log: 'Warn' }),
+            ),
       ),
     )
 
@@ -236,6 +259,9 @@ const toHex = (bytes: Uint8Array) => {
   for (const byte of bytes) hex += byte.toString(16).padStart(2, '0')
   return hex
 }
+
+/** R2 multipart uploads need parts of at least 5 MiB, except the last. */
+const R2_MIN_PART_BYTES = 5 * 1024 * 1024
 
 /** R2 deletes at most 1000 keys per call. */
 const R2_MAX_DELETE_KEYS = 1000

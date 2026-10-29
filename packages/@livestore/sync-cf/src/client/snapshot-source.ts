@@ -121,9 +121,14 @@ export const makeHttpSnapshotSource =
         }
         yield* failUnlessOk(response, 'blob')
 
-        // Refuse a blob of the wrong size before buffering it.
+        // Refuse a blob of the wrong size before buffering it. With a content encoding the header counts encoded
+        // bytes, so the decoded size is checked by the caller instead.
         const contentLength = response.headers['content-length']
-        if (contentLength !== undefined && Number(contentLength) !== manifest.byteLength) {
+        if (
+          contentLength !== undefined &&
+          response.headers['content-encoding'] === undefined &&
+          Number(contentLength) !== manifest.byteLength
+        ) {
           return yield* new Snapshot.SnapshotError({
             reason: 'integrity',
             message: `Snapshot blob has ${contentLength} bytes, manifest expects ${manifest.byteLength}`,

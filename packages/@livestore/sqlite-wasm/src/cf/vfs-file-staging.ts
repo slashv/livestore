@@ -10,9 +10,12 @@ import { PAGE_SIZE } from './CloudflareDurableObjectVFS.ts'
 export interface StagedVfsFile {
   /** Size of the staged file, `pageCount * pageSize`. */
   readonly byteLength: number
+  /** Page size of the staged file; reads start at multiples of it. */
+  readonly pageSize: number
   /**
    * Reads `length` bytes at `offset` (both page aligned, except a shorter final read) from the staged copy into a new
-   * buffer. Missing pages read as zeros, like the VFS reads them.
+   * buffer. Throws if any page of the range is missing: a staged copy is complete by construction, so a missing page
+   * means the copy was dropped underneath the reader and must never be published (it would hash consistently).
    */
   readonly read: (offset: number, length: number) => Uint8Array<ArrayBuffer>
   /** Deletes the staged copy. Idempotent. */
@@ -27,7 +30,8 @@ export interface StagedVfsFile {
  * committed database. Pass the pager's `PRAGMA page_count` as `pageCount`; together with the fixed page size this makes
  * the staged bytes identical to what `sqlite3_serialize` returns for the same moment.
  *
- * Any copy left over from an interrupted earlier run is dropped first, so at most one staged copy exists.
+ * Copies are isolated by a random staging id, so concurrent copies never touch each other. Copies left over by an
+ * interrupted run are dropped with {@link dropStagedVfsFiles} (e.g. when the owning leader boots).
  */
 export const stageVfsFile = ({
   sql,
@@ -42,15 +46,7 @@ export const stageVfsFile = ({
   const filePath = vfsFilePath(fileName)
   const stagingId = crypto.randomUUID()
 
-  sql.exec(
-    `CREATE TABLE IF NOT EXISTS ${STAGING_TABLE} (
-      staging_id TEXT NOT NULL,
-      page_no INTEGER NOT NULL,
-      page_data BLOB NOT NULL,
-      PRIMARY KEY (staging_id, page_no)
-    )`,
-  )
-  sql.exec(`DELETE FROM ${STAGING_TABLE}`)
+  ensureStagingTable(sql)
   sql.exec(
     `INSERT INTO ${STAGING_TABLE} (staging_id, page_no, page_data)
       SELECT ?, page_no, page_data FROM vfs_pages WHERE file_path = ? AND page_no < ?`,
@@ -61,8 +57,27 @@ export const stageVfsFile = ({
 
   let released = false
 
+  // The VFS reads pages without a row as zeros. Materialize them in the copy, so the copy is dense (and identical to
+  // what SQLite would serialize) and readers can treat any missing row as a dropped copy.
+  const staged = sql
+    .exec<{ count: number }>(`SELECT COUNT(*) AS count FROM ${STAGING_TABLE} WHERE staging_id = ?`, stagingId)
+    .one().count
+  if (staged < pageCount) {
+    sql.exec(
+      `WITH RECURSIVE pages(page_no) AS (SELECT 0 UNION ALL SELECT page_no + 1 FROM pages WHERE page_no + 1 < ?)
+        INSERT INTO ${STAGING_TABLE} (staging_id, page_no, page_data)
+        SELECT ?, page_no, zeroblob(?) FROM pages
+        WHERE page_no NOT IN (SELECT page_no FROM ${STAGING_TABLE} WHERE staging_id = ?)`,
+      pageCount,
+      stagingId,
+      PAGE_SIZE,
+      stagingId,
+    )
+  }
+
   return {
     byteLength: pageCount * PAGE_SIZE,
+    pageSize: PAGE_SIZE,
     read: (offset, length) => {
       if (released === true) throw new Error('Staged VFS file was already released')
       if (offset % PAGE_SIZE !== 0) throw new Error(`Staged reads must be page aligned, got offset ${offset}`)
@@ -76,10 +91,15 @@ export const stageVfsFile = ({
         firstPage,
         endPage,
       )
+      let rows = 0
       for (const row of cursor) {
+        rows++
         const target = (row.page_no - firstPage) * PAGE_SIZE
         const page = new Uint8Array(row.page_data)
         out.set(page.subarray(0, Math.min(page.byteLength, length - target)), target)
+      }
+      if (rows !== endPage - firstPage) {
+        throw new Error(`Staged copy ${stagingId} is missing pages in [${firstPage}, ${endPage}): found ${rows}`)
       }
       return out
     },
@@ -91,7 +111,23 @@ export const stageVfsFile = ({
   }
 }
 
+/** Drops every staged copy, e.g. left over by a run that was interrupted before it released its copy. */
+export const dropStagedVfsFiles = (sql: CfTypes.SqlStorage): void => {
+  ensureStagingTable(sql)
+  sql.exec(`DELETE FROM ${STAGING_TABLE}`)
+}
+
 const STAGING_TABLE = 'vfs_snapshot_staging'
+
+const ensureStagingTable = (sql: CfTypes.SqlStorage) =>
+  sql.exec(
+    `CREATE TABLE IF NOT EXISTS ${STAGING_TABLE} (
+      staging_id TEXT NOT NULL,
+      page_no INTEGER NOT NULL,
+      page_data BLOB NOT NULL,
+      PRIMARY KEY (staging_id, page_no)
+    )`,
+  )
 
 /** Same mapping as the VFS uses from an opened file name to its `vfs_pages.file_path` key. */
 const vfsFilePath = (fileName: string) => new URL(fileName, 'file://localhost/').pathname

@@ -8,11 +8,12 @@ import {
   getCheckpointerStub,
   makeCheckpointerDurableObject,
 } from '@livestore/adapter-cloudflare'
-import { Snapshot } from '@livestore/common'
+import { Snapshot, type SqliteDb } from '@livestore/common'
 import { type ClientDoWithRpcCallback, setupDurableObjectWebSocketRpc } from '@livestore/common-cf'
 import type { CfDeclare } from '@livestore/common-cf/declare'
 import { type Store } from '@livestore/livestore'
 import { schema, tables } from '@livestore/livestore/internal/testing-utils'
+import { dropStagedVfsFiles, stageVfsFile } from '@livestore/sqlite-wasm/cf'
 import {
   type CfTypes,
   handleSnapshotRequest,
@@ -71,6 +72,12 @@ interface SyncDoProbe {
   closeWebSockets(): number
   getSnapshotContextProbe(): { backendId: string; head: number }
   markSnapshotManifestsStale(): number
+  stagingProbe(): {
+    denseRead: boolean
+    sparsePageIsZero: boolean
+    isolatedFromSecondCopy: boolean
+    droppedCopyThrows: boolean
+  }
 }
 
 interface TestClientDoProbe {
@@ -222,6 +229,52 @@ export class SyncBackendDO extends makeDurableObject({
     return this.#state.storage.sql.exec(
       `UPDATE "snapshot_manifests_${PERSISTENCE_FORMAT_VERSION}" SET backendId = 'stale-backend-id'`,
     ).rowsWritten
+  }
+
+  /**
+   * Exercises `stageVfsFile` against a sparse fake VFS file in this DO's storage: missing pages are staged as zeros,
+   * concurrent copies are isolated, and a dropped copy fails to read instead of reading zeros.
+   */
+  stagingProbe(): {
+    denseRead: boolean
+    sparsePageIsZero: boolean
+    isolatedFromSecondCopy: boolean
+    droppedCopyThrows: boolean
+  } {
+    const sql = this.#state.storage.sql
+    sql.exec(
+      'CREATE TABLE IF NOT EXISTS vfs_pages (file_path TEXT NOT NULL, page_no INTEGER NOT NULL, page_data BLOB NOT NULL, PRIMARY KEY (file_path, page_no))',
+    )
+    const pageSize = 8192
+    for (const pageNo of [0, 1, 3]) {
+      sql.exec(
+        'INSERT OR REPLACE INTO vfs_pages (file_path, page_no, page_data) VALUES (?, ?, ?)',
+        '/staging-probe.db',
+        pageNo,
+        new Uint8Array(pageSize).fill(pageNo + 1),
+      )
+    }
+
+    const first = stageVfsFile({ sql, fileName: 'staging-probe.db', pageCount: 4 })
+    const bytes = first.read(0, 4 * pageSize)
+    const second = stageVfsFile({ sql, fileName: 'staging-probe.db', pageCount: 4 })
+    const isolatedFromSecondCopy = first.read(0, pageSize)[0] === 1
+    second.release()
+    dropStagedVfsFiles(sql)
+    let droppedCopyThrows = false
+    try {
+      first.read(0, pageSize)
+    } catch {
+      droppedCopyThrows = true
+    }
+    first.release()
+
+    return {
+      denseRead: bytes[0] === 1 && bytes[pageSize] === 2 && bytes[3 * pageSize] === 4,
+      sparsePageIsZero: bytes.subarray(2 * pageSize, 3 * pageSize).every((byte) => byte === 0),
+      isolatedFromSecondCopy,
+      droppedCopyThrows,
+    }
   }
 
   /** DO-RPC live-pull subscriptions persisted for this store (all rows belong to this per-store DO). */
@@ -582,6 +635,66 @@ const handleSnapshotTestRequest = async ({
 
   if (url.pathname.endsWith('/snapshot-test/put-manifest') === true) {
     return json(await getSyncBackendStub().putSnapshotManifest(await request.text()))
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/staging-probe') === true) {
+    return json(await getSyncBackendStub().stagingProbe())
+  }
+
+  if (url.pathname.endsWith('/snapshot-test/publish-failing-stream') === true) {
+    // A staged source whose second part fails to read: the multipart upload must be aborted, nothing published, and
+    // the copy released.
+    let released = false
+    const sink = makeR2SnapshotSink({
+      bucket: env.SNAPSHOT_BUCKET,
+      storeId,
+      getSyncBackendStub,
+      stage: () => ({
+        byteLength: 12 * 1024 * 1024,
+        pageSize: 8192,
+        read: (offset, length) => {
+          if (offset > 0) throw new Error('staged copy dropped')
+          return new Uint8Array(length)
+        },
+        release: () => {
+          released = true
+        },
+      }),
+    })
+    const { context } = await getSyncBackendStub()
+      .getSnapshotContextProbe()
+      .then((probe) => ({ context: probe }))
+    // oxlint-disable-next-line typescript-eslint(no-unsafe-type-assertion) -- the fake stage ignores the database
+    const staged = sink.capture!(undefined as unknown as SqliteDb)
+    const result = await staged
+      .publish({
+        manifestVersion: 1,
+        storeId,
+        key: 'v1.failing-stream.test',
+        backendId: context.backendId,
+        seqNum: context.head,
+        createdAt: Date.now(),
+      })
+      .pipe(Effect.result, Effect.runPromise)
+    let tooSmallPartRejected = false
+    try {
+      makeR2SnapshotSink({
+        bucket: env.SNAPSHOT_BUCKET,
+        storeId,
+        getSyncBackendStub,
+        partSizeBytes: 1024 * 1024,
+        stage: () => {
+          throw new Error('unused')
+        },
+      })
+    } catch {
+      tooSmallPartRejected = true
+    }
+    return json({
+      failed: Result.isFailure(result) === true ? result.failure.reason : null,
+      released,
+      tooSmallPartRejected,
+    })
   }
 
   if (url.pathname.endsWith('/snapshot-test/put-orphan') === true) {

@@ -97,8 +97,8 @@ export const getSnapshotManifest = Effect.fn('@livestore/sync-cf:durable-object:
 
   return yield* Effect.try({
     try: () => {
-      ensureTable(ctx.storage.sql)
-      const row = readRow(ctx.storage.sql, { storeId, key })
+      // Reads never run DDL: a missing table simply means nothing was published yet.
+      const row = orIfMissingTable(() => readRow(ctx.storage.sql, { storeId, key }), undefined)
       return row !== undefined && row.backendId === backendId ? Option.some(row.manifest) : Option.none<string>()
     },
     catch: (cause) => new UnknownError({ cause, note: 'Failed to read snapshot manifest' }),
@@ -114,22 +114,22 @@ export const isSnapshotObjectServable = Effect.fn('@livestore/sync-cf:durable-ob
     const { storeId, backendId, ctx } = yield* DoCtx
 
     return yield* Effect.try({
-      try: () => {
-        ensureTable(ctx.storage.sql)
-        return (
-          ctx.storage.sql
-            .exec(
-              `SELECT 1 FROM "${snapshotManifestsTableName}" WHERE storeId = ? AND backendId = ?
+      try: () =>
+        orIfMissingTable(
+          () =>
+            ctx.storage.sql
+              .exec(
+                `SELECT 1 FROM "${snapshotManifestsTableName}" WHERE storeId = ? AND backendId = ?
                 AND (json_extract(manifest, '$.objectKey') = ? OR json_extract(previousManifest, '$.objectKey') = ?)
                 LIMIT 1`,
-              storeId,
-              backendId,
-              objectKey,
-              objectKey,
-            )
-            .toArray().length > 0
-        )
-      },
+                storeId,
+                backendId,
+                objectKey,
+                objectKey,
+              )
+              .toArray().length > 0,
+          false,
+        ),
       catch: (cause) => new UnknownError({ cause, note: 'Failed to check snapshot object' }),
     })
   },
@@ -139,22 +139,18 @@ export const isSnapshotObjectServable = Effect.fn('@livestore/sync-cf:durable-ob
  * Whether the sync backend has ever been initialized for `storeId` in this Durable Object. Used to reject manifests
  * for unknown stores on a cold instance, which would otherwise initialize its context from the manifest's store id.
  */
-export const hasStoreContext = (sql: DoCtxService['ctx']['storage']['sql'], storeId: string): boolean => {
-  try {
-    return sql.exec(`SELECT 1 FROM "${contextTable.sqliteDef.name}" WHERE storeId = ?`, storeId).toArray().length > 0
-  } catch {
-    // No context table yet: nothing was ever pushed or pulled here.
-    return false
-  }
-}
+export const hasStoreContext = (sql: DoCtxService['ctx']['storage']['sql'], storeId: string): boolean =>
+  // No context table yet means nothing was ever pushed or pulled here. Any other error is transient and propagates,
+  // so callers report it as unavailable rather than as a permanent rejection.
+  orIfMissingTable(
+    () => sql.exec(`SELECT 1 FROM "${contextTable.sqliteDef.name}" WHERE storeId = ?`, storeId).toArray().length > 0,
+    false,
+  )
 
 type ManifestRow = { backendId: string; seqNum: number; manifest: string }
 
-/** Storage handles whose manifest table exists, so reads don't re-run DDL. */
-const ensuredTables = new WeakSet<object>()
-
+/** Only writes create the table (rare); reads treat a missing table as empty, which also holds after `deleteAll`. */
 const ensureTable = (sql: DoCtxService['ctx']['storage']['sql']) => {
-  if (ensuredTables.has(sql) === true) return
   sql.exec(
     `CREATE TABLE IF NOT EXISTS "${snapshotManifestsTableName}" (
       storeId TEXT NOT NULL,
@@ -167,7 +163,15 @@ const ensureTable = (sql: DoCtxService['ctx']['storage']['sql']) => {
       PRIMARY KEY (storeId, key)
     ) strict`,
   )
-  ensuredTables.add(sql)
+}
+
+const orIfMissingTable = <A, B>(read: () => A, fallback: B): A | B => {
+  try {
+    return read()
+  } catch (error) {
+    if (error instanceof Error && error.message.toLowerCase().includes('no such table') === true) return fallback
+    throw error
+  }
 }
 
 const readRow = (
