@@ -1,7 +1,7 @@
-import { type SqliteDb, type MakeSqliteDb, Snapshot, sql, type SyncOptions } from '@livestore/common'
+import { type SqliteDb, type MakeSqliteDb, Snapshot, sql, type SyncOptions, UnknownError } from '@livestore/common'
 import { LeaderThreadCtx, makeLeaderThreadLayer, ShutdownChannel } from '@livestore/common/leader-thread'
 import {
-  type EventSequenceNumber,
+  EventSequenceNumber,
   Events,
   LiveStoreEvent,
   type LiveStoreSchema,
@@ -21,6 +21,7 @@ import {
   Layer,
   Schema,
   Scope,
+  Stream,
   WebChannel,
 } from '@livestore/utils/effect'
 
@@ -59,7 +60,7 @@ const uiStateSetEvent = (uiState as typeof uiState & State.SQLite.ClientDocument
   State.SQLite.ClientDocumentTableDefSymbol
 ].derived.setEventDef
 
-export const events = {
+const syncedEvents = {
   todoCreated: Events.synced({
     name: 'v1.TodoCreated',
     schema: Schema.Struct({ id: Schema.String, text: Schema.String, author: Schema.String }),
@@ -69,10 +70,12 @@ export const events = {
     name: 'v1.CounterIncremented',
     schema: Schema.Struct({ id: Schema.String, by: Schema.Int }),
   }),
-  uiStateSet: uiStateSetEvent,
 }
 
-const materializers = State.SQLite.materializers(events, {
+export const events = { ...syncedEvents, uiStateSet: uiStateSetEvent }
+
+// The client document's set event gets its materializer from `makeState`; only the synced events need one here.
+const materializers = State.SQLite.materializers(syncedEvents, {
   'v1.TodoCreated': ({ id, text, author }) => todos.insert({ id, text, author }).onConflict('id', 'replace'),
   'v1.TodoCompleted': ({ id }) => todos.update({ completed: true }).where({ id }),
   'v1.CounterIncremented': ({ id, by }) => [
@@ -84,6 +87,45 @@ const materializers = State.SQLite.materializers(events, {
 export const tables = { todos, counters, uiState }
 
 export const schema = makeSchema({ state: State.SQLite.makeState({ tables, materializers }), events })
+
+/** A synced event only the "v2" schema knows: older readers treat it as an unknown event. */
+export const auditLogged = Events.synced({
+  name: 'v1.AuditLogged',
+  schema: Schema.Struct({ id: Schema.String, note: Schema.String }),
+})
+
+const auditLog = State.SQLite.table({
+  name: 'auditLog',
+  columns: {
+    id: State.SQLite.text({ primaryKey: true }),
+    note: State.SQLite.text({ default: '' }),
+  },
+})
+
+/**
+ * Two schema generations for long-running scenarios: `v2` adds a table and a new event (`v1.AuditLogged`), so it has a
+ * different snapshot key, and `v1` readers see the new event as unknown. Both ignore unknown events silently.
+ */
+export const makeVersionedSchemas = (
+  unknownEventHandling: { strategy: 'ignore' } | { strategy: 'warn' } = { strategy: 'ignore' },
+) => {
+  const v1 = makeSchema({ state: State.SQLite.makeState({ tables, materializers }), events, unknownEventHandling })
+  const v2Materializers = {
+    ...materializers,
+    ...State.SQLite.materializers(
+      { auditLogged },
+      {
+        'v1.AuditLogged': ({ id, note }) => auditLog.insert({ id, note }).onConflict('id', 'replace'),
+      },
+    ),
+  }
+  const v2 = makeSchema({
+    state: State.SQLite.makeState({ tables: { ...tables, auditLog }, materializers: v2Materializers }),
+    events: { ...events, auditLogged },
+    unknownEventHandling,
+  })
+  return { v1, v2 }
+}
 
 /** Same tables and events plus one new table: a state schema change that produces a new snapshot key. */
 export const makeSchemaWithExtraTable = () => {
@@ -120,6 +162,8 @@ export interface BootedLeader {
   readonly clientId: string
   /** Closes the leader (simulated kill); the databases stay usable for a restart. */
   readonly shutdown: Effect.Effect<void>
+  /** Messages the leader sent on its shutdown channel, e.g. a sync failure that stopped its sync processor. */
+  readonly shutdownMessages: ReadonlyArray<unknown>
 }
 
 /**
@@ -147,12 +191,17 @@ export const bootLeader = ({
   storeId?: string
   syncOptions: SyncOptions | undefined
   leaderSchema?: LiveStoreSchema
-}): Effect.Effect<BootedLeader, unknown, Scope.Scope> =>
+}): Effect.Effect<BootedLeader, UnknownError, Scope.Scope> =>
   Effect.gen(function* () {
     const outer = yield* Effect.scope
     const scope = yield* Scope.fork(outer)
     const shutdownChannel = yield* WebChannel.queueChannelProxy({ schema: ShutdownChannel.All }).pipe(
       Scope.provide(scope),
+    )
+    const shutdownMessages: unknown[] = []
+    yield* Stream.fromQueue(shutdownChannel.sendQueue).pipe(
+      Stream.runForEach((message) => Effect.sync(() => shutdownMessages.push(message))),
+      Effect.forkIn(scope),
     )
     const context = yield* Layer.buildWithScope(
       makeLeaderThreadLayer({
@@ -167,13 +216,14 @@ export const bootLeader = ({
         shutdownChannel: shutdownChannel.webChannel,
       }).pipe(Layer.provide(makeSqliteServicesLayer(dbs)), Layer.provide(FetchHttpClient.layer)),
       scope,
-    )
+    ).pipe(UnknownError.mapToUnknownError)
 
     return {
       ctx: Context.get(context, LeaderThreadCtx),
       dbs,
       clientId,
       shutdown: Scope.close(scope, Exit.void),
+      shutdownMessages,
     }
   })
 
@@ -186,7 +236,7 @@ export const waitForUpstreamHead = (leader: BootedLeader, head: number, timeout:
   }).pipe(
     Effect.timeoutOrElse({
       duration: timeout,
-      onTimeout: () =>
+      orElse: () =>
         Effect.gen(function* () {
           const state = yield* leader.ctx.syncProcessor.syncState.get
           return yield* Effect.die(
@@ -208,16 +258,23 @@ export const waitForNoPending = (leader: BootedLeader, timeout: Duration.Input =
  * Canonical digest of all user-visible state: every schema table's rows ordered by primary key. Two clients at the
  * same position must produce the same digest.
  */
-export const stateDigest = (dbState: SqliteDb, digestSchema: LiveStoreSchema = schema) => {
+export const stateDigest = (
+  dbState: SqliteDb,
+  digestSchema: LiveStoreSchema = schema,
+  options?: { readonly excludeTables?: ReadonlyArray<string> },
+) => {
   const tableNames = [...digestSchema.state.sqlite.tables.keys()]
     .filter((name) => SystemTables.isStateSystemTable(name) === false)
+    .filter((name) => options?.excludeTables?.includes(name) !== true)
     .toSorted()
   const content = tableNames.map((name) => [name, dbState.select(sql`SELECT * FROM "${name}" ORDER BY 1`)] as const)
   return Snapshot.sha256Hex(new TextEncoder().encode(JSON.stringify(content)))
 }
 
 export const stateHeadOf = (dbState: SqliteDb) =>
-  dbState.select<SystemTables.StateHeadMetaRow>(SystemTables.stateHeadMetaTable.where({ id: 1 }))[0]
+  dbState.select<SystemTables.StateHeadMetaRow>(
+    sql`SELECT * FROM ${SystemTables.STATE_HEAD_META_TABLE} WHERE id = 1`,
+  )[0]
 
 export const eventlogRowCount = (dbEventlog: SqliteDb) =>
   dbEventlog.select<{ count: number }>(sql`SELECT COUNT(*) AS count FROM ${SystemTables.EVENTLOG_META_TABLE}`)[0]!.count
@@ -261,15 +318,16 @@ export const nextLocalEvent = (
 ) =>
   Effect.gen(function* () {
     const { localHead } = yield* leader.ctx.syncProcessor.syncState.get
-    const seqNum: EventSequenceNumber.Client.Composite =
-      options?.clientOnly === true
-        ? { global: localHead.global, client: localHead.client + 1, rebaseGeneration: localHead.rebaseGeneration }
-        : { global: localHead.global + 1, client: 0, rebaseGeneration: localHead.rebaseGeneration }
+    // A synced event's parent is always the last global position (`client: 0`), even after client-only events.
+    const { seqNum, parentSeqNum } = EventSequenceNumber.Client.nextPair({
+      seqNum: localHead,
+      isClientOnly: options?.clientOnly === true,
+    })
     return LiveStoreEvent.Client.Encoded.make({
       name: event.name,
       args: event.args,
       seqNum,
-      parentSeqNum: localHead,
+      parentSeqNum,
       clientId: leader.clientId,
       sessionId: `${leader.clientId}-session`,
     })
