@@ -1,5 +1,6 @@
 import {
   type Scope,
+  Cause,
   Duration,
   Effect,
   Option,
@@ -164,22 +165,31 @@ export const makeCheckpointer = (
 
     /** Lets the sink copy the state at the consistent moment and stream it, without a full in-memory export. */
     const exportAndPublishStaged = (capture: NonNullable<SnapshotSink['capture']>) =>
-      Effect.gen(function* () {
-        const previous = (yield* SubscriptionRef.get(stats)).latestManifest
-        const exported = yield* exportSnapshotWith(capture)
-        const previousSeqNum = previousSeqNumFor(previous, exported.backendId)
-        if (exported.seqNum <= previousSeqNum) {
-          yield* exported.data.discard
-          return Option.none()
-        }
+      // The staged copy is owned by this flow until `publish` starts, and `publish` releases it on every exit. Keeping
+      // the hand-off uninterruptible means an interruption can never strand a staged copy in between.
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const previous = (yield* SubscriptionRef.get(stats)).latestManifest
+          // Decide inside the lock, before copying anything: staging a position that is already published is wasted
+          // work proportional to the state size.
+          const exported = yield* exportSnapshotWith((db, position) =>
+            position.seqNum > previousSeqNumFor(previous, position.backendId)
+              ? Option.some(capture(db))
+              : Option.none(),
+          )
+          if (Option.isNone(exported.data) === true) return Option.none()
 
-        const uploadStart = performance.now()
-        const manifest = yield* exported.data.publish(manifestDraft(exported)).pipe(UnknownError.mapToUnknownError)
-        const uploadMs = performance.now() - uploadStart
+          const previousSeqNum = previousSeqNumFor(previous, exported.backendId)
+          const uploadStart = performance.now()
+          const manifest = yield* restore(exported.data.value.publish(manifestDraft(exported))).pipe(
+            UnknownError.mapToUnknownError,
+          )
+          const uploadMs = performance.now() - uploadStart
 
-        // Hashing happens while streaming, so it is part of `uploadMs`.
-        return Option.some({ manifest, previousSeqNum, exportMs: exported.exportMs, hashMs: 0, uploadMs })
-      })
+          // Hashing happens while streaming, so it is part of `uploadMs`.
+          return Option.some({ manifest, previousSeqNum, exportMs: exported.exportMs, hashMs: 0, uploadMs })
+        }),
+      )
 
     const publish = Effect.gen(function* () {
       const totalStart = performance.now()
@@ -211,8 +221,10 @@ export const makeCheckpointer = (
 
       return Option.some(manifest)
     }).pipe(
-      Effect.tapError(() =>
-        SubscriptionRef.update(stats, (current) => ({ ...current, failedCount: current.failedCount + 1 })),
+      Effect.tapCause((cause) =>
+        Cause.hasInterruptsOnly(cause) === true
+          ? Effect.void
+          : SubscriptionRef.update(stats, (current) => ({ ...current, failedCount: current.failedCount + 1 })),
       ),
       Effect.withSpan('@livestore/common:checkpointer:publish'),
     )
@@ -249,12 +261,14 @@ export const makeCheckpointer = (
         lastDecision: decision,
       }))
 
-      if (decision._tag === 'publish') {
-        yield* publishSerialized.pipe(
-          Effect.catch((error) => Effect.logWarning('Checkpointer failed to publish a snapshot', error)),
-        )
-      }
-    })
+      if (decision._tag === 'publish') yield* publishSerialized
+    }).pipe(
+      // A failed attempt (including defects from a sink) must not end the loop; the next tick retries.
+      Effect.catchCauseIf(
+        (cause) => Cause.hasInterruptsOnly(cause) === false,
+        (cause) => Effect.logWarning('Checkpointer failed to evaluate or publish a snapshot', cause),
+      ),
+    )
 
     yield* evaluate.pipe(
       Effect.repeat(Schedule.spaced(options.pollInterval ?? Duration.seconds(1))),

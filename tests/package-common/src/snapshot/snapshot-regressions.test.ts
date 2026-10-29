@@ -4,7 +4,7 @@ import { makeMockSyncBackend, Snapshot, StateSqliteDb, type SyncOptions } from '
 import { Eventlog, LeaderThreadCtx, makeCheckpointer } from '@livestore/common/leader-thread'
 import { LiveStoreEvent, SystemTables } from '@livestore/common/schema'
 import { Vitest } from '@livestore/utils-dev/node-vitest'
-import { Effect, Exit, Option, Schema } from '@livestore/utils/effect'
+import { Effect, Exit, Option, Schema, SubscriptionRef } from '@livestore/utils/effect'
 import { PlatformNode } from '@livestore/utils/node'
 
 import {
@@ -203,6 +203,45 @@ Vitest.describe('snapshot boot regressions', () => {
       const restarted = yield* bootLeader({ makeSqliteDb, dbs: leader.dbs, clientId: 'cp', syncOptions: sync() })
       yield* waitForUpstreamHead(restarted, 15)
       expect(Exit.isFailure(yield* restarted.ctx.exportSnapshot.pipe(Effect.exit))).toBe(true)
+    }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test, { timeout: 60_000 })),
+  )
+  Vitest.live('the checkpointer loop survives a sink that dies and keeps publishing', (test) =>
+    Effect.gen(function* () {
+      const { makeSqliteDb, backend, store, sync } = yield* setup
+      yield* backend.advance(...makeWriterEvents({ count: 200 }))
+      const leader = yield* bootLeader({
+        makeSqliteDb,
+        dbs: yield* makeClientDbs(makeSqliteDb),
+        clientId: 'checkpointer',
+        syncOptions: sync(),
+      })
+      yield* waitForUpstreamHead(leader, 200)
+
+      let calls = 0
+      const flakySink: Snapshot.SnapshotSink = {
+        ...store.sink,
+        publish: (args) =>
+          Effect.suspend(() => {
+            calls++
+            // A defect, not a typed failure: the loop must not die on it.
+            return calls === 1 ? Effect.die(new Error('sink exploded')) : store.sink.publish(args)
+          }),
+      }
+      const checkpointer = yield* makeCheckpointer({
+        schema,
+        storeId,
+        sink: flakySink,
+        trigger: { minIntervalMs: 0, minTailEvents: 1, alpha: 0 },
+        pollInterval: 20,
+      }).pipe(provideLeader(leader))
+
+      while (Option.isNone((yield* SubscriptionRef.get(checkpointer.stats)).latestManifest)) {
+        yield* Effect.sleep(20)
+      }
+      const stats = yield* SubscriptionRef.get(checkpointer.stats)
+      expect(calls).toBeGreaterThanOrEqual(2)
+      expect(stats.failedCount).toBeGreaterThanOrEqual(1)
+      expect(Option.map(stats.latestManifest, (m) => m.seqNum)).toEqual(Option.some(200))
     }).pipe(Effect.provide(PlatformNode.NodeFileSystem.layer), Vitest.withTestCtx(test, { timeout: 60_000 })),
   )
 })

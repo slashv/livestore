@@ -88,7 +88,7 @@ export interface Service {
    * lives in external storage use it to copy pages there without materializing the state in memory.
    */
   readonly exportSnapshotWith: <T>(
-    capture: (dbState: SqliteDb) => T,
+    capture: (dbState: SqliteDb, position: { readonly seqNum: number; readonly backendId: string }) => T,
   ) => Effect.Effect<StateSnapshotCapture<T>, UnknownError>
   /**
    * Serializes the state database between persist transactions. Exports taken while a transaction has yielded to other
@@ -229,7 +229,9 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
     const exportSnapshotWith: Service['exportSnapshotWith'] = Effect.fn(
       '@livestore/common:LeaderPersistence:exportSnapshot',
     )(
-      function* <T>(capture: (dbState: SqliteDb) => T) {
+      function* <T>(
+        capture: (dbState: SqliteDb, position: { readonly seqNum: number; readonly backendId: string }) => T,
+      ) {
         const start = performance.now()
         const head = yield* stateHead.get.pipe(UnknownError.mapToUnknownError)
         const backendHead = Eventlog.getBackendHeadFromDb(dbEventlog)
@@ -259,7 +261,7 @@ export const make = ({ materializeEvent }: { materializeEvent: MaterializeEvent 
         }
 
         const cursorInfo = yield* Eventlog.getSyncBackendCursorInfoForDb(dbEventlog, { remoteHead: head.global })
-        const data = yield* Effect.try(() => capture(dbState))
+        const data = yield* Effect.try(() => capture(dbState, { seqNum: head.global, backendId: backendId.value }))
 
         return {
           data,
