@@ -1,174 +1,133 @@
 # Snapshot Boot
 
-> **Status: accepted as an experiment — folded into the intent layer (2026-10-29).** The durable contract lives in
-> [`context/02-system/03-sync/04-snapshots/`](../../context/02-system/03-sync/04-snapshots/spec.md), with the decision and
-> rejected alternatives in
-> [`.decisions/0001-snapshot-boot-over-compaction.md`](../../context/02-system/03-sync/04-snapshots/.decisions/0001-snapshot-boot-over-compaction.md),
-> the amended root requirements LS-R04 and LS-R06 in [`context/requirements.md`](../../context/requirements.md), and the
-> coined terms in [`context/ontology.md`](../../context/ontology.md). Parts not yet implemented at fold-in are tracked in
-> [`DELTA-001`](../../context/02-system/03-sync/04-snapshots/.delta/DELTA-001-snapshot-boot-implementation.md). Where the
-> shipped code differs from this text, the intent layer records the code. This RFC is retained as a historical record
-> (see the fold-in rule in `context/05-contributing/`).
-
-## Implementation Notes (2026-10-29)
-
-The implementation on the snapshot-boot branch differs from the proposal below in these points; the
-[spec](../../context/02-system/03-sync/04-snapshots/spec.md) is authoritative:
-
-- **Crash-safe install.** The state stays marked incomplete until the eventlog base is written, and only then is it
-  marked complete (a sixth step). A crash in between is wiped and repaired on the next boot.
-- **Rebuild.** Re-seed requires no client-only event below `p'` (one at `(p', c>0)` is replayed). Backfill first drops
-  rows left by an interrupted backfill, so it is idempotent, and treats a backend identity change as a reset.
-- **Export.** `LeaderThreadCtx.exportSnapshot` returns `{ bytes, seqNum, cursorMetadata, backendId, exportMs }` and is
-  refused for a leader that ever recorded a client-only event. `exportSnapshotWith(capture)` and the optional
-  `SnapshotSink.capture` add a streaming path. `exportState` gives every session-boot export the same lock.
-- **Ordering.** Manifests are ordered per backend identity: a sink rejects an older position of the same `backendId`,
-  and a new identity replaces the old manifest.
-- **Cloudflare.** Object keys URI-encode the store id and key:
-  `snapshots/<encodeURIComponent(storeId)>/<encodeURIComponent(key)>/<seqNum>-<id>.sqlite`. The blob route serves only
-  the current or previous manifest's blob. The checkpointer Durable Object streams its export from staged DO pages by
-  default (wasm heap ~17 MB at up to 521 MB of state); the buffered export is viable to about 30–45 MB. No Node host or
-  file-system sink ships; `makeCheckpointer` runs on any leader with any sink.
-- **Trigger.** The default `replayCostPerEventMs` is `0.5`, measured by the
-  [snapshot boot benchmarks](../perf/snapshot-boot-benchmarks.md).
-- **Remaining limit.** Client install still deserializes the whole snapshot in the wasm heap (~1.6 GB works, 2.16 GB
-  fails in Node).
-
-## Context
-
-- A LiveStore client derives its state by materializing every event in its eventlog. A client with an empty eventlog
-  pulls the store's whole history from the sync backend and replays it before its state is current.
-- The sync backend holds the totally ordered log of a store. It does not interpret events (LS.SYS.SYNC-R02).
-- The state database is a SQLite database. Its identity is a fingerprint of the state table ASTs; a different
-  fingerprint selects a fresh database that is rebuilt from the eventlog
-  ([schema management](../../context/02-system/02-state/01-sqlite/02-schema-management/spec.md)).
-- No schema hash covers materializer code. The state fingerprint covers table ASTs, and the event-definition hash covers
-  the args schema. By convention, an event whose behavior changes gets a new, versioned name.
-- `sync/next/` contains an experimental event compaction prototype (`compact-events.ts`) that is not part of the shipping
-  contract.
+> **Status: accepted as an experiment (2026-10-29).** Opt-in and experimental. The detailed contract lives in
+> [`context/02-system/03-sync/04-snapshots/`](../../context/02-system/03-sync/04-snapshots/spec.md), and the full
+> measurements in the [benchmark report](../perf/snapshot-boot-benchmarks.md).
 
 ## Problem
 
-The target workload for this proposal is many AI agents per system, on the order of 100, each a LiveStore client.
-Agents append events at high rates and run in fresh sandboxes that restart often. Every restart is a cold start with an
-empty eventlog, so every restart replays the complete history. Boot time and backend egress grow with the history
-length even when the state that the agent needs stays small.
+A LiveStore client builds its local database by replaying every event in the store's history. A new client, or one
+that starts with empty storage, downloads the entire history and replays it before it is ready. Startup time and
+download size therefore grow with the length of the history, even when the data the client actually needs stays small.
 
-The constraints:
+This hurts most in the workload that motivated this RFC: around 100 AI agents per system, each a LiveStore client,
+writing events at high rates and running in fresh sandboxes that restart often. Every restart starts from zero.
 
-- History must be kept. Inspection, future read models (LS-T04), and debugging depend on it, and the backend cannot
-  judge which events are safe to drop.
-- The sync provider contract and its realizations should not change for clients that do not opt in (LS.SYS-R06).
-- A failure in the new path must never make boot fail where it succeeds today.
+| History    | Download (event log) | Time to replay |
+| ---------- | -------------------- | -------------- |
+| 1M events  | ~400 MB              | ~5 minutes     |
+| 10M events | ~4 GB                | ~44 minutes    |
 
-## Proposed Solution
+We want startup to depend on how much data there is now, not on how much history led to it, without losing any history.
 
-Make startup cost depend on state size instead of history length. A **checkpointer** next to the sync backend
-periodically exports its state database as a **state snapshot**. A fresh client downloads the latest compatible snapshot,
-installs it as its state, and pulls only the events after it.
+## Solution
 
-### Client API
+**Download the result instead of replaying the history.**
+
+1. **A checkpointer keeps a recent copy of the database.** It is an ordinary LiveStore client running next to the sync
+   backend. It follows the event log, never writes to it, and every so often uploads a copy of its database, a
+   _snapshot_, together with the position in the log that the snapshot reflects.
+2. **A new client starts from the snapshot.** It downloads the latest snapshot, checks it against a hash, installs it
+   as its database, and then downloads and replays only the events written after it.
+3. **Nothing is deleted.** The full event log stays on the backend. Snapshots are a shortcut, not a replacement.
 
 ```ts
-makeWorker({
-  schema,
-  sync: {
-    backend: makeWsSync({ url }),
-    snapshot: {
-      source: makeHttpSnapshotSource({ url }), // experimental
-      timeout: '30 seconds',
-    },
-  },
-})
+sync: {
+  backend: makeWsSync({ url }),
+  snapshot: { source: makeHttpSnapshotSource({ url }) }, // opt in; without it nothing changes
+}
 ```
 
-`SyncOptions.snapshot` is the only opt-in. Without it nothing changes. (`makeHttpSnapshotSource` is the Cloudflare HTTP source; see the intent layer for the current API.)
+A few rules keep this safe:
 
-### Snapshot key and manifest
+- **Snapshots only match the same app version's data layout.** Each snapshot is labelled with a fingerprint of the
+  table layout and the event definitions. A client only uses a snapshot with a matching label, so a schema change
+  simply starts a new line of snapshots. The previous snapshot stays available for a while so that clients still on
+  the old version keep working during a rollout.
+- **Changing what an event does means giving it a new name.** The label does not cover the code that turns events
+  into table rows. LiveStore already asks for a new event name (for example `v2.TodoCreated`) when that behaviour
+  changes; snapshot boot relies on that convention.
+- **Any problem falls back to today's behaviour.** A missing, corrupt, outdated or slow snapshot is ignored and the
+  client replays the full history as before. A bad snapshot never stops a client from starting.
+- **Existing clients are untouched.** A client that already has local data keeps using it.
+- **Snapshots are published only when worthwhile.** The checkpointer publishes once replaying the new events would
+  cost a client more than about half of downloading a fresh snapshot, and at most every 10 seconds. A quiet store
+  publishes nothing.
 
-A snapshot is usable only by clients with the same **snapshot key**:
-`v<storageFormatVersion>.<stateSchemaHash>.<eventDefsHash>`, where `eventDefsHash` hashes every event name, its
-arg-schema hash, and its `clientOnly` flag. The manifest that points to a snapshot blob records the store, key,
-`backendId`, the global position `seqNum` of the last reflected event, the provider cursor metadata at that position,
-the blob's byte length and SHA-256, the creation time, and an opaque object key.
+On Cloudflare, snapshots are stored in R2, the sync Durable Object keeps track of the latest one, and the checkpointer
+runs as its own Durable Object. The building blocks also run in Node.
 
-Materializer code is not part of the key. The design relies on the convention that a materializer change ships under a
-new event name. Materializer changes are therefore forward-only: events already in the log keep their old effect. This
-is already true for persisted clients today, because a materializer-only change does not rebuild their state.
+## Results
 
-### Client boot
+Measured on an M1 Pro (details in the [benchmark report](../perf/snapshot-boot-benchmarks.md)).
 
-Only a client with an empty eventlog is eligible. Before the sync backend client is constructed, the leader:
+**Startup time for a new client**
 
-1. fetches the manifest for its key;
-2. downloads the blob and verifies size and SHA-256;
-3. imports it into a temporary database and checks that its state head equals `{ seqNum, 0 }` and that its
-   rebuild-complete marker is present;
-4. clears the materialization journal and replaces its state database with the snapshot;
-5. writes an **eventlog base** row (position, cursor metadata, key), the sync head, and the `backendId`.
+| History    | Full replay | From snapshot | Snapshot size |
+| ---------- | ----------- | ------------- | ------------- |
+| 1M events  | ~290 s      | 0.1–0.8 s     | 32–211 MB     |
+| 10M events | ~44 min     | 1.3 s         | 311 MB        |
 
-Any failure or timeout logs and falls back to today's full replay. Afterwards the client behaves like a client whose
-upstream head is the base. The eventlog base is a new, additive table in the eventlog database, so no storage format
-bump is needed.
+Events written after the snapshot still cost about 0.3 ms each, which is why the checkpointer publishes frequently.
 
-### Rebuild with a partial eventlog
+**AI agents restarting** (time for a restarted agent to catch up)
 
-If a snapshot-booted client must rebuild state (for example after a state schema change), its local eventlog lacks the
-events at and below the base. Two exact strategies:
+| Agents | Without snapshots | With snapshots |
+| ------ | ----------------- | -------------- |
+| 10     | 38 s              | 3 s            |
+| 25     | 50 s              | 5.3 s          |
+| 50     | 75 s              | 8.4 s          |
 
-- **Re-seed:** install the snapshot for the new key at a position `p'` between the base and the backend head (provided
-  no client-only event of this client lies at or below `p'`), then rematerialize local events after `p'`.
-- **Backfill:** pull the missing history from the backend, remove the base, and run a normal full replay. This needs
-  the network; offline, boot fails with a clear error.
+With 100 agents, a restart takes 17 s with snapshots, and the data stays correct at every scale tested.
 
-### Checkpointer
+**Cost of the checkpointer:** at 1,000 events per second it uses about half of one CPU core, publishes a new snapshot
+roughly every 10 seconds and stays within about 650 events of the latest. On Cloudflare it streams the export, so its
+memory stays around 17 MB for databases up to 521 MB.
 
-The checkpointer is an ordinary LiveStore leader that live-pulls and never pushes. It exports under a lock shared with
-leader persistence, so the export reflects exactly the confirmed events up to its head. A cost model decides when to
-publish:
+**Correctness:** test suites check that a client started from a snapshot ends up with exactly the same data as one
+that replayed the full history. They cover concurrent writers, unsynced local changes, schema changes, broken or
+missing snapshots, and crashes and restarts at every step.
 
-```
-tailEvents × replayCostPerEventMs > alpha × snapshotBytes × downloadCostPerByteMs
-```
+## Limitations
 
-with a minimum tail and a minimum interval. This keeps a client's boot within about `(1 + alpha)` of the snapshot
-download, and keeps the checkpointer's amortized cost per event roughly constant as state grows. A quiet store publishes
-nothing. Publication uploads the blob before moving the manifest pointer and keeps the replaced blob for a grace period.
-
-### Cloudflare realization
-
-- The sync Durable Object stores manifests (it knows the current `backendId` and enforces monotonic positions) and
-  exposes them to the checkpointer over DO RPC.
-- Blobs live in R2 under `snapshots/<storeId>/<key>/<seqNum>-<id>.sqlite`.
-- Opt-in worker routes `GET …/snapshot/manifest` and `GET …/snapshot/blob` serve clients, guarded by the same
-  `validatePayload` as the sync transports.
-- The checkpointer runs as a Durable Object named `${storeId}/${key}` with an alarm that keeps it awake while the log
-  moves. A Node checkpointer with an in-memory or file-system sink covers tests, benchmarks, and stores too large for a
-  Durable Object.
+- **Experimental and opt-in.** Running a checkpointer and storing snapshots is an extra cost for operators.
+- **The first offline start after a schema-changing app update needs the network.** A client that started from a
+  snapshot does not have the older history locally, so it cannot rebuild its database on its own. It needs either a
+  snapshot for the new version or the missing history. Until it is online, startup fails with a clear error. No local
+  data is lost. Running the new version's checkpointer before releasing the update keeps this short.
+- **Older history is not on the device.** On a client that started from a snapshot, reading the raw event history
+  (for example in devtools) starts at the snapshot.
+- **Snapshot size ceiling.** Installing a snapshot works up to about 1.6 GB of data and fails around 2 GB.
+- **Events after the snapshot still replay one by one.** If the checkpointer falls far behind, startup slows down
+  accordingly.
 
 ## Alternatives Considered
 
-- **Event compaction / log rewriting.** Replace-by-key stubs, prefix truncation, or local compaction of client-only
-  events. Safe compaction needs declared, checked laws on event definitions, stub-aware push confirmation, and cursor
-  handling, and it changes the eventlog's append-only contract and the provider contract. It also still replays every
-  surviving event and loses history. Not chosen.
-- **Incremental page-level replication** of the state database (a Litestream-like second sync layer). It adds a second
-  replication protocol coupled to SQLite page layout and the storage format. Full exports are simpler and verifiable
-  with one hash. Not chosen.
-- **Detecting materializer changes** by hashing materializer code. Function source is not a stable identity across
-  bundlers, closures, and platforms. Not chosen; the versioned event name convention is made explicit instead.
-- **Materializing inside the sync backend.** Breaks the schema-blind backend and needs a second materializer runtime.
-  Not chosen.
-- **Letting any client publish snapshots.** Clients hold pending and client-only events and may run different app
-  versions. Not chosen.
+The main alternative was **compacting the event log**: removing events that later events make redundant (for example,
+keeping only the last update to each record), or cutting off old history.
+
+|                                 | Compaction                                                                                   | Snapshots                                      |
+| ------------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Startup cost                    | Still replays every remaining event; shrinks the log but stays proportional to it            | Download the current data, replay a short tail |
+| History                         | Lost for good                                                                                | Kept in full                                   |
+| Work for app authors            | Must declare, per event, which events replace which, and keep that correct                   | None                                           |
+| Changes to sync and the backend | Large: the log is no longer append-only, and in-flight syncs must cope with rewritten ranges | Small, additive and opt-in                     |
+| Risk if something is wrong      | Silent, permanent data loss                                                                  | Falls back to a full replay                    |
+
+Compaction makes the history smaller, but snapshots attack startup cost directly without giving up anything that
+inspection, debugging or future features may need from the history.
+
+Other options we rejected:
+
+- **Syncing the database page by page** (like Litestream): a second sync system tied to SQLite internals. A whole-file
+  copy with one hash is simpler to get right.
+- **Building snapshots inside the sync backend:** the backend would have to understand events, which it deliberately
+  does not.
+- **Letting any client publish snapshots:** clients hold unsynced changes and may run different app versions. A
+  dedicated, read-only checkpointer only ever exports confirmed data.
 
 ## Open Questions
 
-- `store.events`, the events stream, and devtools on a snapshot-booted client start at the base. Should they read older
-  events through the backend?
-- How should a snapshot-booted client that is offline handle a state schema change (today: fail boot with a clear
-  error)?
-- The Cloudflare checkpointer keeps the state database in one Durable Object's memory. What is the size ceiling and the
-  path beyond it?
-- Should blobs be cached closer to clients (CDN, regional buckets), and how does that interact with the grace period?
-- What evidence graduates the feature from experimental?
+- What evidence should graduate snapshot boot from experimental to default?
+- Should snapshots be served through a CDN or regional storage, closer to clients?
+- Should a client that started from a snapshot be able to read older history from the backend on demand?
