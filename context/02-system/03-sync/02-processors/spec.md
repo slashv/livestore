@@ -497,7 +497,9 @@ checks it.
 - With `onError: 'ignore'` (the leader layer's default), a leader sync failure
   stops the processor without notifying the shutdown channel.
 - `cachedPullItems` in the leader's session pull path can grow without bound
-  (about 430 B per applied event; issue #1423). Headless leaders
+  (about 0.85 KB per applied event in the
+  [snapshot boot benchmarks](../../../../contributor-docs/perf/snapshot-boot-benchmarks.md);
+  issue #1423). Headless leaders
   (`makeLeaderThreadLayer({ headless: true })`, e.g. a snapshot checkpointer)
   serve no sessions and skip the cache.
 - Metrics for retry/queue health are not emitted (LS.SYS.OBS-DQ2).
