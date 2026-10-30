@@ -31,6 +31,21 @@ We want startup to depend on how much data there is now, not on how much history
    as its database, and then downloads and replays only the events written after it.
 3. **Nothing is deleted.** The full event log stays on the backend. Snapshots are a shortcut, not a replacement.
 
+```
+                    2. download newer events               follows the log
++------------------+               +-------------------+             +========================+
+| New client       |  <----------  | Sync backend      |  ---------> | Checkpointer (new)     |
+| e.g. an agent in |               | full event log,   |             | read-only client,      |
+| a fresh sandbox  |               | never shortened   |             | Durable Object or Node |
++------------------+               +-------------------+             +========================+
+         ^                                                                        |
+         |  1. download snapshot   +-------------------+   uploads a snapshot     |
+         +------------------------ | Object storage    | <------------------------+
+                                   | latest snapshot   |   every so often
+                                   | per app version   |
+                                   +-------------------+
+```
+
 ```ts
 sync: {
   backend: makeWsSync({ url }),
