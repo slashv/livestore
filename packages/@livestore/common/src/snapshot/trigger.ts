@@ -23,8 +23,8 @@ export interface TriggerParams {
   readonly alpha: number
   /**
    * Client cost of pulling and materializing one tail event, in milliseconds.
-   * Calibrated by the snapshot boot benchmarks (`contributor-docs/perf/snapshot-boot-benchmarks.md`): full replay
-   * costs about 0.5 ms of CPU per event on a Node leader.
+   * Calibrated by the snapshot boot benchmarks (`contributor-docs/perf/snapshot-boot-benchmarks.md`): a Node leader
+   * replays an event in about 0.3 ms on an M1 Pro, so the default leaves headroom for slower clients (browsers, phones).
    *
    * @default 0.5
    */
