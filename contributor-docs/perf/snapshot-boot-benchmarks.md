@@ -8,9 +8,367 @@ trigger constants follow from the measurements.
 
 Code, raw results (`results/*.jsonl`) and the runner live in
 [`tests/package-common/src/snapshot/bench/`](../../tests/package-common/src/snapshot/bench/).
-Measured at commit `328321b99` (branch `claude/snapshot-boot-6d51c8`).
+Current results: commit `593efb0ca` on a quiet machine, after the core fixes the
+first run motivated. The first run (commit `328321b99`, heavily loaded machine)
+is kept below as history.
 
 ## Summary
+
+From the quiet-machine runs at `593efb0ca` (M1 Pro, Node 24, wall clock):
+
+- **Snapshot boot scales with state, not history.** At 1M events a fresh client
+  reaches the head in 0.77 s (`append`, 211 MB state) or 0.13 s (`update`, 32
+  MB) instead of 302 s / 276 s for a full replay: 390× and 2,100× faster.
+  At 10M `update` events (311 MB state): 1.29 s vs 44 min (measured, single
+  process, headless leader).
+- **Full replay costs ~0.3 ms per event, linear,** in a single process now
+  (100k: 28–30 s; 1M: 276–302 s). Each tail event after a snapshot costs the
+  same 0.3–0.4 ms, so the tail dominates once it passes a few thousand events
+  (1M with a 100k tail: 30 s, still 10× faster than a full replay).
+- **Install is cheap with native hashing:** verify 1.2–1.8 GB/s (118 ms for
+  211 MB, was 1.5 s), import 340–440 MB/s. At 100 Mbit/s the download dominates
+  (`append` 1M: 17 s of 18 s); compressing blobs (~4× with gzip) is the next
+  lever.
+- **Checkpointer at 1k events/s for 30 min (headless):** 53% of one core, a
+  snapshot every ~10 s, lag ≤ 17 s, export + hash 0.27 s median. JS heap is
+  flat (~1 B/event); wasm heap and RSS track the state size (export buffer),
+  not the event count.
+- **Still open:** a regular (non-headless) leader retains ~0.85 KB per
+  replayed event in the session pull cache (~0.9 GB after 1M events, ~8.5 GB
+  at 10M, above V8's default heap); export still needs the whole database in
+  the 2 GiB wasm heap (2.16 GB fails), so `append` cannot be snapshotted at
+  10M with the Node export. The Cloudflare checkpointer's streamed export
+  keeps the Durable Object wasm heap at 16.6 MB up to a 521 MB state (local
+  workerd), so it is not bound by that ceiling.
+- **Trigger:** the new `replayCostPerEventMs: 0.5` default is ~1.7× the
+  measured cost on this machine, a reasonable margin for slower clients; the
+  other defaults stay. Checkpointer publish overhead is ~0.04 ms per event.
+
+## Results on a Quiet Machine After Core Fixes
+
+Commit `593efb0ca` (wa-sqlite statement leaks fixed, headless leaders without
+the session pull cache, native WebCrypto SHA-256, `replayCostPerEventMs: 0.5`).
+Same workload, backend and method as the first run (see [Setup](#setup)),
+except: the machine was quiet (load average 5–8.3 at every run start), runs
+were strictly sequential, every full replay ran in **one process**, and
+checkpointer leaders were `headless`. Raw results: `results/quiet/*.jsonl`.
+Wall-clock times are the headline numbers here.
+
+### Boot time
+
+- **Full replay: 0.28–0.30 ms per event, linear.** 100k events take 28–30 s,
+  1M take 276–302 s, for both mixes, in a single process (wall ≈ CPU, the
+  pipeline is single-threaded). **10M `update` events replayed in one process in
+  ~2,650 s (44 min, 0.265 ms/event)** with a headless leader (JS heap 56 MiB at
+  the end, wasm heap 549 MiB, peak RSS 2.4 GB, eventlog 4.0 GB, 4.1 GB of
+  JSON pulled); a regular leader would not fit (see Memory).
+- **Snapshot boot with tail 0** takes 87 ms (`append`, 21 MB) and 768 ms
+  (`append` 1M, 211 MB); 29 ms and 131 ms for `update` (4 MB, 32 MB). That is
+  340–390× faster than a full replay for `append` and 970–2,100× for `update`.
+  At **10M `update` events (311 MB state) the boot takes 1.29 s** (verify 171
+  ms, install 1.09 s), ~2,050× faster than the 44-minute replay; with a 1k /
+  10k / 100k tail 1.7 s / 4.7 s / 34 s.
+- **Each tail event costs 0.29–0.40 ms**, like a replayed event: a 1k tail adds
+  ~0.3 s, 10k ~3.2 s, 100k ~30 s. A 1M boot with a 100k tail is still 10×
+  faster than a full replay; with a 1k tail 270–650×.
+- **Network.** Event JSON is ~410–435 B/event (437 MB for 1M `append`). The
+  snapshot is half of that for `append` and 13× smaller for `update`. With
+  local work this small, the network dominates snapshot boots at 100 Mbit/s
+  (`append` 1M: 18 s, of which 17 s download) and is comparable at 1 Gbit/s
+  (2.5 s). Compressing blobs (gzip shrinks them ~4×) is now the biggest lever
+  for `append`-like stores.
+
+### Install breakdown (native hashing)
+
+Verify (WebCrypto SHA-256) runs at 1.2–1.8 GB/s: 118 ms for 211 MB, down from
+1.5 s with the pure-JS hash. Install (`dbState.import`) is now the largest
+local step at 340–440 MB/s (614 ms for 211 MB). Manifest and in-memory
+download are negligible. Tail 0 boot = verify + install + ~10 ms.
+
+### Memory
+
+- **Leak probe:** 0 B of JS and wasm heap per SQL call (was 506 B + 227 B).
+- **Client leaders still retain ~0.85 KB per replayed event** after GC: 139 MiB
+  of JS heap after a 100k replay, 883–912 MiB after 1M (both mixes). This is
+  the session pull cache (`cachedPullItems`), which a regular leader keeps.
+  Consequence: a non-headless client replaying 10M events in one session would
+  need ~8.5 GB of heap, above V8's default 4 GiB, so the 10M run above uses a
+  headless leader. Peak RSS of a 1M client replay is ~2.3 GB.
+- **Wasm heap after a 1M replay:** 29 MiB for both mixes (was growing ~1.4 KB per event).
+
+### Sustained checkpointer (1k events/s, 30 min, headless, wall clock)
+
+Heap and wasm growth are least-squares slopes over the samples taken after a forced GC (every 30 s), per applied event. Snapshot lag is the backend head minus the latest published snapshot.
+
+| base | rate ev/s | duration | applied   | published | median interval | median tail/publish | final snapshot | export / hash / upload (median) | snapshot lag median / max | leader behind max | CPU share | JS heap B/event | wasm heap B/event | RSS start → end    |
+| ---- | --------- | -------- | --------- | --------- | --------------- | ------------------- | -------------- | ------------------------------- | ------------------------- | ----------------- | --------- | --------------- | ----------------- | ------------------ |
+| 100k | 1k        | 30 min   | 1.799697M | 160       | 10.4 s          | 10.354k             | 398.9 MB       | 113 ms / 158 ms / 39 ms         | 6.235k / 17.401k          | 658               | 53%       | 1               | 252               | 472.2 → 1938.2 MiB |
+
+The checkpointer followed 1.8M events with **53% of one core** and never fell
+more than 658 events behind. With the calibrated trigger it published 160
+snapshots, every ~10.4 s (the `minIntervalMs` floor at this rate) at a median
+tail of ~10.4k events; the state grew from 21 MB to 399 MB, and export + hash
+stayed at 113 ms + 158 ms median (277 ms + 366 ms for the last, 399 MB
+snapshot). Snapshot lag: median 6.2k, max 17.4k events (17 s).
+
+**JS heap growth is ~1 B per applied event** (~51 → 53 MiB over 1.8M events,
+after GC). The wasm heap grew from 54 to 482 MiB and RSS from 0.5 to ~1.9 GB,
+but this tracks the **state size**, not the event count: `export()` serializes
+the whole database into the wasm heap (which never shrinks), and the benchmark's
+in-memory sink keeps the current blob plus copies (`arrayBuffers` 82 → 730
+MiB ≈ 1.8× the state). The benchmark backend stores nothing (events are
+generated), so there is no mock-backend share in these numbers.
+
+### Export ceiling (10M `append`)
+
+Still blocked in Node: a 2.16 GB database fails to export (`SqliteError`)
+with `SqliteDb.export()` on the current branch, and `append` reaches ~2.1 GB
+of state at 10M events. The Cloudflare streamed export below does not have
+this limit.
+
+### Checkpointer Durable Object limits
+
+From `tests/sync-provider/src/snapshot-do-limits.test.ts` on local workerd
+(`cf-http-do`, 32 KB rows; results in `results/quiet/do-limits.jsonl`). Local
+workerd does not enforce the 128 MB isolate limit, and its timers only advance
+on I/O, so the in-DO export/hash timings read 0; `publish wall` is measured from
+the test process.
+
+| export   | state  | catch-up | publish wall | upload (R2, in-DO) | wasm heap before → after export |
+| -------- | ------ | -------- | ------------ | ------------------ | ------------------------------- |
+| streamed | 54 MB  | 3.8 s    | 1.3 s        | 210 ms             | 16.6 → 16.6 MB                  |
+| streamed | 209 MB | 14.9 s   | 5.0 s        | 167 ms             | 16.6 → 16.6 MB                  |
+| streamed | 521 MB | 36.6 s   | 12.7 s       | 423 ms             | 16.6 → 16.6 MB                  |
+| buffered | 54 MB  | 3.8 s    | 1.0 s        | 274 ms             | 16.6 → 62.3 MB                  |
+| buffered | 209 MB | 14.9 s   | 3.6 s        | 102 ms             | 16.6 → 217.5 MB                 |
+| buffered | 521 MB | 37.8 s   | 10.5 s       | 239 ms             | 16.6 → 536.6 MB                 |
+
+The streamed export keeps the Durable Object's wasm heap at 16.6 MB regardless
+of state size, so the 2 GiB export ceiling and the 128 MB isolate limit no
+longer bound the Cloudflare checkpointer's export; the buffered export needs
+the whole database in the heap, as in Node. Publishing runs at ~41 MB/s
+(streamed) and 50–58 MB/s (buffered) end to end on local workerd.
+
+### Calibration check
+
+On this machine one event costs ~0.3 ms to replay, so the new default
+`replayCostPerEventMs: 0.5` is ~1.7× conservative for an M1 Pro under Node and
+leaves room for slower clients (browsers on OPFS, phones). The local part of
+`downloadCostPerByteMs` is now ~3e-6 ms/B (verify 0.6e-6, install 2.5e-6), so
+the network dominates and `0.00004` (≈ 25 MB/s end to end) still fits. The
+checkpointer's amortized publish cost is (export + hash ≈ 1.6e-6 ms/B) /
+(4e-5 events/B) ≈ **0.04 ms per appended event**, down from ~0.28 ms; no
+default changes are needed.
+
+### Tables
+
+Generated with `SNAPSHOT_BENCH_LOCAL=wall node summarize.ts` from `results/quiet`;
+scenario labels refer to [Scenarios and Hypotheses](#scenarios-and-hypotheses).
+
+#### Boot time and bytes (S1, S2, S3)
+
+Network columns: local wall-clock time plus modelled transfer (replay: `max(local, transfer)` since pages stream; snapshot: `transfer(blob) + max(local, transfer(tail))`).
+
+| mix    | events | boot                 | n   | wall median | wall p95 | speedup (wall) | CPU median | speedup (CPU) | event bytes | snapshot bytes | @100 Mbit/s | @1 Gbit/s |
+| ------ | ------ | -------------------- | --- | ----------- | -------- | -------------- | ---------- | ------------- | ----------- | -------------- | ----------- | --------- |
+| append | 100k   | full replay          | 5   | 30 s        | 30 s     | –              | 31 s       | –             | 43.5 MB     | –              | 30 s        | 30 s      |
+| append | 100k   | snapshot + 10k tail  | 5   | 3.3 s       | 3.4 s    | 9×             | 3.7 s      | 8×            | 4.4 MB      | 19.6 MB        | 4.8 s       | 3.4 s     |
+| append | 100k   | snapshot + 1k tail   | 5   | 436 ms      | 447 ms   | 68×            | 612 ms     | 51×           | 0.4 MB      | 21.4 MB        | 2.2 s       | 608 ms    |
+| append | 100k   | snapshot + 0 tail    | 5   | 87 ms       | 89 ms    | 342×           | 163 ms     | 190×          | 0.0 MB      | 21.4 MB        | 1.8 s       | 258 ms    |
+| append | 1M     | full replay          | 3   | 302 s       | 310 s    | –              | 309 s      | –             | 437.3 MB    | –              | 302 s       | 302 s     |
+| append | 1M     | snapshot + 100k tail | 3   | 31 s        | 32 s     | 10×            | 33 s       | 9×            | 43.7 MB     | 189.3 MB       | 46 s        | 33 s      |
+| append | 1M     | snapshot + 10k tail  | 3   | 4.0 s       | 4.0 s    | 76×            | 4.7 s      | 66×           | 4.4 MB      | 208.6 MB       | 21 s        | 5.6 s     |
+| append | 1M     | snapshot + 1k tail   | 3   | 1.1 s       | 1.1 s    | 273×           | 1.4 s      | 214×          | 0.4 MB      | 210.6 MB       | 18 s        | 2.8 s     |
+| append | 1M     | snapshot + 0 tail    | 3   | 768 ms      | 831 ms   | 393×           | 925 ms     | 334×          | 0.0 MB      | 210.6 MB       | 18 s        | 2.5 s     |
+| update | 100k   | full replay          | 5   | 28 s        | 29 s     | –              | 29 s       | –             | 40.8 MB     | –              | 28 s        | 28 s      |
+| update | 100k   | snapshot + 10k tail  | 5   | 3.1 s       | 3.1 s    | 9×             | 3.5 s      | 8×            | 4.1 MB      | 3.8 MB         | 3.4 s       | 3.1 s     |
+| update | 100k   | snapshot + 1k tail   | 5   | 318 ms      | 326 ms   | 87×            | 372 ms     | 79×           | 0.4 MB      | 4.2 MB         | 653 ms      | 352 ms    |
+| update | 100k   | snapshot + 0 tail    | 5   | 29 ms       | 31 ms    | 968×           | 38 ms      | 767×          | 0.0 MB      | 4.2 MB         | 364 ms      | 62 ms     |
+| update | 1M     | full replay          | 3   | 276 s       | 295 s    | –              | 289 s      | –             | 409.6 MB    | –              | 276 s       | 276 s     |
+| update | 1M     | snapshot + 100k tail | 3   | 29 s        | 29 s     | 10×            | 30 s       | 10×           | 41.0 MB     | 28.2 MB        | 31 s        | 29 s      |
+| update | 1M     | snapshot + 10k tail  | 3   | 3.3 s       | 3.4 s    | 84×            | 3.8 s      | 77×           | 4.1 MB      | 31.4 MB        | 5.8 s       | 3.6 s     |
+| update | 1M     | snapshot + 1k tail   | 3   | 423 ms      | 433 ms   | 653×           | 550 ms     | 525×          | 0.4 MB      | 31.9 MB        | 3.0 s       | 678 ms    |
+| update | 1M     | snapshot + 0 tail    | 3   | 131 ms      | 150 ms   | 2103×          | 199 ms     | 1454×         | 0.0 MB      | 31.9 MB        | 2.7 s       | 386 ms    |
+| update | 10M    | snapshot + 100k tail | 1   | 34 s        | 34 s     | –              | 34 s       | –             | 41.2 MB     | 307.6 MB       | 58 s        | 36 s      |
+| update | 10M    | snapshot + 10k tail  | 1   | 4.7 s       | 4.7 s    | –              | 5.1 s      | –             | 4.1 MB      | 310.9 MB       | 30 s        | 7.2 s     |
+| update | 10M    | snapshot + 1k tail   | 1   | 1.7 s       | 1.7 s    | –              | 1.7 s      | –             | 0.4 MB      | 311.4 MB       | 27 s        | 4.2 s     |
+| update | 10M    | snapshot + 0 tail    | 1   | 1.3 s       | 1.3 s    | –              | 1.2 s      | –             | 0.0 MB      | 311.4 MB       | 26 s        | 3.8 s     |
+
+Per-event full-replay cost (client wall and CPU per event):
+
+| mix    | events | n   | wall ms/event | CPU ms/event | wire bytes/event | state bytes/event | JS heap after replay (GC) | peak RSS |
+| ------ | ------ | --- | ------------- | ------------ | ---------------- | ----------------- | ------------------------- | -------- |
+| append | 100k   | 5   | 0.297         | 0.311        | 435              | 216               | 139 MiB                   | 719 MiB  |
+| append | 1M     | 3   | 0.302         | 0.309        | 437              | 210               | 912 MiB                   | 2264 MiB |
+| update | 100k   | 5   | 0.278         | 0.294        | 408              | 41                | 137 MiB                   | 714 MiB  |
+| update | 1M     | 3   | 0.276         | 0.289        | 410              | 31                | 883 MiB                   | 2276 MiB |
+
+#### Snapshot boot breakdown (S5)
+
+| mix    | events | tail | snapshot | manifest | download | verify (sha256) | install | after install (tail) | verify MB/s | install MB/s | tail ms/event |
+| ------ | ------ | ---- | -------- | -------- | -------- | --------------- | ------- | -------------------- | ----------- | ------------ | ------------- |
+| append | 100k   | 0    | 21.4 MB  | 0 ms     | 4 ms     | 14 ms           | 57 ms   | 9 ms                 | 1498        | 375          | –             |
+| append | 100k   | 1k   | 21.4 MB  | 0 ms     | 5 ms     | 14 ms           | 53 ms   | 367 ms               | 1522        | 401          | 0.367         |
+| append | 100k   | 10k  | 19.6 MB  | 0 ms     | 4 ms     | 13 ms           | 54 ms   | 3.2 s                | 1526        | 360          | 0.321         |
+| append | 1M     | 0    | 210.6 MB | 0 ms     | 28 ms    | 118 ms          | 614 ms  | 11 ms                | 1792        | 343          | –             |
+| append | 1M     | 1k   | 210.6 MB | 0 ms     | 35 ms    | 121 ms          | 563 ms  | 398 ms               | 1747        | 374          | 0.398         |
+| append | 1M     | 10k  | 208.6 MB | 0 ms     | 31 ms    | 115 ms          | 480 ms  | 3.4 s                | 1821        | 435          | 0.338         |
+| append | 1M     | 100k | 189.3 MB | 0 ms     | 20 ms    | 105 ms          | 483 ms  | 31 s                 | 1809        | 392          | 0.310         |
+| update | 100k   | 0    | 4.2 MB   | 0 ms     | 0 ms     | 3 ms            | 15 ms   | 11 ms                | 1272        | 274          | –             |
+| update | 100k   | 1k   | 4.2 MB   | 0 ms     | 0 ms     | 3 ms            | 13 ms   | 303 ms               | 1253        | 332          | 0.303         |
+| update | 100k   | 10k  | 3.8 MB   | 0 ms     | 0 ms     | 3 ms            | 11 ms   | 3.1 s                | 1329        | 352          | 0.307         |
+| update | 1M     | 0    | 31.9 MB  | 0 ms     | 6 ms     | 26 ms           | 90 ms   | 10 ms                | 1216        | 352          | –             |
+| update | 1M     | 1k   | 31.9 MB  | 0 ms     | 3 ms     | 19 ms           | 79 ms   | 319 ms               | 1680        | 401          | 0.319         |
+| update | 1M     | 10k  | 31.4 MB  | 0 ms     | 4 ms     | 20 ms           | 89 ms   | 3.2 s                | 1591        | 351          | 0.322         |
+| update | 1M     | 100k | 28.2 MB  | 0 ms     | 3 ms     | 17 ms           | 73 ms   | 29 s                 | 1668        | 387          | 0.287         |
+| update | 10M    | 0    | 311.4 MB | 0 ms     | 18 ms    | 171 ms          | 1.1 s   | 12 ms                | 1820        | 286          | –             |
+| update | 10M    | 1k   | 311.4 MB | 0 ms     | 25 ms    | 179 ms          | 1.1 s   | 382 ms               | 1740        | 279          | 0.382         |
+| update | 10M    | 10k  | 310.9 MB | 0 ms     | 18 ms    | 171 ms          | 1.1 s   | 3.4 s                | 1821        | 282          | 0.341         |
+| update | 10M    | 100k | 307.6 MB | 0 ms     | 18 ms    | 188 ms          | 1.0 s   | 33 s                 | 1634        | 308          | 0.326         |
+
+#### Checkpointer export cost vs state size (S6, from `prepare`)
+
+| mix    | seqNum | snapshot | export | hash   | upload (in-memory) | export MB/s | hash MB/s | error |
+| ------ | ------ | -------- | ------ | ------ | ------------------ | ----------- | --------- | ----- |
+| append | 90k    | 19.6 MB  | 25 ms  | 14 ms  | 7 ms               | 795         | 1358      |       |
+| append | 99k    | 21.4 MB  | 16 ms  | 16 ms  | 8 ms               | 1333        | 1300      |       |
+| append | 100k   | 21.4 MB  | 9 ms   | 10 ms  | 7 ms               | 2385        | 2152      |       |
+| update | 90k    | 3.8 MB   | 8 ms   | 3 ms   | 1 ms               | 471         | 1248      |       |
+| update | 99k    | 4.2 MB   | 3 ms   | 2 ms   | 2 ms               | 1458        | 2016      |       |
+| update | 100k   | 4.2 MB   | 2 ms   | 2 ms   | 1 ms               | 1844        | 2001      |       |
+| append | 900k   | 189.3 MB | 294 ms | 189 ms | 65 ms              | 644         | 999       |       |
+| append | 990k   | 208.6 MB | 130 ms | 207 ms | 201 ms             | 1608        | 1007      |       |
+| append | 999k   | 210.6 MB | 134 ms | 201 ms | 191 ms             | 1575        | 1050      |       |
+| append | 1M     | 210.6 MB | 72 ms  | 97 ms  | 266 ms             | 2916        | 2161      |       |
+| update | 900k   | 28.2 MB  | 73 ms  | 23 ms  | 7 ms               | 385         | 1254      |       |
+| update | 990k   | 31.4 MB  | 19 ms  | 27 ms  | 10 ms              | 1652        | 1166      |       |
+| update | 999k   | 31.9 MB  | 16 ms  | 32 ms  | 7 ms               | 2021        | 1009      |       |
+| update | 1M     | 31.9 MB  | 16 ms  | 15 ms  | 14 ms              | 2002        | 2069      |       |
+| update | 9.9M   | 307.6 MB | 3.3 s  | 284 ms | 419 ms             | 94          | 1083      |       |
+| update | 9.99M  | 310.9 MB | 240 ms | 293 ms | 380 ms             | 1294        | 1062      |       |
+| update | 9.999M | 311.4 MB | 279 ms | 289 ms | 335 ms             | 1115        | 1079      |       |
+| update | 10M    | 311.4 MB | 178 ms | 146 ms | 489 ms             | 1751        | 2127      |       |
+
+#### Export/import vs database size (S7)
+
+| database | export | sha256 | import (fs target) | export MB/s | sha256 MB/s | import MB/s | wasm heap after export | result                                        |
+| -------- | ------ | ------ | ------------------ | ----------- | ----------- | ----------- | ---------------------- | --------------------------------------------- |
+| 2.16 GB  | –      | –      | –                  | –           | –           | –           | 16.6 MiB               | export failed: ~@livestore/common/SqliteError |
+
+## Scenarios and Hypotheses
+
+Written before the first measurements; the verdict column was filled in after
+the first run. The current results revise S6 (see above).
+
+| ID  | Scenario                                                                                                                                                     | Hypothesis                                                                                                                                                                                                                           | Verdict                                                                                    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| S1  | Full replay of 100k, 1M and 10M events, two event mixes (`append`, `update`), fresh client                                                                   | Time and bytes grow linearly with history length; per-event cost is constant. State size depends on the mix, bytes pulled do not.                                                                                                    | Confirmed: 0.44–0.62 ms CPU/event, flat over 3M events                                     |
+| S2  | Snapshot boot at the same sizes with tails 0, 1k, 10k, 100k                                                                                                  | Time ≈ install(state bytes) + tail × per-event replay cost, independent of history length for a fixed state size; the `update` mix (state ≪ history) gains far more than `append`. A 100k tail costs ≈ 100k × the S1 per-event cost. | Confirmed: 200–1,300× less CPU at tail 0 (1M); tail dominates beyond a few thousand events |
+| S3  | Bytes on the wire: S1 event pages vs S2 snapshot + tail, with transfer times at 100 Mbit/s and 1 Gbit/s                                                      | Snapshot bytes are smaller than event bytes; for `update` by roughly the update/insert ratio.                                                                                                                                        | Confirmed: 2× (`append`) and 13× (`update`) fewer bytes                                    |
+| S4  | Breakdown of full-replay time: wire decode, arg decoding, materializer JS, state writes, journal (changeset) recording, eventlog bookkeeping, sync processor | SQLite (state + eventlog + journal) dominates; JS-side sync/Effect overhead is a minor share.                                                                                                                                        | Refuted: ~56% is sync processor / Effect / GC; SQLite ~42%                                 |
+| S5  | Snapshot boot breakdown: manifest, download, verify (sha256), install, tail                                                                                  | Install and verify are linear in bytes and fast (≥ 100 MB/s); with tail 0 the boot is dominated by them.                                                                                                                             | Confirmed; SHA-256 is the largest step                                                     |
+| S6  | Checkpointer under sustained load (100, 1k, 10k events/s) with the default trigger                                                                           | Export time and snapshot size grow linearly with state; publications are spaced by a tail proportional to the state size; snapshot lag stays bounded; CPU and memory stay flat.                                                      | Partly refuted: ~0.9 ms CPU/event live, memory grows ~6 KB/event                           |
+| S7  | Export/import ceiling vs state size                                                                                                                          | Export and import are linear in bytes up to the wasm heap limit.                                                                                                                                                                     | Confirmed: ceiling between 1.6 and 2.16 GB                                                 |
+
+## Setup
+
+### Hardware and environment
+
+| Item    | Value                                                                                       |
+| ------- | ------------------------------------------------------------------------------------------- |
+| CPU     | Apple M1 Pro, 10 cores (8 performance + 2 efficiency)                                       |
+| RAM     | 32 GiB                                                                                      |
+| OS      | macOS 27.0.1 (Darwin 27.0.0)                                                                |
+| Node    | v24.13.1, `NODE_ENV=production` (no dev-only materializer hashing), `LS_DEV` unset          |
+| SQLite  | `@livestore/wa-sqlite` Node wasm build (2 GiB heap cap), `NodeFS` VFS like the Node adapter |
+| Storage | APFS SSD; client databases are files (`fs`), except the breakdown runs (`:memory:`)         |
+
+**Load.** The current results ran strictly sequentially on a quiet machine
+(1-minute load average 5–8.3 at the start of every run, recorded per result);
+their wall-clock numbers are reliable. **The first run's machine was shared and
+heavily loaded**: other
+agent sessions, a CAD application and a VM kept the 1-minute load average
+between 40 and 370 on 10 cores. Each benchmark process got roughly 0.5–0.7 of a
+core. Wall-clock times are therefore inflated (typically 1.3–2×, up to 3× for
+I/O-heavy runs) and noisy. Every result also records the process CPU time
+(user + system), which is much less sensitive to that load; the calibration
+below uses CPU time. Ratios between snapshot boot and full replay are robust
+because both ran under the same conditions.
+
+### Workload
+
+`workload.ts` defines an agent store: `sessions`, `messages` (indexed by
+session) and `tasks` (indexed by session), and six synced events. Every event
+is a pure function of its sequence number, so any position of a 10M-event log
+can be served without storing it. Message text is 100–500 bytes (uniform),
+tool calls and task results carry JSON objects, 8 writer clients interleave.
+
+| Event                | `append` mix | `update` mix | Effect                                              |
+| -------------------- | -----------: | -----------: | --------------------------------------------------- |
+| `v1.SessionCreated`  |           1% |           1% | insert session with JSON metadata                   |
+| `v1.SessionUpdated`  |           9% |           4% | update status + JSON metadata                       |
+| `v1.MessageAppended` |          45% |           5% | insert message (100–500 B text, 30% tool-call JSON) |
+| `v1.MessageStreamed` |           0% |          50% | rewrite the text of one of the last 4 messages      |
+| `v1.TaskCreated`     |           5% |           2% | insert task                                         |
+| `v1.TaskUpdated`     |          40% |          38% | update a recent task (20% with result JSON)         |
+
+`append` models a transcript store: about half the events add a row, so state
+grows with history (~210 B of state per event). `update` models a streaming
+agent: most events rewrite existing rows, so state is far smaller than history
+(~30 B of state per event). Wire size is ~400 B/event (`append`) and ~375
+B/event (`update`) of JSON.
+
+### Method
+
+- **Backend.** `generator-backend.ts` implements `SyncBackend` over the
+  generated log with live pull, 256 events per page (the Cloudflare D1 page
+  size). Pages are serialized to JSON and parsed again, so the client pays the
+  wire decode. Generation and serialization time is measured and subtracted:
+  reported times are client time. "Event bytes" are the JSON page bytes
+  (uncompressed).
+- **Snapshots.** `boot.ts prepare` runs a checkpointer leader (the real
+  `makeCheckpointer`, `publishNow`) to `events − tail` for every tail and
+  caches blob + manifest on disk. `boot.ts snapshot` serves them from
+  `makeInMemorySnapshotStore`, so "download" is a memory copy; the network is
+  modelled from bytes (below).
+- **One measurement per process.** Each run warms up with a 3k-event replay on
+  in-memory databases, then times from leader layer construction until the
+  leader's upstream head reaches the backend head (polled every 2 ms).
+  Repetitions: 5 at 100k, 3 at 1M, 1 at 10M. Tables show the median and the
+  nearest-rank p95 (for n ≤ 5 that is the maximum).
+- **Network model.** Transfer time = bytes × 8 / bandwidth. A full replay
+  streams pages while it applies them, so its total is `max(local, transfer)`;
+  a snapshot boot downloads the blob before installing it and then streams the
+  tail: `transfer(snapshot) + max(local tail, transfer(tail))`. Local time
+  includes verify and install.
+- **Single-process replays (current).** Since the leak fixes, every full
+  replay runs in one process. Client boots use a regular leader; checkpointer
+  leaders (`prepare`, the sustained run) are `headless`.
+- **Segmented full replays (first run only).** Before the fixes a single leader
+  could not replay 1M+ events (see
+  [memory findings](#finding-1-leaders-retain-memory-per-event)). Full replays
+  of 1M and more events therefore restarted the client process every 250k events
+  on its persisted databases, exactly like a real client restart (the next
+  process resumes from the persisted cursor). Each restart costs a leader boot
+  of ~30 ms plus process start, which is excluded; reported time is the sum of
+  the segments.
+- **Breakdown (S4).** Three complementary methods: (1) a `SqliteDb` wrapper
+  (`timeDb` in `lib.ts`) times every SQLite call of the state and eventlog
+  databases and classifies it by SQL (user tables, journal, state head,
+  savepoints, eventlog), plus `session()`/`changeset()`/`finish()`; (2) variant
+  runs: no-op materializers (no state SQL, same decode/sync/eventlog path) and a
+  no-op session (no changeset recording); (3) micro-benchmarks for wire JSON
+  parse, arg decoding and statement building (`micro.ts`). The remainder of
+  client time after (1) and (3) is attributed to the sync processor, the
+  Effect runtime and GC. A CPU profile (`node --cpu-prof`) cross-checks it.
+
+## Historical: First Run on a Loaded Machine (`328321b99`)
+
+Everything in this section predates the leak fixes, native hashing and the
+calibrated trigger default. Its wall-clock numbers are inflated by machine
+load; its findings drove the fixes measured above.
+
+### Summary of the First Run
 
 > **Update after the runs below.** The three leaks listed under the blockers are
 > addressed on the branch (commits `eafc154b1`, `5b131b719`): the SQL text
@@ -57,115 +415,15 @@ reliable figures, wall-clock times are inflated.
   under load; 10M figures below are explicit extrapolations from the measured
   per-event and per-byte costs.
 
-## Scenarios and Hypotheses
-
-Written before the measurements; the verdict column was filled in afterwards.
-
-| ID  | Scenario                                                                                                                                                     | Hypothesis                                                                                                                                                                                                                           | Verdict                                                                                    |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
-| S1  | Full replay of 100k, 1M and 10M events, two event mixes (`append`, `update`), fresh client                                                                   | Time and bytes grow linearly with history length; per-event cost is constant. State size depends on the mix, bytes pulled do not.                                                                                                    | Confirmed: 0.44–0.62 ms CPU/event, flat over 3M events                                     |
-| S2  | Snapshot boot at the same sizes with tails 0, 1k, 10k, 100k                                                                                                  | Time ≈ install(state bytes) + tail × per-event replay cost, independent of history length for a fixed state size; the `update` mix (state ≪ history) gains far more than `append`. A 100k tail costs ≈ 100k × the S1 per-event cost. | Confirmed: 200–1,300× less CPU at tail 0 (1M); tail dominates beyond a few thousand events |
-| S3  | Bytes on the wire: S1 event pages vs S2 snapshot + tail, with transfer times at 100 Mbit/s and 1 Gbit/s                                                      | Snapshot bytes are smaller than event bytes; for `update` by roughly the update/insert ratio.                                                                                                                                        | Confirmed: 2× (`append`) and 13× (`update`) fewer bytes                                    |
-| S4  | Breakdown of full-replay time: wire decode, arg decoding, materializer JS, state writes, journal (changeset) recording, eventlog bookkeeping, sync processor | SQLite (state + eventlog + journal) dominates; JS-side sync/Effect overhead is a minor share.                                                                                                                                        | Refuted: ~56% is sync processor / Effect / GC; SQLite ~42%                                 |
-| S5  | Snapshot boot breakdown: manifest, download, verify (sha256), install, tail                                                                                  | Install and verify are linear in bytes and fast (≥ 100 MB/s); with tail 0 the boot is dominated by them.                                                                                                                             | Confirmed; SHA-256 is the largest step                                                     |
-| S6  | Checkpointer under sustained load (100, 1k, 10k events/s) with the default trigger                                                                           | Export time and snapshot size grow linearly with state; publications are spaced by a tail proportional to the state size; snapshot lag stays bounded; CPU and memory stay flat.                                                      | Partly refuted: ~0.9 ms CPU/event live, memory grows ~6 KB/event                           |
-| S7  | Export/import ceiling vs state size                                                                                                                          | Export and import are linear in bytes up to the wasm heap limit.                                                                                                                                                                     | Confirmed: ceiling between 1.6 and 2.16 GB                                                 |
-
-## Setup
-
-### Hardware and environment
-
-| Item    | Value                                                                                       |
-| ------- | ------------------------------------------------------------------------------------------- |
-| CPU     | Apple M1 Pro, 10 cores (8 performance + 2 efficiency)                                       |
-| RAM     | 32 GiB                                                                                      |
-| OS      | macOS 27.0.1 (Darwin 27.0.0)                                                                |
-| Node    | v24.13.1, `NODE_ENV=production` (no dev-only materializer hashing), `LS_DEV` unset          |
-| SQLite  | `@livestore/wa-sqlite` Node wasm build (2 GiB heap cap), `NodeFS` VFS like the Node adapter |
-| Storage | APFS SSD; client databases are files (`fs`), except the breakdown runs (`:memory:`)         |
-
-**The machine was shared and heavily loaded** while the benchmarks ran: other
-agent sessions, a CAD application and a VM kept the 1-minute load average
-between 40 and 370 on 10 cores. Each benchmark process got roughly 0.5–0.7 of a
-core. Wall-clock times are therefore inflated (typically 1.3–2×, up to 3× for
-I/O-heavy runs) and noisy. Every result also records the process CPU time
-(user + system), which is much less sensitive to that load; the calibration
-below uses CPU time. Ratios between snapshot boot and full replay are robust
-because both ran under the same conditions. Expect an idle M1 Pro to be faster
-than the wall-clock columns.
-
-### Workload
-
-`workload.ts` defines an agent store: `sessions`, `messages` (indexed by
-session) and `tasks` (indexed by session), and six synced events. Every event
-is a pure function of its sequence number, so any position of a 10M-event log
-can be served without storing it. Message text is 100–500 bytes (uniform),
-tool calls and task results carry JSON objects, 8 writer clients interleave.
-
-| Event                | `append` mix | `update` mix | Effect                                              |
-| -------------------- | -----------: | -----------: | --------------------------------------------------- |
-| `v1.SessionCreated`  |           1% |           1% | insert session with JSON metadata                   |
-| `v1.SessionUpdated`  |           9% |           4% | update status + JSON metadata                       |
-| `v1.MessageAppended` |          45% |           5% | insert message (100–500 B text, 30% tool-call JSON) |
-| `v1.MessageStreamed` |           0% |          50% | rewrite the text of one of the last 4 messages      |
-| `v1.TaskCreated`     |           5% |           2% | insert task                                         |
-| `v1.TaskUpdated`     |          40% |          38% | update a recent task (20% with result JSON)         |
-
-`append` models a transcript store: about half the events add a row, so state
-grows with history (~210 B of state per event). `update` models a streaming
-agent: most events rewrite existing rows, so state is far smaller than history
-(~30 B of state per event). Wire size is ~400 B/event (`append`) and ~375
-B/event (`update`) of JSON.
-
-### Method
-
-- **Backend.** `generator-backend.ts` implements `SyncBackend` over the
-  generated log with live pull, 256 events per page (the Cloudflare D1 page
-  size). Pages are serialized to JSON and parsed again, so the client pays the
-  wire decode. Generation and serialization time is measured and subtracted:
-  reported times are client time. "Event bytes" are the JSON page bytes
-  (uncompressed).
-- **Snapshots.** `boot.ts prepare` runs a checkpointer leader (the real
-  `makeCheckpointer`, `publishNow`) to `events − tail` for every tail and
-  caches blob + manifest on disk. `boot.ts snapshot` serves them from
-  `makeInMemorySnapshotStore`, so "download" is a memory copy; the network is
-  modelled from bytes (below).
-- **One measurement per process.** Each run warms up with a 3k-event replay on
-  in-memory databases, then times from leader layer construction until the
-  leader's upstream head reaches the backend head (polled every 2 ms).
-  Repetitions: 5 at 100k, 2–3 at 1M, 1 at 10M. Tables show the median and the
-  nearest-rank p95 (for n ≤ 5 that is the maximum).
-- **Network model.** Transfer time = bytes × 8 / bandwidth. A full replay
-  streams pages while it applies them, so its total is `max(local, transfer)`;
-  a snapshot boot downloads the blob before installing it and then streams the
-  tail: `transfer(snapshot) + max(local tail, transfer(tail))`. Local time
-  includes verify and install.
-- **Segmented full replays.** A single leader cannot replay 1M+ events (see
-  [memory findings](#finding-1-leaders-retain-memory-per-event)). Full replays
-  of 1M and 10M events therefore restart the client process every 250k events
-  on its persisted databases, exactly like a real client restart (the next
-  process resumes from the persisted cursor). Each restart costs a leader boot
-  of ~30 ms plus process start, which is excluded; reported time is the sum of
-  the segments.
-- **Breakdown (S4).** Three complementary methods: (1) a `SqliteDb` wrapper
-  (`timeDb` in `lib.ts`) times every SQLite call of the state and eventlog
-  databases and classifies it by SQL (user tables, journal, state head,
-  savepoints, eventlog), plus `session()`/`changeset()`/`finish()`; (2) variant
-  runs: no-op materializers (no state SQL, same decode/sync/eventlog path) and a
-  no-op session (no changeset recording); (3) micro-benchmarks for wire JSON
-  parse, arg decoding and statement building (`micro.ts`). The remainder of
-  client time after (1) and (3) is attributed to the sync processor, the
-  Effect runtime and GC. A CPU profile (`node --cpu-prof`) cross-checks it.
-
-## Results
+### Results
 
 The tables in this section are generated by `node summarize.ts` from
 `results/*.jsonl`; numbers quoted in the text come from them. Rows with `n=1`
 are single runs.
 
-### Tables
+#### Tables
 
-#### Boot time and bytes (S1, S2, S3)
+##### Boot time and bytes (S1, S2, S3)
 
 Local time on an idle machine is approximated by the CPU median. Network columns: local CPU time plus modelled transfer (replay: `max(local, transfer)` since pages stream; snapshot: `transfer(blob) + max(local, transfer(tail))`).
 
@@ -210,7 +468,7 @@ Per-event full-replay cost (client wall and CPU per event):
 | append | 100k   | 3   | 2.954         | 0.840        | 435              | 216               |
 | update | 100k   | 3   | 0.437         | 0.411        | 408              | 41                |
 
-#### Snapshot boot breakdown (S5)
+##### Snapshot boot breakdown (S5)
 
 | mix    | events | tail | snapshot | manifest | download | verify (sha256) | install | after install (tail) | verify MB/s | install MB/s | tail ms/event |
 | ------ | ------ | ---- | -------- | -------- | -------- | --------------- | ------- | -------------------- | ----------- | ------------ | ------------- |
@@ -233,7 +491,7 @@ Per-event full-replay cost (client wall and CPU per event):
 | update | 3.3M   | 10k  | 102.8 MB | 0 ms     | 481 ms   | 5.6 s           | 5.8 s   | 63 s                 | 18          | 18           | 6.329         |
 | update | 3.3M   | 100k | 100.1 MB | 0 ms     | 21 ms    | 2.5 s           | 1.2 s   | 293 s                | 39          | 83           | 2.927         |
 
-#### Checkpointer export cost vs state size (S6, from `prepare`)
+##### Checkpointer export cost vs state size (S6, from `prepare`)
 
 | mix    | seqNum | snapshot | export | hash   | upload (in-memory) | export MB/s | hash MB/s | error |
 | ------ | ------ | -------- | ------ | ------ | ------------------ | ----------- | --------- | ----- |
@@ -256,7 +514,7 @@ Per-event full-replay cost (client wall and CPU per event):
 | update | 3.299M | 103.3 MB | 5.5 s  | 6.9 s  | 453 ms             | 19          | 15        |       |
 | update | 3.3M   | 103.3 MB | 3.9 s  | 5.4 s  | 437 ms             | 27          | 19        |       |
 
-#### Export/import vs database size (S7)
+##### Export/import vs database size (S7)
 
 | database | export | sha256 | import (fs target) | export MB/s | sha256 MB/s | import MB/s | wasm heap after export | result                                        |
 | -------- | ------ | ------ | ------------------ | ----------- | ----------- | ----------- | ---------------------- | --------------------------------------------- |
@@ -267,7 +525,7 @@ Per-event full-replay cost (client wall and CPU per event):
 | 1.61 GB  | 12 s   | 32 s   | 20 s               | 137         | 51          | 80          | 1541.8 MiB             | ok                                            |
 | 2.16 GB  | –      | –      | –                  | –           | –           | –           | 16.6 MiB               | export failed: ~@livestore/common/SqliteError |
 
-#### Full-replay breakdown (S4)
+##### Full-replay breakdown (S4)
 
 memory storage, append mix, 100k events:
 
@@ -292,14 +550,14 @@ Variant runs (whole client, per event):
 | no changeset recording (no-op session) | 2432.2        | 480          | -251              |
 | no-op materializers (no state SQL)     | 1989.4        | 357          | -374              |
 
-#### Micro-benchmarks
+##### Micro-benchmarks
 
 | mix    | wire bytes/event | JSON parse µs/event | arg decode µs/event | build statements µs/event | sha256 noble MB/s | sha256 node:crypto MB/s |
 | ------ | ---------------- | ------------------- | ------------------- | ------------------------- | ----------------- | ----------------------- |
 | append | 403              | 1.07                | 0.60                | 15.5                      | 137               | 1873                    |
 | update | 375              | 0.85                | 0.32                | 19.3                      | 106               | 2133                    |
 
-#### Checkpointer under sustained load, wall clock (S6)
+##### Checkpointer under sustained load, wall clock (S6)
 
 | label   | mix    | base | rate ev/s | duration | published | median interval | median tail/publish | median snapshot | export+hash median | max snapshot lag | final leader behind | CPU share | heap growth |
 | ------- | ------ | ---- | --------- | -------- | --------- | --------------- | ------------------- | --------------- | ------------------ | ---------------- | ------------------- | --------- | ----------- |
@@ -310,7 +568,7 @@ Variant runs (whole client, per event):
 | default | append | 1M   | 1000      | 120 s    | 0         | –               | –                   | –               | –                  | 119.74k          | 113.703k            | 10%       | 117 MiB     |
 | default | append | 1M   | 10000     | 120 s    | 0         | –               | –                   | –               | –                  | 1.195658M        | 1.186442M           | 11%       | 149 MiB     |
 
-#### Checkpointer under sustained load, event time (S6)
+##### Checkpointer under sustained load, event time (S6)
 
 | trigger                               | base | rate ev/s | duration | published | median tail/publish | median snapshot | export / hash / upload (median) | max snapshot lag | CPU ms/event | core share at rate | heap growth |
 | ------------------------------------- | ---- | --------- | -------- | --------- | ------------------- | --------------- | ------------------------------- | ---------------- | ------------ | ------------------ | ----------- |
@@ -320,7 +578,7 @@ Variant runs (whole client, per event):
 | default                               | 100k | 10k       | 10 s     | 1         | 10k                 | 23.8 MB         | 259 ms / 725 ms / 6 ms          | 90k (9 s)        | 1.06         | 1058%              | 482 MiB     |
 | calibrated (replayCostPerEventMs 0.5) | 1M   | 1k        | 30 s     | 3         | 10k                 | 214.5 MB        | 2.1 s / 5.4 s / 726 ms          | 9k (9 s)         | 1.09         | 109%               | 148 MiB     |
 
-### S1: full replay scales linearly
+#### S1: full replay scales linearly
 
 CPU per event is flat: 0.44–0.62 ms for every 250k-event segment of the 3M
 `update` run, while the state grew from 8 MB to 90 MB and the eventlog to 1.2
@@ -334,7 +592,7 @@ machine load; it is not a property of the code.
 GB of JSON for either mix; the eventlog would be ~4.3 GB. A single process
 cannot do it today (Finding 1); restarting every 250k events works.
 
-### S2/S3: snapshot boot
+#### S2/S3: snapshot boot
 
 With tail 0, boot is verify + install + leader boot: 0.29 s CPU for 21 MB, 2.4 s
 for 211 MB (`append`), 0.11 s for 4 MB and 0.40 s for 32 MB (`update`). At
@@ -360,7 +618,7 @@ install plus the tail, ~26 s at 100 Mbit/s. `append` state would be ~2.1 GB,
 above the export ceiling (S7): no snapshot can be produced with the current
 export path.
 
-### S4: where full-replay time goes
+#### S4: where full-replay time goes
 
 Breakdown at 100k `append` events on in-memory databases (single runs, see the
 breakdown table): materializer JS (building SQL from the query builder) is 15
@@ -376,7 +634,7 @@ call) and 5% to the quadratic metadata lookup in
 `LeaderPersistence.materializeEvents` (Finding 3). **Verdict: refuted**: JS-side
 overhead, not SQLite, dominates.
 
-### S5: snapshot install
+#### S5: snapshot install
 
 Manifest fetch and download (memory copy) are negligible here. Verify
 (pure-JS SHA-256) runs at 80–160 MB/s in the `append` runs and is the largest
@@ -387,7 +645,7 @@ database) runs at 130–290 MB/s in the `append` runs.
 **Verdict: confirmed** (linear in bytes, ≥ 100 MB/s), but hashing should move to
 native code (13× faster).
 
-### S6: checkpointer
+#### S6: checkpointer
 
 Wall-clock runs (100/1k/10k events/s): on this machine the checkpointer process
 got 9–18% of a core, so it fell behind at 1k events/s and above; those rows
@@ -415,7 +673,7 @@ core share a dedicated machine needs:
 **Verdict: partly refuted**: spacing and export cost behave as modelled, but CPU
 per event is high and memory grows without bound.
 
-### S7: export/import ceiling
+#### S7: export/import ceiling
 
 Export (`sqlite3_serialize`) needs the whole database in the wasm heap, and
 import deserializes it there too. 1.61 GB exports and imports; 2.16 GB fails
@@ -423,9 +681,9 @@ with `SqliteError` (no crash). Throughput under load: export 140–600 MB/s,
 SHA-256 50–75 MB/s, import 80–160 MB/s. **Verdict: confirmed, with a hard
 ceiling at ~1.6–2 GB per snapshot** (lower in a Durable Object's 128 MB).
 
-## Findings
+### Findings
 
-### Finding 1: leaders retain memory per event
+#### Finding 1: leaders retain memory per event
 
 A leader's JS heap grows ~6 KB and its wasm heap ~1.4 KB per applied event,
 after GC, in every mode (bulk replay, tail, live). Three sources:
@@ -455,7 +713,7 @@ from `preparedStmts` (or keep a `Set` and delete on finalize), restore the
 (the `execSqlPrepared` TODO), and bound `cachedPullItems` by the lowest cursor
 of connected sessions.
 
-### Finding 2: export/import ceiling
+#### Finding 2: export/import ceiling
 
 `export()`/`import()` materialize the whole database in the wasm heap (S7).
 Snapshots above ~1.6 GB cannot be produced or installed in the Node build; the
@@ -464,7 +722,7 @@ VFS read into the blob store) would remove the ceiling. The in-progress
 `exportSnapshotWith` / VFS staging work in the working tree may address this;
 re-run `export-limits.ts` once it lands.
 
-### Finding 3: replay hot spots
+#### Finding 3: replay hot spots
 
 - `LeaderPersistence.materializeEvents` looks up each event's sync metadata
   with `pulledEvents.find(...)` (`LeaderPersistence.ts:103`): O(batch²) for
@@ -478,7 +736,7 @@ re-run `export-limits.ts` once it lands.
 - `sha256Hex` uses `@noble/hashes` (~140 MB/s); `node:crypto` does ~1.9 GB/s
   and WebCrypto `crypto.subtle.digest` is native in browsers, workers and Node.
 
-### Finding 4: trigger and checkpointer details
+#### Finding 4: trigger and checkpointer details
 
 - The first snapshot always passes `minIntervalMs` (`msSinceLastSnapshot =
 Infinity`), so `minIntervalMs: Infinity` does not stop the loop from
@@ -486,7 +744,7 @@ Infinity`), so `minIntervalMs: Infinity` does not stop the loop from
 - `PublishTimings.totalMs` includes waiting for the persistence lock; a
   separate `lockWaitMs` would make export cost readable.
 
-### Core hooks that would help measurement
+#### Core hooks that would help measurement
 
 - `snapshotBoot` timings end at install; a timestamp for "upstream head reached
   the backend head seen at boot" would give boot-to-ready without polling.
@@ -494,7 +752,7 @@ Infinity`), so `minIntervalMs: Infinity` does not stop the loop from
   to measure without tracing overhead.
 - `lockWaitMs` in `PublishTimings` (above).
 
-## Trigger Calibration
+### Trigger Calibration
 
 The trigger publishes when `tail × replayCostPerEventMs > alpha × bytes ×
 downloadCostPerByteMs`.
@@ -541,7 +799,7 @@ If checkpointer CPU matters more than boot latency, `alpha: 1` halves this at
 the price of boots up to 2× the snapshot download; the 214 MB event-time run
 shows the cost is real on a loaded host (7.5 s of export + hash per 10 s).
 
-## Caveats
+### Caveats
 
 - Shared, overloaded machine (load average 40–370): wall times are inflated
   and noisy; CPU time is less affected but still varies 0.5–1.1 ms/event when
@@ -567,6 +825,17 @@ shows the cost is real on a loaded host (7.5 s of export + hash per 10 s).
 
 ## Reproduce
 
+Current results (quiet machine, ~3 h sequential including the 10M run):
+
+```bash
+cd tests/package-common/src/snapshot/bench
+export NODE_ENV=production SNAPSHOT_BENCH_DIR=/path/with/20GB/free SNAPSHOT_BENCH_RESULTS=$PWD/results/quiet
+./run-all.sh quiet quiet10m
+SNAPSHOT_BENCH_LOCAL=wall node summarize.ts   # tables for the current section
+```
+
+First run (results in `results/`):
+
 ```bash
 cd tests/package-common/src/snapshot/bench
 export NODE_ENV=production SNAPSHOT_BENCH_DIR=/path/with/20GB/free
@@ -583,7 +852,7 @@ node segmented.ts replay --mix update --events 1000000 --segment 250000
 node boot.ts prepare  --mix append --events 100000 --tails 0,1000,10000
 node boot.ts snapshot --mix append --events 100000 --tail 1000
 node boot.ts replay   --mix append --events 100000 --storage memory --breakdown full   # or noop, nosession
-node checkpointer.ts  --mix append --base 100000 --rate 1000 --seconds 120 [--trigger '{"replayCostPerEventMs":0.5}']
+node checkpointer.ts  --mix append --base 100000 --rate 1000 --seconds 120 [--headless] [--trigger '{"replayCostPerEventMs":0.5}']
 node export-limits.ts --mib 1024
 node --expose-gc leak-probe.ts --calls 200000
 ```
