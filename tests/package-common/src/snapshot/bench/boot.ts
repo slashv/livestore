@@ -115,6 +115,7 @@ const fullReplay = ({
         syncOptions: { backend: backend.makeSyncBackend, livePull: true },
         clientId: 'fresh-client',
         storeId,
+        headless: args.headless === 'true',
       })
       leaderLayerMs += performance.now() - start
       yield* waitForHead(leader, segmentHead)
@@ -153,6 +154,8 @@ const replay = Effect.gen(function* () {
           },
   })
   const cpu = process.cpuUsage(cpuStart)
+  // With --expose-gc the reported memory is what the leader still retains after replaying.
+  ;(globalThis as { gc?: () => void }).gc?.()
   if (process.env.SNAPSHOT_BENCH_HEAPSNAPSHOT !== undefined) {
     ;(globalThis as { gc?: () => void }).gc?.()
     v8.writeHeapSnapshot(process.env.SNAPSHOT_BENCH_HEAPSNAPSHOT)
@@ -166,6 +169,7 @@ const replay = Effect.gen(function* () {
     pageSize,
     rep,
     breakdown: breakdown ?? 'none',
+    headless: args.headless === 'true',
     from: Number(args.from ?? 0),
     segments: result.segments,
     wallMs: result.wallMs,

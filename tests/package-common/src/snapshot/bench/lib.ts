@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -103,6 +104,7 @@ export const bootBenchLeader = ({
   syncOptions,
   clientId,
   storeId,
+  headless = false,
 }: {
   makeSqliteDb: MakeNodeSqliteDb
   dbs: { dbState: SqliteDb; dbEventlog: SqliteDb }
@@ -110,6 +112,8 @@ export const bootBenchLeader = ({
   syncOptions: SyncOptions
   clientId: string
   storeId: string
+  /** A leader without client sessions (checkpointer): skips the pull-item cache for late-joining sessions. */
+  headless?: boolean
 }): Effect.Effect<BenchLeader, UnknownError, Scope.Scope> =>
   Effect.gen(function* () {
     const scope = yield* Scope.fork(yield* Effect.scope)
@@ -127,6 +131,7 @@ export const bootBenchLeader = ({
         syncOptions,
         devtoolsOptions: { enabled: false },
         shutdownChannel: shutdownChannel.webChannel,
+        headless,
       }).pipe(Layer.provide(makeSqliteServicesLayer(dbs)), Layer.provide(FetchHttpClient.layer)),
       scope,
     )
@@ -250,7 +255,17 @@ export const timeDb = (
   })
 }
 
+/** Commit of the code under test, so results from different runs can be told apart. */
+const commit = (() => {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: import.meta.dirname, encoding: 'utf8' }).trim()
+  } catch {
+    return 'unknown'
+  }
+})()
+
 export const hardware = () => ({
+  commit,
   cpu: os.cpus()[0]?.model ?? 'unknown',
   loadavg1m: Math.round(os.loadavg()[0]! * 10) / 10,
   cores: os.cpus().length,

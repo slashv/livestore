@@ -78,6 +78,31 @@ phase() {
       node checkpointer.ts --clock virtual --mix append --base 100000 --rate 10000 --seconds 10 --label default
       node checkpointer.ts --clock virtual --mix append --base 1000000 --rate 1000 --seconds 30 --label calibrated --trigger "$calibrated"
       ;;
+    quiet)
+      # Re-run after the core leak fixes, on a quiet machine: single processes, strictly sequential.
+      # Writes to results/quiet (set SNAPSHOT_BENCH_RESULTS). Checkpointer leaders are headless.
+      for mix in append update; do node boot.ts prepare --mix "$mix" --events 100000 --tails 0,1000,10000 --headless; done
+      for mix in append update; do node boot.ts prepare --mix "$mix" --events 1000000 --tails 0,1000,10000,100000 --headless; done
+      for mix in append update; do
+        for tail in 0 1000 10000; do
+          for rep in 1 2 3 4 5; do node boot.ts snapshot --mix "$mix" --events 100000 --tail "$tail" --rep "$rep"; done
+        done
+        for tail in 0 1000 10000 100000; do
+          for rep in 1 2 3; do node boot.ts snapshot --mix "$mix" --events 1000000 --tail "$tail" --rep "$rep"; done
+        done
+      done
+      for mix in append update; do
+        for rep in 1 2 3 4 5; do node --expose-gc boot.ts replay --mix "$mix" --events 100000 --rep "$rep"; done
+        for rep in 1 2 3; do node --expose-gc boot.ts replay --mix "$mix" --events 1000000 --rep "$rep"; done
+      done
+      node --expose-gc leak-probe.ts --calls 200000
+      node export-limits.ts --mib 2048 || true
+      node --expose-gc checkpointer.ts --mix append --base 100000 --rate 1000 --seconds 1800 --headless --label sustained
+      ;;
+    quiet10m)
+      node --expose-gc boot.ts prepare --mix update --events 10000000 --tails 0,1000,10000,100000 --headless
+      for tail in 0 1000 10000 100000; do node boot.ts snapshot --mix update --events 10000000 --tail "$tail" --rep 1; done
+      ;;
     *)
       echo "unknown phase $1" >&2
       exit 1

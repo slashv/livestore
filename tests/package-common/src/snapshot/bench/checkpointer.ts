@@ -69,6 +69,7 @@ const program = Effect.gen(function* () {
     syncOptions: { backend: backend.makeSyncBackend, livePull: true, snapshot: { source: bootStore.makeSource } },
     clientId: 'checkpointer',
     storeId,
+    headless: args.headless === 'true',
   })
   yield* waitForHead(leader, base)
 
@@ -182,6 +183,9 @@ const program = Effect.gen(function* () {
       lastCpu = process.cpuUsage()
       lastSampleAt = performance.now()
       const leaderHead = (yield* leader.ctx.syncProcessor.syncState.get).upstreamHead.global
+      // Every 30th sample is taken after a full GC (run with --expose-gc), so heap growth per event is readable.
+      const collected = samples.length % 30 === 0 && (globalThis as { gc?: () => void }).gc !== undefined
+      if (collected === true) (globalThis as { gc?: () => void }).gc?.()
       const latestSeqNum = Option.match(stats.latestManifest, { onNone: () => base, onSome: (m) => m.seqNum })
       samples.push({
         tSec: Math.round((performance.now() - start) / 100) / 10,
@@ -192,6 +196,7 @@ const program = Effect.gen(function* () {
         snapshotLagEvents: base + appended - latestSeqNum,
         published: stats.publishedCount,
         cpuShare: (cpu.user + cpu.system) / 1000 / elapsed,
+        afterGc: collected,
         ...memorySnapshot(),
       })
     }
@@ -204,6 +209,7 @@ const program = Effect.gen(function* () {
   writeResult('checkpointer', {
     command: 'checkpointer',
     clock,
+    headless: args.headless === 'true',
     label,
     storage,
     mix,

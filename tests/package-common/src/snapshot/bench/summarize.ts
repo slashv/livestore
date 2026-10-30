@@ -114,19 +114,28 @@ bootGroups.sort((a, b) => a.mix.localeCompare(b.mix) || a.events - b.events || b
  * Full-replay CPU for (mix, events): measured runs when there are any, otherwise the per-event CPU of the closest
  * longer prepare replay scaled to `events` (marked `~`).
  */
-const fullReplayCpu = (mix: string, events: number): { ms: number; approx: boolean } | undefined => {
+const fullReplayCost = (
+  mix: string,
+  events: number,
+  metric: 'cpu' | 'wall',
+): { ms: number; approx: boolean } | undefined => {
   const measured = bootGroups.find((g) => g.mode === 'full replay' && g.mix === mix && g.events === events)
-  if (measured !== undefined) return { ms: median(measured.cpu), approx: false }
+  if (measured !== undefined) return { ms: median(metric === 'cpu' ? measured.cpu : measured.wall), approx: false }
   const reference = prepareReplays
     .filter((r) => r.mix === mix)
     .toSorted((a, b) => Math.abs(a.events - events) - Math.abs(b.events - events))[0]
   if (reference === undefined) return undefined
-  return { ms: ((reference.cpuUserMs + reference.cpuSystemMs) / reference.events) * events, approx: true }
+  const ms = metric === 'cpu' ? reference.cpuUserMs + reference.cpuSystemMs : reference.clientMs
+  return { ms: (ms / reference.events) * events, approx: true }
 }
+const speedup = (full: { ms: number; approx: boolean } | undefined, local: number) =>
+  full === undefined ? '–' : `${full.approx === true ? '~' : ''}${(full.ms / local).toFixed(0)}×`
+/** `wall` on a quiet machine, `cpu` (default) when the machine was loaded and wall time is inflated. */
+const localMetric = process.env.SNAPSHOT_BENCH_LOCAL === 'wall' ? 'wall' : 'cpu'
 
 out.push('### Boot time and bytes (S1, S2, S3)\n')
 out.push(
-  'Local time on an idle machine is approximated by the CPU median. Network columns: local CPU time plus modelled ' +
+  `Network columns: local ${localMetric === 'wall' ? 'wall-clock' : 'CPU'} time plus modelled ` +
     'transfer (replay: `max(local, transfer)` since pages stream; snapshot: `transfer(blob) + max(local, transfer(tail))`).\n',
 )
 out.push(
@@ -138,6 +147,7 @@ out.push(
       'n',
       'wall median',
       'wall p95',
+      'speedup (wall)',
       'CPU median',
       'speedup (CPU)',
       'event bytes',
@@ -146,13 +156,12 @@ out.push(
       '@1 Gbit/s',
     ],
     bootGroups.map((g) => {
-      const local = median(g.cpu)
+      const local = median(localMetric === 'wall' ? g.wall : g.cpu)
       const bytes = g.eventBytes + g.snapshotBytes
       const total = (mbit: number) =>
         g.mode === 'full replay'
           ? Math.max(local, transferMs(bytes, mbit))
           : transferMs(g.snapshotBytes, mbit) + Math.max(local, transferMs(g.eventBytes, mbit))
-      const full = fullReplayCpu(g.mix, g.events)
       return [
         g.mix,
         k(g.events),
@@ -160,10 +169,9 @@ out.push(
         String(g.n),
         s(median(g.wall)),
         s(p95(g.wall)),
-        s(local),
-        g.mode === 'full replay' || full === undefined
-          ? '–'
-          : `${full.approx === true ? '~' : ''}${(full.ms / local).toFixed(0)}×`,
+        g.mode === 'full replay' ? '–' : speedup(fullReplayCost(g.mix, g.events, 'wall'), median(g.wall)),
+        s(median(g.cpu)),
+        g.mode === 'full replay' ? '–' : speedup(fullReplayCost(g.mix, g.events, 'cpu'), median(g.cpu)),
         mb(g.eventBytes),
         g.snapshotBytes > 0 ? mb(g.snapshotBytes) : '–',
         s(total(100)),
@@ -196,7 +204,17 @@ if (prepareReplays.length > 0) {
 out.push('\nPer-event full-replay cost (client wall and CPU per event):\n')
 out.push(
   table(
-    ['mix', 'events', 'n', 'wall ms/event', 'CPU ms/event', 'wire bytes/event', 'state bytes/event'],
+    [
+      'mix',
+      'events',
+      'n',
+      'wall ms/event',
+      'CPU ms/event',
+      'wire bytes/event',
+      'state bytes/event',
+      'JS heap after replay (GC)',
+      'peak RSS',
+    ],
     [...groupBy(replays, (r) => `${r.mix}/${r.events}`).values()].map((rows) => [
       rows[0]!.mix,
       k(rows[0]!.events),
@@ -205,6 +223,8 @@ out.push(
       (median(rows.map((r) => r.cpuUserMs + r.cpuSystemMs)) / rows[0]!.events).toFixed(3),
       (median(rows.map((r) => r.eventBytes)) / rows[0]!.events).toFixed(0),
       (median(rows.map((r) => r.stateBytes)) / rows[0]!.events).toFixed(0),
+      rows[0]!.memory === undefined ? '–' : `${median(rows.map((r) => r.memory.heapUsedMiB as number)).toFixed(0)} MiB`,
+      `${median(rows.map((r) => r.peakRssMiB as number)).toFixed(0)} MiB`,
     ]),
   ),
 )
@@ -428,7 +448,8 @@ if (micro.length > 0) {
 
 // --- S6: checkpointer under load -------------------------------------------------------------------------------------
 const allCheckpointers = read('checkpointer').filter((r) => r.label !== 'test')
-const checkpointers = allCheckpointers.filter((r) => r.clock !== 'virtual')
+const checkpointers = allCheckpointers.filter((r) => r.clock !== 'virtual' && r.label !== 'sustained')
+const sustained = allCheckpointers.filter((r) => r.label === 'sustained')
 const virtualCheckpointers = allCheckpointers.filter((r) => r.clock === 'virtual')
 if (checkpointers.length > 0) {
   out.push('\n### Checkpointer under sustained load, wall clock (S6)\n')
@@ -510,6 +531,70 @@ if (virtualCheckpointers.length > 0) {
           r.cpuMsPerEvent.toFixed(2),
           `${(r.cpuShare * 100).toFixed(0)}%`,
           samples.length > 1 ? `${(samples.at(-1)!.heapUsedMiB - samples[0]!.heapUsedMiB).toFixed(0)} MiB` : '–',
+        ]
+      }),
+    ),
+  )
+}
+
+/** Least-squares slope of y over x. */
+const slope = (points: ReadonlyArray<readonly [number, number]>) => {
+  const n = points.length
+  const mx = points.reduce((t, [x]) => t + x, 0) / n
+  const my = points.reduce((t, [, y]) => t + y, 0) / n
+  const num = points.reduce((t, [x, y]) => t + (x - mx) * (y - my), 0)
+  const den = points.reduce((t, [x]) => t + (x - mx) ** 2, 0)
+  return den === 0 ? 0 : num / den
+}
+
+if (sustained.length > 0) {
+  out.push('\n### Sustained checkpointer, wall clock (S6)\n')
+  out.push(
+    'Heap and wasm growth are least-squares slopes over the samples taken after a forced GC (every 30 s), per applied ' +
+      'event. Snapshot lag is the backend head minus the latest published snapshot.\n',
+  )
+  out.push(
+    table(
+      [
+        'base',
+        'rate ev/s',
+        'duration',
+        'applied',
+        'published',
+        'median interval',
+        'median tail/publish',
+        'final snapshot',
+        'export / hash / upload (median)',
+        'snapshot lag median / max',
+        'leader behind max',
+        'CPU share',
+        'JS heap B/event',
+        'wasm heap B/event',
+        'RSS start → end',
+      ],
+      sustained.map((r) => {
+        const pubs = r.publishes as Row[]
+        const samples = r.samples as Row[]
+        const intervals = pubs.slice(1).map((p, i) => p.tSec - pubs[i]!.tSec)
+        const gcd = samples.filter((x) => x.afterGc === true)
+        const med = (key: string) => median(pubs.map((p) => p[key] as number))
+        const lags = samples.map((x) => x.snapshotLagEvents as number)
+        return [
+          k(r.base),
+          k(r.rate),
+          `${(r.seconds / 60).toFixed(0)} min`,
+          k(Math.round((samples.at(-1)!.leaderHead as number) - r.base)),
+          String(r.published),
+          intervals.length > 0 ? `${median(intervals).toFixed(1)} s` : '–',
+          pubs.length > 0 ? k(Math.round(med('tailEvents'))) : '–',
+          pubs.length > 0 ? mb(pubs.at(-1)!.byteLength) : '–',
+          pubs.length > 0 ? `${s(med('exportMs'))} / ${s(med('hashMs'))} / ${s(med('uploadMs'))}` : '–',
+          `${k(Math.round(median(lags)))} / ${k(Math.max(...lags))}`,
+          k(Math.max(...samples.map((x) => x.leaderBehind as number))),
+          `${(r.cpuShare * 100).toFixed(0)}%`,
+          gcd.length > 2 ? slope(gcd.map((x) => [x.leaderHead, x.heapUsedMiB * 2 ** 20] as const)).toFixed(0) : '–',
+          gcd.length > 2 ? slope(gcd.map((x) => [x.leaderHead, x.wasmHeapMiB * 2 ** 20] as const)).toFixed(0) : '–',
+          `${samples[0]!.rssMiB} → ${samples.at(-1)!.rssMiB} MiB`,
         ]
       }),
     ),
